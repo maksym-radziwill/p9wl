@@ -1,0 +1,197 @@
+/*
+ * compress.c - Tile compression for Plan 9 draw protocol
+ *
+ * LZ77-style row matching compression with special cases for
+ * solid colors and alpha-delta encoding.
+ *
+ * Note: With TILE_SIZE-aligned dimensions, all tiles should be full-size.
+ * Partial tile handling is kept as a safety net.
+ */
+
+#include <string.h>
+#include "compress.h"
+
+int compress_tile_data(uint8_t *dst, int dst_max, 
+                       uint8_t *raw, int bytes_per_row, int h) {
+    int raw_size = h * bytes_per_row;
+    
+    /* Check if all zeros */
+    int all_zero = 1;
+    for (int i = 0; i < raw_size; i += 4) {
+        if (*(uint32_t *)(raw + i) != 0) {
+            all_zero = 0;
+            break;
+        }
+    }
+    
+    if (all_zero) {
+        /* All zeros - super efficient encoding */
+        int out = 0;
+        
+        dst[out++] = 0x83;  /* 4 literal bytes */
+        dst[out++] = 0; dst[out++] = 0; dst[out++] = 0; dst[out++] = 0;
+        
+        dst[out++] = (31 << 2) | 0;
+        dst[out++] = 3;
+        dst[out++] = (23 << 2) | 0;
+        dst[out++] = 3;
+        
+        for (int row = 1; row < h; row++) {
+            dst[out++] = (31 << 2) | 0;
+            dst[out++] = 3;
+            dst[out++] = (27 << 2) | 0;
+            dst[out++] = 3;
+        }
+        return out;
+    }
+    
+    /* Check if solid color */
+    uint32_t first_pixel;
+    memcpy(&first_pixel, raw, 4);
+    int is_solid = 1;
+    for (int i = 4; i < raw_size; i += 4) {
+        uint32_t pixel;
+        memcpy(&pixel, raw + i, 4);
+        if (pixel != first_pixel) {
+            is_solid = 0;
+            break;
+        }
+    }
+    
+    int out = 0;
+    
+    if (is_solid) {
+        dst[out++] = 0x83;
+        memcpy(dst + out, raw, 4);
+        out += 4;
+        
+        dst[out++] = (31 << 2) | 0;
+        dst[out++] = 3;
+        dst[out++] = (23 << 2) | 0;
+        dst[out++] = 3;
+        
+        for (int row = 1; row < h; row++) {
+            dst[out++] = (31 << 2) | 0;
+            dst[out++] = 3;
+            dst[out++] = (27 << 2) | 0;
+            dst[out++] = 3;
+        }
+    } else {
+        /* Row-by-row with matching */
+        if (out + 1 + bytes_per_row > dst_max) return 0;
+        dst[out++] = 0x80 | (bytes_per_row - 1);
+        memcpy(dst + out, raw, bytes_per_row);
+        out += bytes_per_row;
+        
+        for (int row = 1; row < h; row++) {
+            uint8_t *curr = raw + row * bytes_per_row;
+            uint8_t *prev = raw + (row - 1) * bytes_per_row;
+            
+            if (memcmp(curr, prev, bytes_per_row) == 0) {
+                dst[out++] = (31 << 2) | 0;
+                dst[out++] = 63;
+                dst[out++] = (27 << 2) | 0;
+                dst[out++] = 63;
+            } else {
+                if (out + 1 + bytes_per_row > dst_max) return 0;
+                dst[out++] = 0x80 | (bytes_per_row - 1);
+                memcpy(dst + out, curr, bytes_per_row);
+                out += bytes_per_row;
+            }
+        }
+    }
+    
+    /* Only use if we saved at least 25% */
+    if (out >= raw_size * 3 / 4) return 0;
+    return out;
+}
+
+int compress_tile_direct(uint8_t *dst, int dst_max, 
+                         uint32_t *pixels, int stride, 
+                         int x1, int y1, int w, int h) {
+    /* Validate dimensions - allow partial tiles but not invalid ones */
+    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    
+    int bytes_per_row = w * 4;
+    
+    /* Copy tile to contiguous buffer */
+    uint8_t raw[TILE_SIZE * TILE_SIZE * 4];
+    for (int row = 0; row < h; row++) {
+        memcpy(raw + row * bytes_per_row, 
+               &pixels[(y1 + row) * stride + x1], bytes_per_row);
+    }
+    
+    return compress_tile_data(dst, dst_max, raw, bytes_per_row, h);
+}
+
+int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
+                              uint32_t *pixels, int stride,
+                              uint32_t *prev_pixels, int prev_stride,
+                              int x1, int y1, int w, int h) {
+    /* Validate dimensions - allow partial tiles but not invalid ones */
+    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    if (!prev_pixels) return 0;
+    
+    int bytes_per_row = w * 4;
+    uint8_t delta[TILE_SIZE * TILE_SIZE * 4];
+    int changed = 0;
+    
+    for (int row = 0; row < h; row++) {
+        uint32_t *curr = &pixels[(y1 + row) * stride + x1];
+        uint32_t *prev = &prev_pixels[(y1 + row) * prev_stride + x1];
+        uint32_t *out = (uint32_t *)(delta + row * bytes_per_row);
+        
+        for (int col = 0; col < w; col++) {
+            uint32_t c = curr[col] & 0x00FFFFFF;
+            uint32_t p = prev[col] & 0x00FFFFFF;
+            
+            if (c != p) {
+                out[col] = 0xFF000000 | c;
+                changed++;
+            } else {
+                out[col] = 0x00000000;
+            }
+        }
+    }
+    
+    if (changed == 0) return 0;
+    if (changed > (w * h * 3 / 4)) return 0;
+    
+    return compress_tile_data(dst, dst_max, delta, bytes_per_row, h);
+}
+
+int compress_tile_adaptive(uint8_t *dst, int dst_max,
+                           uint32_t *pixels, int stride,
+                           uint32_t *prev_pixels, int prev_stride,
+                           int x1, int y1, int w, int h) {
+    /* Validate dimensions - allow partial tiles but not invalid ones */
+    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    
+    uint8_t temp[1200];
+    
+    /* Try direct compression first */
+    int direct_size = compress_tile_direct(dst, dst_max, pixels, stride, x1, y1, w, h);
+    
+    /* If no prev_pixels, can only do direct */
+    if (!prev_pixels) {
+        return direct_size > 0 ? -direct_size : 0;
+    }
+    
+    /* Try alpha-delta compression */
+    int delta_size = compress_tile_alpha_delta(temp, sizeof(temp),
+                                               pixels, stride,
+                                               prev_pixels, prev_stride,
+                                               x1, y1, w, h);
+    
+    /* Compare: delta wins if delta_size + overhead < direct_size */
+    if (delta_size > 0) {
+        int delta_total = delta_size + ALPHA_DELTA_OVERHEAD;
+        
+        if (direct_size == 0 || delta_total < direct_size) {
+            memcpy(dst, temp, delta_size);
+            return delta_size;  /* positive = delta */
+        }
+    }
+    
+    return direct_size > 0 ? -direct_size : 0;
+}
