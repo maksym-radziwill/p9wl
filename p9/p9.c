@@ -21,7 +21,12 @@
 /* Write full buffer - TLS or plaintext */
 int p9_write_full(struct p9conn *p9, const uint8_t *buf, int len) {
     if (p9->ssl) {
-        return tls_write_full(p9->ssl, buf, len);
+        int r = tls_write_full(p9->ssl, buf, len);
+        if (r < 0) {
+            wlr_log(WLR_ERROR, "Connection lost - exiting");
+            exit(1);
+        }
+        return r;
     }
 
     int total = 0;
@@ -29,12 +34,12 @@ int p9_write_full(struct p9conn *p9, const uint8_t *buf, int len) {
         ssize_t w = write(p9->fd, buf + total, len - total);
         if (w < 0) {
             if (errno == EINTR) continue;
-            wlr_log(WLR_ERROR, "9P write error: %s", strerror(errno));
-            return -1;
+            wlr_log(WLR_ERROR, "9P write error: %s - exiting", strerror(errno));
+            exit(1);
         }
         if (w == 0) {
-            wlr_log(WLR_ERROR, "9P write: connection closed");
-            return -1;
+            wlr_log(WLR_ERROR, "9P write: connection closed - exiting");
+            exit(1);
         }
         total += w;
     }
@@ -44,7 +49,12 @@ int p9_write_full(struct p9conn *p9, const uint8_t *buf, int len) {
 /* Read exactly n bytes - TLS or plaintext */
 int p9_read_full(struct p9conn *p9, uint8_t *buf, int n) {
     if (p9->ssl) {
-        return tls_read_full(p9->ssl, buf, n);
+        int r = tls_read_full(p9->ssl, buf, n);
+        if (r < 0) {
+            wlr_log(WLR_ERROR, "Connection lost - exiting");
+            exit(1);
+        }
+        return r;
     }
 
     int total = 0;
@@ -52,12 +62,12 @@ int p9_read_full(struct p9conn *p9, uint8_t *buf, int n) {
         ssize_t r = read(p9->fd, buf + total, n - total);
         if (r < 0) {
             if (errno == EINTR) continue;
-            wlr_log(WLR_ERROR, "9P read error: %s", strerror(errno));
-            return -1;
+            wlr_log(WLR_ERROR, "9P read error: %s - exiting", strerror(errno));
+            exit(1);
         }
         if (r == 0) {
-            wlr_log(WLR_ERROR, "9P read: connection closed");
-            return -1;
+            wlr_log(WLR_ERROR, "9P read: connection closed - exiting");
+            exit(1);
         }
         total += r;
     }
