@@ -51,7 +51,7 @@
 #include "wayland/wayland.h"
 
 static void print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [options] <plan9-ip>[:<port>]\n", prog);
+    fprintf(stderr, "Usage: %s [options] <plan9-ip>[:<port>] [command [args...]]\n", prog);
     fprintf(stderr, "\nConnection options:\n");
     fprintf(stderr, "  -c <cert>      Path to server certificate (PEM format)\n");
     fprintf(stderr, "  -f <fp>        SHA256 fingerprint of server certificate (hex)\n");
@@ -65,6 +65,9 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -q             Quiet mode (errors only, default)\n");
     fprintf(stderr, "  -v             Verbose mode (info + errors)\n");
     fprintf(stderr, "  -d             Debug mode (all messages)\n");
+    fprintf(stderr, "\nCommand execution:\n");
+    fprintf(stderr, "  [command]      Command to execute after Wayland socket is ready\n");
+    fprintf(stderr, "                 WAYLAND_DISPLAY will be set to the socket path\n");
     fprintf(stderr, "\nTLS modes:\n");
     fprintf(stderr, "  No TLS flags   Plaintext connection (default port %d)\n", P9_PORT);
     fprintf(stderr, "  -c or -f       TLS with certificate pinning (default port %d)\n", P9_TLS_PORT);
@@ -83,6 +86,9 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "    %s -f aa11bb22cc33... 192.168.1.100\n", prog);
     fprintf(stderr, "\n  TLS insecure mode (logs fingerprint for later pinning):\n");
     fprintf(stderr, "    %s -k 192.168.1.100\n", prog);
+    fprintf(stderr, "\n  Launch a Wayland application:\n");
+    fprintf(stderr, "    %s 192.168.1.100 foot\n", prog);
+    fprintf(stderr, "    %s -S 2 192.168.1.100 firefox --no-remote\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
     fprintf(stderr, "9FRONT SERVER SETUP\n");
@@ -112,7 +118,8 @@ static void print_usage(const char *prog) {
 static int parse_args(int argc, char *argv[], const char **host, int *port,
                       const char **uname, float *scale,
                       enum wlr_log_importance *log_level,
-                      struct tls_config *tls_cfg) {
+                      struct tls_config *tls_cfg,
+                      char ***exec_argv, int *exec_argc) {
     static char host_buf[256];
 
     *host = NULL;
@@ -121,6 +128,8 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     *scale = 1.0f;  /* Default scale factor */
     *log_level = WLR_ERROR;  /* Default: errors only */
     memset(tls_cfg, 0, sizeof(*tls_cfg));
+    *exec_argv = NULL;
+    *exec_argc = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
@@ -158,9 +167,11 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
                 host_buf[len] = '\0';
                 *host = host_buf;
             }
-        } else {
-            /* Additional argument - could be port */
-            *port = atoi(argv[i]);
+        } else if (*exec_argc == 0) {
+            /* After host, remaining arguments are the command to execute */
+            *exec_argv = &argv[i];
+            *exec_argc = argc - i;
+            break;  /* Stop parsing, rest is the command */
         }
     }
 
@@ -374,9 +385,12 @@ int main(int argc, char *argv[]) {
     float scale = 1.0f;
     enum wlr_log_importance log_level = WLR_ERROR;
     struct tls_config tls_cfg = {0};
+    char **exec_argv = NULL;
+    int exec_argc = 0;
 
     /* Parse arguments */
-    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg) < 0) {
+    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg,
+                   &exec_argv, &exec_argc) < 0) {
         print_usage(argv[0]);
         return 1;
     }
@@ -530,6 +544,37 @@ int main(int argc, char *argv[]) {
         server_cleanup(&s);
         if (using_tls) tls_cleanup();
         return 1;
+    }
+
+    /* Fork and execute command if specified */
+    if (exec_argc > 0 && exec_argv != NULL) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            wlr_log(WLR_ERROR, "Failed to fork: %s", strerror(errno));
+            server_cleanup(&s);
+            if (using_tls) tls_cleanup();
+            return 1;
+        } else if (pid == 0) {
+            /* Child process - WAYLAND_DISPLAY is already set by setup_socket() */
+            /* Create null-terminated argv array for execvp */
+            char **child_argv = malloc((exec_argc + 1) * sizeof(char *));
+            if (!child_argv) {
+                _exit(1);
+            }
+            for (int i = 0; i < exec_argc; i++) {
+                child_argv[i] = exec_argv[i];
+            }
+            child_argv[exec_argc] = NULL;
+
+            wlr_log(WLR_INFO, "Executing: %s", exec_argv[0]);
+            execvp(exec_argv[0], child_argv);
+            /* If we get here, exec failed */
+            fprintf(stderr, "Failed to execute %s: %s\n", exec_argv[0], strerror(errno));
+            _exit(1);
+        } else {
+            /* Parent process continues */
+            wlr_log(WLR_INFO, "Spawned child process %d: %s", pid, exec_argv[0]);
+        }
     }
 
     /* Add input event handler to main loop */
