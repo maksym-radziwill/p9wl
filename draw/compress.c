@@ -25,84 +25,45 @@ static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
 static int workers_done;
 static int pool_running;
 
-static int lz77_compress_row(uint8_t *dst, int dst_max, uint8_t *raw, int pos, int row_end, int raw_start) {
+/* Hash table for fast match finding */
+#define HASH_BITS 10
+#define HASH_SIZE (1 << HASH_BITS)
+#define HASH_MASK (HASH_SIZE - 1)
+
+static inline uint32_t hash3(const uint8_t *p) {
+    return ((p[0] << 5) ^ (p[1] << 2) ^ p[2]) & HASH_MASK;
+}
+
+/*
+ * Fast LZ77 compression for a tile.
+ * Uses hash table for O(1) match finding instead of linear search.
+ */
+static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, int bytes_per_row) {
     int out = 0;
+    int h = raw_size / bytes_per_row;
     uint8_t lit[128];
     int nlit = 0;
     
-    while (pos < row_end) {
-        int best = 0, boff = 0;
-        int maxoff = pos - raw_start;
-        /* Reduce window to 256 bytes (4 rows) - enough for tile patterns */
-        if (maxoff > 256) maxoff = 256;
-        
-        int maxlen = row_end - pos;
-        if (maxlen > 34) maxlen = 34;
-        
-        /* Search backwards, check row-aligned offsets first (more likely matches) */
-        for (int off = 64; off <= maxoff; off += 64) {
-            int len = 0;
-            while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
-            if (len > best) { best = len; boff = off; }
-            if (best >= 16) goto found;  /* good enough */
-        }
-        
-        /* Then check other offsets */
-        for (int off = 1; off <= maxoff; off++) {
-            if ((off & 63) == 0) continue;  /* skip row-aligned, already checked */
-            int len = 0;
-            while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
-            if (len > best) { best = len; boff = off; }
-            if (best >= 12) break;  /* good enough for non-row match */
-        }
-        
-found:
-        if (best >= 3) {
-            if (nlit > 0) {
-                if (out + 1 + nlit > dst_max) return -1;
-                dst[out++] = 0x80 | (nlit - 1);
-                memcpy(dst + out, lit, nlit);
-                out += nlit;
-                nlit = 0;
-            }
-            if (out + 2 > dst_max) return -1;
-            dst[out++] = ((best - 3) << 2) | ((boff - 1) >> 8);
-            dst[out++] = (boff - 1) & 0xFF;
-            pos += best;
-        } else {
-            lit[nlit++] = raw[pos++];
-            if (nlit == 128 || pos == row_end) {
-                if (out + 1 + nlit > dst_max) return -1;
-                dst[out++] = 0x80 | (nlit - 1);
-                memcpy(dst + out, lit, nlit);
-                out += nlit;
-                nlit = 0;
-            }
-        }
-    }
+    /* Hash table: maps hash -> most recent position */
+    uint16_t htab[HASH_SIZE];
+    memset(htab, 0, sizeof(htab));
     
-    return out;
-}
-
-static int lz77_compress(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, int bytes_per_row) {
-    int out = 0;
-    int h = raw_size / bytes_per_row;
-    
-    /* First row: must compress normally */
-    int n = lz77_compress_row(dst, dst_max, raw, 0, bytes_per_row, 0);
-    if (n < 0) return 0;
-    out += n;
-    
-    /* Remaining rows: check for duplicate first */
-    for (int row = 1; row < h; row++) {
+    for (int row = 0; row < h; row++) {
         int row_start = row * bytes_per_row;
         int row_end = row_start + bytes_per_row;
-        uint8_t *curr = raw + row_start;
-        uint8_t *prev = raw + row_start - bytes_per_row;
+        int pos = row_start;
         
-        /* Fast path: row identical to previous */
-        if (memcmp(curr, prev, bytes_per_row) == 0) {
-            /* Emit back-references to copy entire row from offset=bytes_per_row */
+        /* Fast path: check if row equals previous row */
+        if (row > 0 && memcmp(raw + row_start, raw + row_start - bytes_per_row, bytes_per_row) == 0) {
+            /* Flush literals */
+            if (nlit > 0) {
+                if (out + 1 + nlit > dst_max) return 0;
+                dst[out++] = 0x80 | (nlit - 1);
+                memcpy(dst + out, lit, nlit);
+                out += nlit;
+                nlit = 0;
+            }
+            /* Emit back-refs for entire row */
             int remaining = bytes_per_row;
             int off_code = bytes_per_row - 1;
             while (remaining > 0) {
@@ -112,14 +73,68 @@ static int lz77_compress(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, 
                 dst[out++] = off_code & 0xFF;
                 remaining -= len;
             }
-        } else {
-            n = lz77_compress_row(dst + out, dst_max - out, raw, row_start, row_end, 0);
-            if (n < 0) return 0;
-            out += n;
+            continue;
+        }
+        
+        while (pos < row_end) {
+            int best = 0, boff = 0;
+            int maxlen = row_end - pos;
+            if (maxlen > 34) maxlen = 34;
+            
+            if (maxlen >= 3 && pos >= 3) {
+                uint32_t hv = hash3(raw + pos);
+                int candidate = htab[hv];
+                htab[hv] = pos;
+                
+                /* Check hash candidate */
+                if (candidate > 0 && pos - candidate <= 256) {
+                    int off = pos - candidate;
+                    int len = 0;
+                    while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
+                    if (len >= 3) { best = len; boff = off; }
+                }
+                
+                /* Check previous row offset */
+                if (best < maxlen && row > 0) {
+                    int off = bytes_per_row;
+                    if (pos - off >= 0) {
+                        int len = 0;
+                        while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
+                        if (len > best) { best = len; boff = off; }
+                    }
+                }
+            }
+            
+            if (best >= 3) {
+                if (nlit > 0) {
+                    if (out + 1 + nlit > dst_max) return 0;
+                    dst[out++] = 0x80 | (nlit - 1);
+                    memcpy(dst + out, lit, nlit);
+                    out += nlit;
+                    nlit = 0;
+                }
+                if (out + 2 > dst_max) return 0;
+                dst[out++] = ((best - 3) << 2) | ((boff - 1) >> 8);
+                dst[out++] = (boff - 1) & 0xFF;
+                pos += best;
+            } else {
+                lit[nlit++] = raw[pos++];
+                if (nlit == 128 || pos == row_end) {
+                    if (out + 1 + nlit > dst_max) return 0;
+                    dst[out++] = 0x80 | (nlit - 1);
+                    memcpy(dst + out, lit, nlit);
+                    out += nlit;
+                    nlit = 0;
+                }
+            }
         }
     }
     
     return out;
+}
+
+static int lz77_compress(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, int bytes_per_row) {
+    return lz77_compress_fast(dst, dst_max, raw, raw_size, bytes_per_row);
 }
 
 int compress_tile_data(uint8_t *dst, int dst_max, 
