@@ -446,6 +446,16 @@ void *send_thread_func(void *arg) {
             s->window_changed = 0;
             drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
+            if (s->resize_pending) {
+                /* Keep drain paused - will resume after resize completes */
+                wlr_log(WLR_DEBUG, "Resize pending - waiting for main thread");
+                /* Wait for resize to complete before resuming drain */
+                while (s->resize_pending && s->running) {
+                    struct timespec ts = {0, 10000000};  /* 10ms */
+                    nanosleep(&ts, NULL);
+                }
+                wlr_log(WLR_DEBUG, "Resize complete - resuming drain");
+            }
             drain_resume(); /* Restart drain */
             if (s->resize_pending) {
                 continue;
@@ -459,6 +469,13 @@ void *send_thread_func(void *arg) {
             p9->unknown_id_error = 0;
             drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
+            if (s->resize_pending) {
+                /* Keep drain paused - will resume after resize completes */
+                while (s->resize_pending && s->running) {
+                    struct timespec ts = {0, 10000000};  /* 10ms */
+                    nanosleep(&ts, NULL);
+                }
+            }
             drain_resume(); /* Restart drain */
             if (s->resize_pending) {
                 continue;
