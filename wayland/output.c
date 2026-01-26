@@ -42,7 +42,9 @@ static void output_frame(struct wl_listener *listener, void *data) {
     int new_h = s->pending_height;
     int new_minx = s->pending_minx;
     int new_miny = s->pending_miny;
-    /* Don't clear resize_pending yet - wait until resize is complete */
+    if (resize_pending) {
+        s->resize_pending = 0;
+    }
     pthread_mutex_unlock(&s->send_lock);
     
     if (resize_pending) {
@@ -51,11 +53,6 @@ static void output_frame(struct wl_listener *listener, void *data) {
             draw->win_minx = new_minx;
             draw->win_miny = new_miny;
             wlr_log(WLR_DEBUG, "Position update only: (%d,%d)", new_minx, new_miny);
-            
-            /* Clear resize_pending for position-only update */
-            pthread_mutex_lock(&s->send_lock);
-            s->resize_pending = 0;
-            pthread_mutex_unlock(&s->send_lock);
         } else {
             wlr_log(WLR_INFO, "Main thread handling resize: %dx%d -> %dx%d", 
                     s->width, s->height, new_w, new_h);
@@ -72,11 +69,6 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 free(new_prev_framebuf);
                 free(new_send_buf0);
                 free(new_send_buf1);
-                
-                /* Clear resize_pending even on failure */
-                pthread_mutex_lock(&s->send_lock);
-                s->resize_pending = 0;
-                pthread_mutex_unlock(&s->send_lock);
             } else {
                 uint32_t *old_framebuf = s->framebuf;
                 uint32_t *old_prev_framebuf = s->prev_framebuf;
@@ -187,11 +179,6 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 
                 wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical at (%d,%d)", 
                         new_w, new_h, logical_w, logical_h, new_minx, new_miny);
-                
-                /* NOW it's safe to clear resize_pending - everything is done */
-                pthread_mutex_lock(&s->send_lock);
-                s->resize_pending = 0;
-                pthread_mutex_unlock(&s->send_lock);
             }
         }
     }

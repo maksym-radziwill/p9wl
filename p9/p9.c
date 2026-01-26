@@ -409,13 +409,9 @@ int p9_write_send(struct p9conn *p9, uint32_t fid, uint64_t offset,
 
     uint32_t txlen = 23 + count;
 
-    pthread_mutex_lock(&p9->lock);
-    uint16_t tag = p9->tag++;
-    pthread_mutex_unlock(&p9->lock);
-
     PUT32(header, txlen);
     header[4] = Twrite;
-    PUT16(header + 5, tag);
+    PUT16(header + 5, p9->tag++);
     PUT32(header + 7, fid);
     PUT64(header + 11, offset);
     PUT32(header + 19, count);

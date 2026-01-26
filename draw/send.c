@@ -33,8 +33,7 @@ struct drain_ctx {
     atomic_int pending;
     atomic_int errors;
     atomic_int running;
-    atomic_int pause_requested;  /* Send thread requests pause */
-    atomic_int paused;           /* Drain thread acknowledges pause */
+    atomic_int paused;      /* Pause flag for synchronous p9 ops */
     pthread_t thread;
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -86,24 +85,9 @@ static void *drain_thread_func(void *arg) {
     wlr_log(WLR_INFO, "Drain thread started");
     
     while (atomic_load(&drain.running)) {
-        /* Check if pause requested - must acknowledge before doing anything */
-        if (atomic_load(&drain.pause_requested)) {
-            atomic_store(&drain.paused, 1);
-            /* Wait until unpaused */
-            pthread_mutex_lock(&drain.lock);
-            while (atomic_load(&drain.pause_requested) && atomic_load(&drain.running)) {
-                pthread_cond_wait(&drain.cond, &drain.lock);
-            }
-            pthread_mutex_unlock(&drain.lock);
-            atomic_store(&drain.paused, 0);
-            continue;
-        }
-        
-        /* Wait for pending writes */
+        /* Wait if no pending writes */
         pthread_mutex_lock(&drain.lock);
-        while (atomic_load(&drain.pending) == 0 && 
-               !atomic_load(&drain.pause_requested) &&
-               atomic_load(&drain.running)) {
+        while (atomic_load(&drain.pending) == 0 && atomic_load(&drain.running)) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 10000000;  /* 10ms timeout */
@@ -117,8 +101,11 @@ static void *drain_thread_func(void *arg) {
         
         if (!atomic_load(&drain.running)) break;
         
-        /* Re-check pause before reading from socket */
-        if (atomic_load(&drain.pause_requested)) continue;
+        /* If paused but still have pending, keep draining until pending = 0 */
+        /* Then stop and wait for resume */
+        if (atomic_load(&drain.paused) && atomic_load(&drain.pending) == 0) {
+            continue;  /* Go back to wait loop */
+        }
         
         /* Drain one response using our own buffer */
         if (atomic_load(&drain.pending) > 0) {
@@ -137,7 +124,6 @@ static int drain_start(struct p9conn *p9) {
     atomic_store(&drain.pending, 0);
     atomic_store(&drain.errors, 0);
     atomic_store(&drain.running, 1);
-    atomic_store(&drain.pause_requested, 0);
     atomic_store(&drain.paused, 0);
     drain.p9 = p9;
     pthread_mutex_init(&drain.lock, NULL);
@@ -159,8 +145,6 @@ static int drain_start(struct p9conn *p9) {
 }
 
 static void drain_stop(void) {
-    /* Clear any pause state first */
-    atomic_store(&drain.pause_requested, 0);
     atomic_store(&drain.running, 0);
     
     pthread_mutex_lock(&drain.lock);
@@ -185,56 +169,39 @@ static void drain_stop(void) {
 }
 
 /*
- * Pause drain thread and wait for acknowledgment.
+ * Pause drain thread and drain all pending responses.
  * Must be called before any synchronous p9 operations (relookup_window, etc.)
- * Drains all pending responses first, then waits for drain thread to stop.
+ * The drain thread will stop reading from the socket.
  */
 static void drain_pause(void) {
-    /* Request pause */
-    atomic_store(&drain.pause_requested, 1);
+    atomic_store(&drain.paused, 1);
     
-    /* Wake up drain thread */
+    /* Wake up drain thread in case it's waiting on cond var */
     pthread_mutex_lock(&drain.lock);
     pthread_cond_signal(&drain.cond);
     pthread_mutex_unlock(&drain.lock);
     
-    /* Wait for drain thread to acknowledge pause */
-    while (!atomic_load(&drain.paused)) {
-        struct timespec ts = {0, 1000000};  /* 1ms */
-        nanosleep(&ts, NULL);
-    }
-    
-    /* Now drain any remaining responses ourselves - 
-     * drain thread is paused, so we can safely read from socket */
-    int drained = 0;
+    /* Wait for drain thread to finish processing all pending responses */
     while (atomic_load(&drain.pending) > 0) {
-        if (drain_recv_one() < 0) {
-            atomic_fetch_add(&drain.errors, 1);
-        }
-        atomic_fetch_sub(&drain.pending, 1);
-        drained++;
+            struct timespec req;
+
+	    req.tv_sec = 0;
+    	    req.tv_nsec = 1000000L; // Use 'L' for long integer
+
+    	    nanosleep(&req, NULL);
     }
-    
-    if (drained > 0) {
-        wlr_log(WLR_DEBUG, "Drain pause: drained %d pending responses", drained);
-    }
-    
-    wlr_log(WLR_DEBUG, "Drain thread paused");
 }
 
 /*
  * Resume drain thread after synchronous p9 operations.
  */
 static void drain_resume(void) {
-    /* Clear pause request - drain thread will exit pause state */
-    atomic_store(&drain.pause_requested, 0);
+    atomic_store(&drain.paused, 0);
     
     /* Wake up drain thread */
     pthread_mutex_lock(&drain.lock);
     pthread_cond_signal(&drain.cond);
     pthread_mutex_unlock(&drain.lock);
-    
-    wlr_log(WLR_DEBUG, "Drain thread resumed");
 }
 
 static void drain_notify(void) {
@@ -381,10 +348,9 @@ void *send_thread_func(void *arg) {
         wlr_log(WLR_INFO, "Compression pool initialized with %d threads", nthreads);
     }
     
-    /* Allocate work arrays for parallel compression.
-     * Use max possible size (4096x4096 / 16x16 = 65536 tiles) to handle resizes.
-     * This is about 3MB total which is acceptable. */
-    int max_tiles = (4096 / TILE_SIZE) * (4096 / TILE_SIZE);  /* 65536 tiles max */
+    /* Allocate work arrays for parallel compression */
+    /* Use max possible size (4096x4096 / 16x16 = 65536 tiles) to handle resizes */
+    int max_tiles = (4096 / TILE_SIZE) * (4096 / TILE_SIZE);
     struct tile_work *work = malloc(max_tiles * sizeof(struct tile_work));
     struct tile_result *results = malloc(max_tiles * sizeof(struct tile_result));
     if (!work || !results) {
@@ -448,26 +414,10 @@ void *send_thread_func(void *arg) {
             s->window_changed = 0;
             drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
+            drain_resume(); /* Restart drain */
             if (s->resize_pending) {
-                /* Keep drain paused - will resume after resize completes */
-                wlr_log(WLR_DEBUG, "Resize pending - waiting for main thread (%dx%d -> %dx%d)",
-                        s->width, s->height, s->pending_width, s->pending_height);
-                /* Wait for resize to FULLY complete (flag cleared at END of resize) */
-                while (s->resize_pending && s->running) {
-                    struct timespec ts = {0, 10000000};  /* 10ms */
-                    nanosleep(&ts, NULL);
-                }
-                wlr_log(WLR_DEBUG, "Resize complete - now %dx%d, resuming drain", 
-                        s->width, s->height);
-                drain_resume();
-                /* Skip this frame - buffers were reallocated, start fresh */
-                pthread_mutex_lock(&s->send_lock);
-                s->active_buf = -1;
-                s->force_full_frame = 1;
-                pthread_mutex_unlock(&s->send_lock);
                 continue;
             }
-            drain_resume(); /* Restart drain */
             do_full = 1;
         }
         
@@ -477,21 +427,10 @@ void *send_thread_func(void *arg) {
             p9->unknown_id_error = 0;
             drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
+            drain_resume(); /* Restart drain */
             if (s->resize_pending) {
-                /* Keep drain paused - will resume after resize completes */
-                while (s->resize_pending && s->running) {
-                    struct timespec ts = {0, 10000000};  /* 10ms */
-                    nanosleep(&ts, NULL);
-                }
-                drain_resume();
-                /* Skip this frame - buffers were reallocated, start fresh */
-                pthread_mutex_lock(&s->send_lock);
-                s->active_buf = -1;
-                s->force_full_frame = 1;
-                pthread_mutex_unlock(&s->send_lock);
                 continue;
             }
-            drain_resume(); /* Restart drain */
             do_full = 1;
         }
         
@@ -550,10 +489,8 @@ void *send_thread_func(void *arg) {
                     int w = x2 - x1, h = y2 - y1;
                     if (w <= 0 || h <= 0) continue;
                     
-                    /* Safety check - should never happen with 4096x4096 max */
                     if (work_count >= max_tiles) {
-                        wlr_log(WLR_ERROR, "Work array overflow! work_count=%d max=%d", 
-                                work_count, max_tiles);
+                        wlr_log(WLR_ERROR, "Work array overflow!");
                         goto tiles_collected;
                     }
                     
