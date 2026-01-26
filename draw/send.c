@@ -5,6 +5,7 @@
  * tile compression selection, and pipelined writes.
  *
  * Uses iounit from 9P Ropen to limit batch sizes for atomic writes.
+ * Uses a separate drain thread for async response handling.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -14,6 +15,8 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
+#include <stdatomic.h>
+#include <unistd.h>
 
 #include <wlr/util/log.h>
 
@@ -23,6 +26,154 @@
 #include "draw/draw.h"
 #include "p9/p9.h"
 #include "types.h"
+
+/* Drain thread state */
+struct drain_ctx {
+    struct p9conn *p9;
+    atomic_int pending;
+    atomic_int errors;
+    atomic_int running;
+    pthread_t thread;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    uint8_t *recv_buf;  /* Separate buffer for drain thread */
+};
+
+static struct drain_ctx drain;
+
+/* Read one Rwrite response using drain thread's own buffer */
+static int drain_recv_one(void) {
+    uint8_t *buf = drain.recv_buf;
+    struct p9conn *p9 = drain.p9;
+    
+    /* Read length */
+    if (p9_read_full(p9, buf, 4) != 4) return -1;
+    uint32_t rxlen = GET32(buf);
+    if (rxlen < 7 || rxlen > p9->msize) return -1;
+    
+    /* Read rest of message */
+    if (p9_read_full(p9, buf + 4, rxlen - 4) != (int)(rxlen - 4)) return -1;
+    
+    int type = buf[4];
+    if (type == Rerror) {
+        uint16_t elen = GET16(buf + 7);
+        char errmsg[256];
+        int copylen = (elen < 255) ? elen : 255;
+        memcpy(errmsg, buf + 9, copylen);
+        errmsg[copylen] = '\0';
+        wlr_log(WLR_ERROR, "9P drain error: %s", errmsg);
+        
+        /* Set error flags */
+        if (strstr(errmsg, "unknown id") != NULL) p9->unknown_id_error = 1;
+        if (strstr(errmsg, "short") != NULL) p9->draw_error = 1;
+        return -1;
+    }
+    
+    if (type != Rwrite) {
+        wlr_log(WLR_ERROR, "9P drain: unexpected type %d, expected Rwrite", type);
+        return -1;
+    }
+    
+    return GET32(buf + 7);
+}
+
+/* Drain thread - receives 9P responses in background */
+static void *drain_thread_func(void *arg) {
+    (void)arg;
+    
+    wlr_log(WLR_INFO, "Drain thread started");
+    
+    while (atomic_load(&drain.running)) {
+        /* Wait for pending writes */
+        pthread_mutex_lock(&drain.lock);
+        while (atomic_load(&drain.pending) == 0 && atomic_load(&drain.running)) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 10000000;  /* 10ms timeout */
+            if (ts.tv_nsec >= 1000000000) {
+                ts.tv_sec++;
+                ts.tv_nsec -= 1000000000;
+            }
+            pthread_cond_timedwait(&drain.cond, &drain.lock, &ts);
+        }
+        pthread_mutex_unlock(&drain.lock);
+        
+        if (!atomic_load(&drain.running)) break;
+        
+        /* Drain one response using our own buffer */
+        if (atomic_load(&drain.pending) > 0) {
+            if (drain_recv_one() < 0) {
+                atomic_fetch_add(&drain.errors, 1);
+            }
+            atomic_fetch_sub(&drain.pending, 1);
+        }
+    }
+    
+    wlr_log(WLR_INFO, "Drain thread exiting");
+    return NULL;
+}
+
+static int drain_start(struct p9conn *p9) {
+    atomic_store(&drain.pending, 0);
+    atomic_store(&drain.errors, 0);
+    atomic_store(&drain.running, 1);
+    drain.p9 = p9;
+    pthread_mutex_init(&drain.lock, NULL);
+    pthread_cond_init(&drain.cond, NULL);
+    
+    /* Allocate separate buffer for drain thread */
+    drain.recv_buf = malloc(p9->msize);
+    if (!drain.recv_buf) {
+        wlr_log(WLR_ERROR, "Failed to allocate drain recv buffer");
+        return -1;
+    }
+    
+    if (pthread_create(&drain.thread, NULL, drain_thread_func, NULL) != 0) {
+        wlr_log(WLR_ERROR, "Failed to create drain thread");
+        free(drain.recv_buf);
+        return -1;
+    }
+    return 0;
+}
+
+static void drain_stop(void) {
+    atomic_store(&drain.running, 0);
+    
+    pthread_mutex_lock(&drain.lock);
+    pthread_cond_signal(&drain.cond);
+    pthread_mutex_unlock(&drain.lock);
+    
+    pthread_join(drain.thread, NULL);
+    
+    /* Drain any remaining using our buffer */
+    while (atomic_load(&drain.pending) > 0) {
+        drain_recv_one();
+        atomic_fetch_sub(&drain.pending, 1);
+    }
+    
+    if (drain.recv_buf) {
+        free(drain.recv_buf);
+        drain.recv_buf = NULL;
+    }
+    
+    pthread_mutex_destroy(&drain.lock);
+    pthread_cond_destroy(&drain.cond);
+}
+
+static void drain_notify(void) {
+    atomic_fetch_add(&drain.pending, 1);
+    pthread_mutex_lock(&drain.lock);
+    pthread_cond_signal(&drain.cond);
+    pthread_mutex_unlock(&drain.lock);
+}
+
+/* Wait until pending drops below threshold */
+static void drain_throttle(int max_pending) {
+    while (atomic_load(&drain.pending) > max_pending) {
+        struct timespec ts = {0, 1000000};  /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+}
 
 void send_frame(struct server *s) {
     pthread_mutex_lock(&s->send_lock);
@@ -137,6 +288,13 @@ void *send_thread_func(void *arg) {
         return NULL;
     }
     
+    /* Start drain thread */
+    if (drain_start(p9) < 0) {
+        wlr_log(WLR_ERROR, "Failed to start drain thread");
+        free(batch);
+        return NULL;
+    }
+    
     /* Initialize parallel compression pool */
     int nthreads = 4;  /* TODO: detect CPU cores */
     if (compress_pool_init(nthreads) < 0) {
@@ -159,7 +317,6 @@ void *send_thread_func(void *arg) {
     const size_t comp_buf_size = TILE_SIZE * TILE_SIZE * 4 + 256;
     uint8_t *comp_buf = malloc(comp_buf_size);
     
-    int pending_writes = 0;
     int write_errors = 0;
     while (s->running) {
 
@@ -199,6 +356,13 @@ void *send_thread_func(void *arg) {
             do_full = 1;
         }
         
+        /* Check for drain errors */
+        int drain_errs = atomic_exchange(&drain.errors, 0);
+        if (drain_errs > 0) {
+            wlr_log(WLR_ERROR, "Drain thread reported %d errors", drain_errs);
+            memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+        }
+        
         /* Check if wctl thread detected window change */
         if (s->window_changed) {
             wlr_log(WLR_INFO, "Wctl detected window change - re-looking up window");
@@ -236,13 +400,18 @@ void *send_thread_func(void *arg) {
         }
         
         uint64_t t_frame_start = now_us();
-        uint64_t t_send_done = 0, t_recv_done = 0;
+        uint64_t t_send_done = 0;
         
         /* Try to detect scroll (disabled for fractional scaling) */
         int scrolled_regions = 0;
         if (!do_full && !scroll_disabled(s)) {
             detect_scroll(s, send_buf);
-            scrolled_regions = send_scroll_commands(s, &pending_writes);    
+            int scroll_writes = 0;
+            scrolled_regions = send_scroll_commands(s, &scroll_writes);
+            /* Notify drain thread for each scroll write */
+            for (int i = 0; i < scroll_writes; i++) {
+                drain_notify();
+            }
         }
         
         /* Send tiles */
@@ -288,6 +457,9 @@ void *send_thread_func(void *arg) {
         if (work_count > 0 && nthreads > 0) {
             compress_tiles_parallel(work, results, work_count);
         }
+        
+        /* Throttle if too many writes pending */
+        drain_throttle(32);
         
         /* Second pass: build batches from results */
         for (int i = 0; i < work_count; i++) {
@@ -339,7 +511,7 @@ void *send_thread_func(void *arg) {
                     wlr_log(WLR_ERROR, "Batch write send failed");
                     memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
                 }
-                pending_writes++;
+                drain_notify();
                 batch_count++;
                 
                 /* Log batch stats */
@@ -442,7 +614,7 @@ void *send_thread_func(void *arg) {
                     wlr_log(WLR_ERROR, "Pre-footer batch write send failed");
                     memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
                 }
-                pending_writes++;
+                drain_notify();
                 batch_count++;
                 off = 0;
                 
@@ -560,36 +732,22 @@ void *send_thread_func(void *arg) {
                 wlr_log(WLR_ERROR, "Final batch write send failed");
                 memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
             }
-            pending_writes++;
+            drain_notify();
             batch_count++;
             
             t_send_done = now_us();
             
-            while(pending_writes > 0){
-                if (p9_write_recv(p9) < 0) {
-                    write_errors++;
-                }
-                pending_writes--;
-            }
-
-            t_recv_done = now_us();
-            
-            if (write_errors > 0) {
-                wlr_log(WLR_ERROR, "Pipelined writes: %d/%d failed", write_errors, batch_count);
-                memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
-            }
-            
             double send_ms = (t_send_done - t_frame_start) / 1000.0;
-            double recv_ms = (t_recv_done - t_send_done) / 1000.0;
-            double total_ms = (t_recv_done - t_frame_start) / 1000.0;
+            int pending = atomic_load(&drain.pending);
             
-            if (total_ms > 50 || send_count <= 10) {
-                wlr_log(WLR_INFO, "PIPE: %d batches, send=%.1fms, drain=%.1fms, total=%.1fms",
-                    batch_count, send_ms, recv_ms, total_ms);
+            /* Log PIPE stats frequently for debugging */
+            if (send_count <= 20 || send_count % 50 == 0 || send_ms > 16.0) {
+                wlr_log(WLR_INFO, "PIPE: %d batches, send=%.1fms, pending=%d",
+                    batch_count, send_ms, pending);
             }
             
             /* Enable alpha-delta mode after first successful full frame */
-            if (!draw->xor_enabled && tile_count > 0 && write_errors == 0) {
+            if (!draw->xor_enabled && tile_count > 0) {
                 draw->xor_enabled = 1;
                 wlr_log(WLR_INFO, "Alpha-delta mode enabled for future frames");
             }
@@ -616,6 +774,7 @@ void *send_thread_func(void *arg) {
     }
     
     /* Cleanup */
+    drain_stop();
     compress_pool_shutdown();
     if (work) free(work);
     if (results) free(results);
