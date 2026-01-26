@@ -18,7 +18,6 @@
 #include <wlr/util/log.h>
 
 #include "send.h"
-#include "pipeline.h"
 #include "compress.h"
 #include "scroll.h"
 #include "draw/draw.h"
