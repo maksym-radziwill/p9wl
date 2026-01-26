@@ -33,7 +33,8 @@ struct drain_ctx {
     atomic_int pending;
     atomic_int errors;
     atomic_int running;
-    atomic_int paused;      /* Pause flag for synchronous p9 ops */
+    atomic_int pause_requested;  /* Send thread requests pause */
+    atomic_int paused;           /* Drain thread acknowledges pause */
     pthread_t thread;
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -85,9 +86,24 @@ static void *drain_thread_func(void *arg) {
     wlr_log(WLR_INFO, "Drain thread started");
     
     while (atomic_load(&drain.running)) {
-        /* Wait if no pending writes */
+        /* Check if pause requested - must acknowledge before doing anything */
+        if (atomic_load(&drain.pause_requested)) {
+            atomic_store(&drain.paused, 1);
+            /* Wait until unpaused */
+            pthread_mutex_lock(&drain.lock);
+            while (atomic_load(&drain.pause_requested) && atomic_load(&drain.running)) {
+                pthread_cond_wait(&drain.cond, &drain.lock);
+            }
+            pthread_mutex_unlock(&drain.lock);
+            atomic_store(&drain.paused, 0);
+            continue;
+        }
+        
+        /* Wait for pending writes */
         pthread_mutex_lock(&drain.lock);
-        while (atomic_load(&drain.pending) == 0 && atomic_load(&drain.running)) {
+        while (atomic_load(&drain.pending) == 0 && 
+               !atomic_load(&drain.pause_requested) &&
+               atomic_load(&drain.running)) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 10000000;  /* 10ms timeout */
@@ -101,11 +117,8 @@ static void *drain_thread_func(void *arg) {
         
         if (!atomic_load(&drain.running)) break;
         
-        /* If paused but still have pending, keep draining until pending = 0 */
-        /* Then stop and wait for resume */
-        if (atomic_load(&drain.paused) && atomic_load(&drain.pending) == 0) {
-            continue;  /* Go back to wait loop */
-        }
+        /* Re-check pause before reading from socket */
+        if (atomic_load(&drain.pause_requested)) continue;
         
         /* Drain one response using our own buffer */
         if (atomic_load(&drain.pending) > 0) {
@@ -124,6 +137,7 @@ static int drain_start(struct p9conn *p9) {
     atomic_store(&drain.pending, 0);
     atomic_store(&drain.errors, 0);
     atomic_store(&drain.running, 1);
+    atomic_store(&drain.pause_requested, 0);
     atomic_store(&drain.paused, 0);
     drain.p9 = p9;
     pthread_mutex_init(&drain.lock, NULL);
@@ -145,6 +159,8 @@ static int drain_start(struct p9conn *p9) {
 }
 
 static void drain_stop(void) {
+    /* Clear any pause state first */
+    atomic_store(&drain.pause_requested, 0);
     atomic_store(&drain.running, 0);
     
     pthread_mutex_lock(&drain.lock);
@@ -169,35 +185,56 @@ static void drain_stop(void) {
 }
 
 /*
- * Pause drain thread and drain all pending responses.
+ * Pause drain thread and wait for acknowledgment.
  * Must be called before any synchronous p9 operations (relookup_window, etc.)
- * The drain thread will stop reading from the socket.
+ * Drains all pending responses first, then waits for drain thread to stop.
  */
 static void drain_pause(void) {
-    atomic_store(&drain.paused, 1);
+    /* Request pause */
+    atomic_store(&drain.pause_requested, 1);
     
-    /* Wake up drain thread in case it's waiting on cond var */
+    /* Wake up drain thread */
     pthread_mutex_lock(&drain.lock);
     pthread_cond_signal(&drain.cond);
     pthread_mutex_unlock(&drain.lock);
     
-    /* Wait for drain thread to finish processing all pending responses */
-    while (atomic_load(&drain.pending) > 0) {
+    /* Wait for drain thread to acknowledge pause */
+    while (!atomic_load(&drain.paused)) {
         struct timespec ts = {0, 1000000};  /* 1ms */
         nanosleep(&ts, NULL);
     }
+    
+    /* Now drain any remaining responses ourselves - 
+     * drain thread is paused, so we can safely read from socket */
+    int drained = 0;
+    while (atomic_load(&drain.pending) > 0) {
+        if (drain_recv_one() < 0) {
+            atomic_fetch_add(&drain.errors, 1);
+        }
+        atomic_fetch_sub(&drain.pending, 1);
+        drained++;
+    }
+    
+    if (drained > 0) {
+        wlr_log(WLR_DEBUG, "Drain pause: drained %d pending responses", drained);
+    }
+    
+    wlr_log(WLR_DEBUG, "Drain thread paused");
 }
 
 /*
  * Resume drain thread after synchronous p9 operations.
  */
 static void drain_resume(void) {
-    atomic_store(&drain.paused, 0);
+    /* Clear pause request - drain thread will exit pause state */
+    atomic_store(&drain.pause_requested, 0);
     
     /* Wake up drain thread */
     pthread_mutex_lock(&drain.lock);
     pthread_cond_signal(&drain.cond);
     pthread_mutex_unlock(&drain.lock);
+    
+    wlr_log(WLR_DEBUG, "Drain thread resumed");
 }
 
 static void drain_notify(void) {
