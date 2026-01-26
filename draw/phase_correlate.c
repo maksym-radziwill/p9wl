@@ -325,9 +325,9 @@ struct phase_result phase_correlate_detect(
     extract_region_windowed(curr_buf, buf_width, rx1, ry1, rx2, ry2, res->fft_in1);
     extract_region_windowed(prev_buf, buf_width, rx1, ry1, rx2, ry2, res->fft_in2);
     
-    /* Smooth both buffers to sharpen FFT correlation peak */
-    smooth_buffer(res->fft_in1, res->smooth_tmp);
-    smooth_buffer(res->fft_in2, res->smooth_tmp);
+    /* Smoothing disabled - Hann window already reduces edge effects */
+    /* smooth_buffer(res->fft_in1, res->smooth_tmp); */
+    /* smooth_buffer(res->fft_in2, res->smooth_tmp); */
     
     /* Forward FFT */
     fftwf_execute(res->plan_fwd1);
