@@ -107,14 +107,12 @@ void *send_thread_func(void *arg) {
     struct p9conn *p9 = draw->p9;
     static int send_count = 0;
     uint32_t last_probe_time = 0;
-    static int scroll_disable_logged = 0;
     
     wlr_log(WLR_INFO, "Send thread started");
     
     /* Log if scroll optimization is disabled */
-    if (scroll_disabled(s) && !scroll_disable_logged) {
+    if (scroll_disabled(s)) {
         wlr_log(WLR_INFO, "Scroll optimization disabled (fractional scale: %.2f)", s->scale);
-        scroll_disable_logged = 1;
     }
     
     /*
@@ -145,24 +143,21 @@ void *send_thread_func(void *arg) {
     uint8_t *comp_buf = malloc(comp_buf_size);
     
     while (s->running) {
-        pthread_mutex_lock(&s->send_lock);
-        
+         
         /* Wait for work with timeout */
         while (s->pending_buf < 0 && !s->window_changed && s->running) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += 2;
-            int rc = pthread_cond_timedwait(&s->send_cond, &s->send_lock, &ts);
-            if (rc == ETIMEDOUT) {
-                break;
-            }
+            struct timespec req = {0};
+            req.tv_sec = 0;
+            req.tv_nsec = 100 * 1000000; 
+            nanosleep(&req, (struct timespec *)NULL);       
         }
         
         if (!s->running) {
-            pthread_mutex_unlock(&s->send_lock);
             break;
         }
-        
+
+        pthread_mutex_lock(&s->send_lock);
+
         /* Capture which buffer to process */
         int current_buf = s->pending_buf;
         int got_frame = (current_buf >= 0);
