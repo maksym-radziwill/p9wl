@@ -33,6 +33,7 @@ struct drain_ctx {
     atomic_int pending;
     atomic_int errors;
     atomic_int running;
+    atomic_int paused;      /* Pause flag for synchronous p9 ops */
     pthread_t thread;
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -84,7 +85,7 @@ static void *drain_thread_func(void *arg) {
     wlr_log(WLR_INFO, "Drain thread started");
     
     while (atomic_load(&drain.running)) {
-        /* Wait for pending writes */
+        /* Wait if no pending writes */
         pthread_mutex_lock(&drain.lock);
         while (atomic_load(&drain.pending) == 0 && atomic_load(&drain.running)) {
             struct timespec ts;
@@ -99,6 +100,12 @@ static void *drain_thread_func(void *arg) {
         pthread_mutex_unlock(&drain.lock);
         
         if (!atomic_load(&drain.running)) break;
+        
+        /* If paused but still have pending, keep draining until pending = 0 */
+        /* Then stop and wait for resume */
+        if (atomic_load(&drain.paused) && atomic_load(&drain.pending) == 0) {
+            continue;  /* Go back to wait loop */
+        }
         
         /* Drain one response using our own buffer */
         if (atomic_load(&drain.pending) > 0) {
@@ -117,6 +124,7 @@ static int drain_start(struct p9conn *p9) {
     atomic_store(&drain.pending, 0);
     atomic_store(&drain.errors, 0);
     atomic_store(&drain.running, 1);
+    atomic_store(&drain.paused, 0);
     drain.p9 = p9;
     pthread_mutex_init(&drain.lock, NULL);
     pthread_cond_init(&drain.cond, NULL);
@@ -158,6 +166,42 @@ static void drain_stop(void) {
     
     pthread_mutex_destroy(&drain.lock);
     pthread_cond_destroy(&drain.cond);
+}
+
+/*
+ * Pause drain thread and drain all pending responses.
+ * Must be called before any synchronous p9 operations (relookup_window, etc.)
+ * The drain thread will stop reading from the socket.
+ */
+static void drain_pause(void) {
+    atomic_store(&drain.paused, 1);
+    
+    /* Wake up drain thread in case it's waiting on cond var */
+    pthread_mutex_lock(&drain.lock);
+    pthread_cond_signal(&drain.cond);
+    pthread_mutex_unlock(&drain.lock);
+    
+    /* Wait for drain thread to finish processing all pending responses */
+    while (atomic_load(&drain.pending) > 0) {
+            struct timespec req;
+
+	    req.tv_sec = 0;
+    	    req.tv_nsec = 1000000L; // Use 'L' for long integer
+
+    	    nanosleep(&req, NULL);
+    }
+}
+
+/*
+ * Resume drain thread after synchronous p9 operations.
+ */
+static void drain_resume(void) {
+    atomic_store(&drain.paused, 0);
+    
+    /* Wake up drain thread */
+    pthread_mutex_lock(&drain.lock);
+    pthread_cond_signal(&drain.cond);
+    pthread_mutex_unlock(&drain.lock);
 }
 
 static void drain_notify(void) {
@@ -367,7 +411,9 @@ void *send_thread_func(void *arg) {
         if (s->window_changed) {
             wlr_log(WLR_INFO, "Wctl detected window change - re-looking up window");
             s->window_changed = 0;
+            drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
+            drain_resume(); /* Restart drain */
             if (s->resize_pending) {
                 continue;
             }
@@ -378,7 +424,9 @@ void *send_thread_func(void *arg) {
         if (p9->unknown_id_error) {
             wlr_log(WLR_INFO, "Detected unknown_id_error - re-looking up window");
             p9->unknown_id_error = 0;
+            drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
+            drain_resume(); /* Restart drain */
             if (s->resize_pending) {
                 continue;
             }
