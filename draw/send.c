@@ -34,6 +34,13 @@ void send_frame(struct server *s) {
         return;
     }
     
+    /* Only send if we have new content */
+    if (!s->frame_dirty) {
+        pthread_mutex_unlock(&s->send_lock);
+        return;
+    }
+    s->frame_dirty = 0;
+
     /* Find a free buffer */
     int buf = -1;
     for (int i = 0; i < 2; i++) {
@@ -62,39 +69,7 @@ void send_frame(struct server *s) {
 
 int send_timer_callback(void *data) {
     struct server *s = data;
-    
-    /* Skip if resize pending */
-    if (s->resize_pending) {
-        return 0;
-    }
-    
-    /* Only send if we have new content */
-    if (!s->frame_dirty) {
-        return 0;
-    }
-    s->frame_dirty = 0;
-    
-    pthread_mutex_lock(&s->send_lock);
-    
-    /* Find a free buffer */
-    int buf = -1;
-    for (int i = 0; i < 2; i++) {
-        if (i != s->active_buf && i != s->pending_buf) {
-            buf = i;
-            break;
-        }
-    }
-    
-    if (buf >= 0) {
-        memcpy(s->send_buf[buf], s->framebuf, s->width * s->height * 4);
-        s->pending_buf = buf;
-        if (s->force_full_frame) {
-            s->send_full = 1;
-        }
-        pthread_cond_signal(&s->send_cond);
-    }
-    
-    pthread_mutex_unlock(&s->send_lock);
+    send_frame(s);
     return 0;
 }
 
@@ -120,11 +95,9 @@ int tile_changed_send(struct server *s, uint32_t *send_buf, int tx, int ty) {
  * FFT-based phase correlation scroll detection.
  */
 static int scroll_disabled(struct server *s) {
-    /* Disable scroll for any non-integer scale factor */
-    if (s->scale != 1.0f && s->scale != 2.0f && s->scale != 3.0f && s->scale != 4.0f) {
-        return 1;
-    }
-    return 0;
+    double floor;
+    /* Disable scroll if scaling is fractional */
+    return (modf(s->scale, &floor) != 0.0f); 
 }
 
 void *send_thread_func(void *arg) {
