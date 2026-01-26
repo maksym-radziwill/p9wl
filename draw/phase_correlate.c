@@ -149,51 +149,74 @@ static inline float pixel_to_gray(uint32_t pixel) {
 }
 
 /*
- * Apply 2D box filter smoothing to sharpen the FFT correlation peak.
+ * Apply 2D box filter smoothing using sliding window (O(n²) instead of O(n²×r)).
  * Each pixel becomes the average of its neighborhood within radius SMOOTH_RADIUS.
- * Uses separable filtering (horizontal then vertical) for efficiency.
+ * Uses separable filtering (horizontal then vertical) with running sums.
  * buf: input/output buffer
  * tmp: scratch buffer (must be FFT_SIZE * FFT_SIZE)
  */
 static void smooth_buffer(float *buf, float *tmp) {
     const int r = SMOOTH_RADIUS;
+    const int w = FFT_SIZE;
     
-    /* Horizontal pass: buf -> tmp */
-    for (int y = 0; y < FFT_SIZE; y++) {
-        float *src_row = &buf[y * FFT_SIZE];
-        float *dst_row = &tmp[y * FFT_SIZE];
+    /* Horizontal pass: buf -> tmp (sliding window) */
+    for (int y = 0; y < w; y++) {
+        float *src_row = &buf[y * w];
+        float *dst_row = &tmp[y * w];
         
-        for (int x = 0; x < FFT_SIZE; x++) {
-            float sum = 0;
-            int count = 0;
-            
-            for (int dx = -r; dx <= r; dx++) {
-                int nx = x + dx;
-                if (nx >= 0 && nx < FFT_SIZE) {
-                    sum += src_row[nx];
-                    count++;
-                }
+        /* Initialize sum for x=0 */
+        float sum = 0;
+        int count = 0;
+        for (int dx = 0; dx <= r && dx < w; dx++) {
+            sum += src_row[dx];
+            count++;
+        }
+        dst_row[0] = sum / count;
+        
+        /* Slide window across row */
+        for (int x = 1; x < w; x++) {
+            /* Remove left element leaving window */
+            int left = x - r - 1;
+            if (left >= 0) {
+                sum -= src_row[left];
+                count--;
             }
-            
+            /* Add right element entering window */
+            int right = x + r;
+            if (right < w) {
+                sum += src_row[right];
+                count++;
+            }
             dst_row[x] = sum / count;
         }
     }
     
-    /* Vertical pass: tmp -> buf */
-    for (int x = 0; x < FFT_SIZE; x++) {
-        for (int y = 0; y < FFT_SIZE; y++) {
-            float sum = 0;
-            int count = 0;
-            
-            for (int dy = -r; dy <= r; dy++) {
-                int ny = y + dy;
-                if (ny >= 0 && ny < FFT_SIZE) {
-                    sum += tmp[ny * FFT_SIZE + x];
-                    count++;
-                }
+    /* Vertical pass: tmp -> buf (sliding window) */
+    for (int x = 0; x < w; x++) {
+        /* Initialize sum for y=0 */
+        float sum = 0;
+        int count = 0;
+        for (int dy = 0; dy <= r && dy < w; dy++) {
+            sum += tmp[dy * w + x];
+            count++;
+        }
+        buf[x] = sum / count;
+        
+        /* Slide window down column */
+        for (int y = 1; y < w; y++) {
+            /* Remove top element leaving window */
+            int top = y - r - 1;
+            if (top >= 0) {
+                sum -= tmp[top * w + x];
+                count--;
             }
-            
-            buf[y * FFT_SIZE + x] = sum / count;
+            /* Add bottom element entering window */
+            int bot = y + r;
+            if (bot < w) {
+                sum += tmp[bot * w + x];
+                count++;
+            }
+            buf[y * w + x] = sum / count;
         }
     }
 }
