@@ -457,6 +457,13 @@ void *send_thread_func(void *arg) {
                 }
                 wlr_log(WLR_DEBUG, "Resize complete - now %dx%d, resuming drain", 
                         s->width, s->height);
+                drain_resume();
+                /* Skip this frame - buffers were reallocated, start fresh */
+                pthread_mutex_lock(&s->send_lock);
+                s->active_buf = -1;
+                s->force_full_frame = 1;
+                pthread_mutex_unlock(&s->send_lock);
+                continue;
             }
             drain_resume(); /* Restart drain */
             do_full = 1;
@@ -474,6 +481,13 @@ void *send_thread_func(void *arg) {
                     struct timespec ts = {0, 10000000};  /* 10ms */
                     nanosleep(&ts, NULL);
                 }
+                drain_resume();
+                /* Skip this frame - buffers were reallocated, start fresh */
+                pthread_mutex_lock(&s->send_lock);
+                s->active_buf = -1;
+                s->force_full_frame = 1;
+                pthread_mutex_unlock(&s->send_lock);
+                continue;
             }
             drain_resume(); /* Restart drain */
             do_full = 1;
