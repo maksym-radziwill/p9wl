@@ -137,7 +137,25 @@ void *send_thread_func(void *arg) {
         return NULL;
     }
     
-    /* Allocate compression buffer */
+    /* Initialize parallel compression pool */
+    int nthreads = 4;  /* TODO: detect CPU cores */
+    if (compress_pool_init(nthreads) < 0) {
+        wlr_log(WLR_ERROR, "Failed to init compression pool, falling back to single-threaded");
+        nthreads = 0;
+    } else {
+        wlr_log(WLR_INFO, "Compression pool initialized with %d threads", nthreads);
+    }
+    
+    /* Allocate work arrays for parallel compression */
+    int max_tiles = s->tiles_x * s->tiles_y;
+    struct tile_work *work = malloc(max_tiles * sizeof(struct tile_work));
+    struct tile_result *results = malloc(max_tiles * sizeof(struct tile_result));
+    if (!work || !results) {
+        wlr_log(WLR_ERROR, "Failed to allocate compression work arrays");
+        nthreads = 0;  /* Fall back to single-threaded */
+    }
+    
+    /* Allocate compression buffer for single-threaded fallback */
     const size_t comp_buf_size = TILE_SIZE * TILE_SIZE * 4 + 256;
     uint8_t *comp_buf = malloc(comp_buf_size);
     
@@ -241,6 +259,8 @@ void *send_thread_func(void *arg) {
         
         int can_delta = draw->xor_enabled && !do_full && s->prev_framebuf;
         
+        /* First pass: collect changed tiles */
+        int work_count = 0;
         for (int ty = 0; ty < s->tiles_y; ty++) {
             for (int tx = 0; tx < s->tiles_x; tx++) {
                 if (do_full || tile_changed_send(s, send_buf, tx, ty)) {
@@ -251,133 +271,166 @@ void *send_thread_func(void *arg) {
                     int w = x2 - x1, h = y2 - y1;
                     if (w <= 0 || h <= 0) continue;
                     
-                    int raw_size = w * h * 4;
-                    bytes_raw += raw_size;
-                    
-                    int comp_result = 0;
-                    if (comp_buf) {
-                        comp_result = compress_tile_adaptive(comp_buf, comp_buf_size,
-                                                             send_buf, s->width,
-                                                             can_delta ? s->prev_framebuf : NULL,
-                                                             s->width,
-                                                             x1, y1, w, h);
-                    }
-                    
-                    int use_delta = (comp_result > 0);
-                    int comp_size = use_delta ? comp_result : (comp_result < 0 ? -comp_result : 0);
-
-                    size_t tile_size;
-                    if (comp_size > 0) {
-                        if (use_delta) {
-                            tile_size = (1 + 4 + 16 + comp_size) + ALPHA_DELTA_OVERHEAD;
-                        } else {
-                            tile_size = 1 + 4 + 16 + comp_size;
-                        }
-                    } else {
-                        tile_size = 1 + 4 + 16 + raw_size;
-                    }
-                    
-                    /* Flush current batch if needed */
-                    if (off + tile_size > max_batch && off > 0) {
-                        if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
-                            wlr_log(WLR_ERROR, "Batch write send failed");
-                            memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
-                        }
-                        pending_writes++;
-                        batch_count++;
-                        
-                        /* Log batch stats */
-                        if (batch_tiles > 0) {
-                            int ratio = batch_raw > 0 ? (int)(batch_sent * 100 / batch_raw) : 100;
-                            wlr_log(WLR_DEBUG, "Batch %d: %d tiles (%d comp, %d delta) %zu->%zu bytes (%d%%)",
-                                    batch_count, batch_tiles, batch_comp, batch_delta,
-                                    batch_raw, batch_sent, ratio);
-                        }
-                        batch_tiles = 0;
-                        batch_raw = 0;
-                        batch_sent = 0;
-                        batch_comp = 0;
-                        batch_delta = 0;
-                        
-                        off = 0;
-                        
-                    }
-                    
-                    if (comp_size > 0) {
-                        if (use_delta) {
-                            /* Alpha-delta path */
-                            batch[off++] = 'Y';
-                            PUT32(batch + off, draw->delta_id); off += 4;
-                            PUT32(batch + off, x1); off += 4;
-                            PUT32(batch + off, y1); off += 4;
-                            PUT32(batch + off, x2); off += 4;
-                            PUT32(batch + off, y2); off += 4;
-                            memcpy(batch + off, comp_buf, comp_size);
-                            off += comp_size;
-                            
-                            /* Composite delta onto image */
-                            batch[off++] = 'd';
-                            PUT32(batch + off, draw->image_id); off += 4;
-                            PUT32(batch + off, draw->delta_id); off += 4;
-                            PUT32(batch + off, draw->delta_id); off += 4;
-                            PUT32(batch + off, x1); off += 4;
-                            PUT32(batch + off, y1); off += 4;
-                            PUT32(batch + off, x2); off += 4;
-                            PUT32(batch + off, y2); off += 4;
-                            PUT32(batch + off, x1); off += 4;
-                            PUT32(batch + off, y1); off += 4;
-                            PUT32(batch + off, x1); off += 4;
-                            PUT32(batch + off, y1); off += 4;
-                            
-                            bytes_sent += comp_size + ALPHA_DELTA_OVERHEAD;
-                            batch_sent += comp_size + ALPHA_DELTA_OVERHEAD;
-                            delta_tiles++;
-                            batch_delta++;
-                        } else {
-                            /* Direct path */
-                            batch[off++] = 'Y';
-                            PUT32(batch + off, draw->image_id); off += 4;
-                            PUT32(batch + off, x1); off += 4;
-                            PUT32(batch + off, y1); off += 4;
-                            PUT32(batch + off, x2); off += 4;
-                            PUT32(batch + off, y2); off += 4;
-                            memcpy(batch + off, comp_buf, comp_size);
-                            off += comp_size;
-                            bytes_sent += comp_size;
-                            batch_sent += comp_size;
-                        }
-                        comp_tiles++;
-                        batch_comp++;
-                    } else {
-                        /* Uncompressed */
-                        batch[off++] = 'y';
-                        PUT32(batch + off, draw->image_id); off += 4;
-                        PUT32(batch + off, x1); off += 4;
-                        PUT32(batch + off, y1); off += 4;
-                        PUT32(batch + off, x2); off += 4;
-                        PUT32(batch + off, y2); off += 4;
-                        
-                        for (int row = 0; row < h; row++) {
-                            memcpy(batch + off, &send_buf[(y1 + row) * s->width + x1], w * 4);
-                            off += w * 4;
-                        }
-                        bytes_sent += raw_size;
-                        batch_sent += raw_size;
-                    }
-                    
-                    /* Track batch stats */
-                    batch_tiles++;
-                    batch_raw += raw_size;
-                    
-                    /* Update prev_framebuf */
-                    for (int row = 0; row < h; row++) {
-                        memcpy(&s->prev_framebuf[(y1 + row) * s->width + x1],
-                               &send_buf[(y1 + row) * s->width + x1], w * 4);
-                    }
-                    
-                    tile_count++;
+                    work[work_count].pixels = send_buf;
+                    work[work_count].stride = s->width;
+                    work[work_count].prev_pixels = can_delta ? s->prev_framebuf : NULL;
+                    work[work_count].prev_stride = s->width;
+                    work[work_count].x1 = x1;
+                    work[work_count].y1 = y1;
+                    work[work_count].w = w;
+                    work[work_count].h = h;
+                    work_count++;
                 }
             }
+        }
+        
+        /* Compress all tiles in parallel */
+        if (work_count > 0 && nthreads > 0) {
+            compress_tiles_parallel(work, results, work_count);
+        }
+        
+        /* Second pass: build batches from results */
+        for (int i = 0; i < work_count; i++) {
+            struct tile_work *w = &work[i];
+            struct tile_result *r = &results[i];
+            int x1 = w->x1, y1 = w->y1;
+            int x2 = x1 + w->w, y2 = y1 + w->h;
+            int raw_size = w->w * w->h * 4;
+            
+            /* Single-threaded fallback */
+            if (nthreads == 0) {
+                int comp_result = compress_tile_adaptive(comp_buf, comp_buf_size,
+                                                         w->pixels, w->stride,
+                                                         w->prev_pixels, w->prev_stride,
+                                                         x1, y1, w->w, w->h);
+                if (comp_result > 0) {
+                    r->size = comp_result;
+                    r->is_delta = 1;
+                    memcpy(r->data, comp_buf, comp_result);
+                } else if (comp_result < 0) {
+                    r->size = -comp_result;
+                    r->is_delta = 0;
+                    memcpy(r->data, comp_buf, -comp_result);
+                } else {
+                    r->size = 0;
+                    r->is_delta = 0;
+                }
+            }
+            
+            bytes_raw += raw_size;
+            
+            int use_delta = r->is_delta;
+            int comp_size = r->size;
+            
+            size_t tile_size;
+            if (comp_size > 0) {
+                if (use_delta) {
+                    tile_size = (1 + 4 + 16 + comp_size) + ALPHA_DELTA_OVERHEAD;
+                } else {
+                    tile_size = 1 + 4 + 16 + comp_size;
+                }
+            } else {
+                tile_size = 1 + 4 + 16 + raw_size;
+            }
+            
+            /* Flush current batch if needed */
+            if (off + tile_size > max_batch && off > 0) {
+                if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
+                    wlr_log(WLR_ERROR, "Batch write send failed");
+                    memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+                }
+                pending_writes++;
+                batch_count++;
+                
+                /* Log batch stats */
+                if (batch_tiles > 0) {
+                    int ratio = batch_raw > 0 ? (int)(batch_sent * 100 / batch_raw) : 100;
+                    wlr_log(WLR_DEBUG, "Batch %d: %d tiles (%d comp, %d delta) %zu->%zu bytes (%d%%)",
+                            batch_count, batch_tiles, batch_comp, batch_delta,
+                            batch_raw, batch_sent, ratio);
+                }
+                batch_tiles = 0;
+                batch_raw = 0;
+                batch_sent = 0;
+                batch_comp = 0;
+                batch_delta = 0;
+                
+                off = 0;
+            }
+            
+            if (comp_size > 0) {
+                if (use_delta) {
+                    /* Alpha-delta path */
+                    batch[off++] = 'Y';
+                    PUT32(batch + off, draw->delta_id); off += 4;
+                    PUT32(batch + off, x1); off += 4;
+                    PUT32(batch + off, y1); off += 4;
+                    PUT32(batch + off, x2); off += 4;
+                    PUT32(batch + off, y2); off += 4;
+                    memcpy(batch + off, r->data, comp_size);
+                    off += comp_size;
+                    
+                    /* Composite delta onto image */
+                    batch[off++] = 'd';
+                    PUT32(batch + off, draw->image_id); off += 4;
+                    PUT32(batch + off, draw->delta_id); off += 4;
+                    PUT32(batch + off, draw->delta_id); off += 4;
+                    PUT32(batch + off, x1); off += 4;
+                    PUT32(batch + off, y1); off += 4;
+                    PUT32(batch + off, x2); off += 4;
+                    PUT32(batch + off, y2); off += 4;
+                    PUT32(batch + off, x1); off += 4;
+                    PUT32(batch + off, y1); off += 4;
+                    PUT32(batch + off, x1); off += 4;
+                    PUT32(batch + off, y1); off += 4;
+                    
+                    bytes_sent += comp_size + ALPHA_DELTA_OVERHEAD;
+                    batch_sent += comp_size + ALPHA_DELTA_OVERHEAD;
+                    delta_tiles++;
+                    batch_delta++;
+                } else {
+                    /* Direct path */
+                    batch[off++] = 'Y';
+                    PUT32(batch + off, draw->image_id); off += 4;
+                    PUT32(batch + off, x1); off += 4;
+                    PUT32(batch + off, y1); off += 4;
+                    PUT32(batch + off, x2); off += 4;
+                    PUT32(batch + off, y2); off += 4;
+                    memcpy(batch + off, r->data, comp_size);
+                    off += comp_size;
+                    bytes_sent += comp_size;
+                    batch_sent += comp_size;
+                }
+                comp_tiles++;
+                batch_comp++;
+            } else {
+                /* Uncompressed */
+                batch[off++] = 'y';
+                PUT32(batch + off, draw->image_id); off += 4;
+                PUT32(batch + off, x1); off += 4;
+                PUT32(batch + off, y1); off += 4;
+                PUT32(batch + off, x2); off += 4;
+                PUT32(batch + off, y2); off += 4;
+                
+                for (int row = 0; row < w->h; row++) {
+                    memcpy(batch + off, &send_buf[(y1 + row) * s->width + x1], w->w * 4);
+                    off += w->w * 4;
+                }
+                bytes_sent += raw_size;
+                batch_sent += raw_size;
+            }
+            
+            /* Track batch stats */
+            batch_tiles++;
+            batch_raw += raw_size;
+            
+            /* Update prev_framebuf */
+            for (int row = 0; row < w->h; row++) {
+                memcpy(&s->prev_framebuf[(y1 + row) * s->width + x1],
+                       &send_buf[(y1 + row) * s->width + x1], w->w * 4);
+            }
+            
+            tile_count++;
         }
         
         /* Send final batch with copy+borders+flush */
@@ -562,6 +615,10 @@ void *send_thread_func(void *arg) {
         pthread_mutex_unlock(&s->send_lock);
     }
     
+    /* Cleanup */
+    compress_pool_shutdown();
+    if (work) free(work);
+    if (results) free(results);
     if (comp_buf) free(comp_buf);
     free(batch);
     wlr_log(WLR_INFO, "Send thread exiting");

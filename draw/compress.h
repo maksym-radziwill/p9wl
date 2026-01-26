@@ -2,51 +2,56 @@
  * compress.h - Tile compression for Plan 9 draw protocol
  */
 
-#ifndef P9WL_COMPRESS_H
-#define P9WL_COMPRESS_H
+#ifndef COMPRESS_H
+#define COMPRESS_H
 
 #include <stdint.h>
-#include "../types.h"
 
-/* Overhead for alpha-delta compositing (extra 'd' command) */
+#ifndef TILE_SIZE
+#define TILE_SIZE 16
+#endif
+
+/* Overhead for alpha-delta composite command */
 #define ALPHA_DELTA_OVERHEAD 45
 
-/*
- * Compress tile data using LZ77-style row matching.
- * Returns compressed size, or 0 if compression didn't save enough.
- */
+/* Per-tile compression result */
+struct tile_result {
+    uint8_t data[TILE_SIZE * TILE_SIZE * 4 + 256];
+    int size;       /* compressed size, 0 if failed */
+    int is_delta;   /* 1 if delta compression, 0 if direct */
+};
+
+/* Work item for parallel compression */
+struct tile_work {
+    uint32_t *pixels;
+    int stride;
+    uint32_t *prev_pixels;
+    int prev_stride;
+    int x1, y1, w, h;
+    struct tile_result *result;
+};
+
+/* Core compression functions */
 int compress_tile_data(uint8_t *dst, int dst_max, 
                        uint8_t *raw, int bytes_per_row, int h);
 
-/*
- * Compress a tile from a framebuffer (direct, no delta).
- * Copies tile to contiguous buffer then compresses.
- * Returns compressed size, or 0 if failed.
- */
 int compress_tile_direct(uint8_t *dst, int dst_max, 
                          uint32_t *pixels, int stride, 
                          int x1, int y1, int w, int h);
 
-/*
- * Compress a tile using alpha-delta encoding.
- * Changed pixels get alpha=0xFF, unchanged get alpha=0x00.
- * Returns compressed size, or 0 if no changes or too many changes.
- */
 int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
                               uint32_t *pixels, int stride,
                               uint32_t *prev_pixels, int prev_stride,
                               int x1, int y1, int w, int h);
 
-/*
- * Adaptive compression: tries both direct and alpha-delta.
- * Returns:
- *   > 0: alpha-delta size (use delta path)
- *   < 0: negated direct size (use direct path)  
- *   = 0: compression failed, use uncompressed
- */
 int compress_tile_adaptive(uint8_t *dst, int dst_max,
                            uint32_t *pixels, int stride,
                            uint32_t *prev_pixels, int prev_stride,
                            int x1, int y1, int w, int h);
 
-#endif /* P9WL_COMPRESS_H */
+/* Thread pool API */
+int compress_pool_init(int nthreads);
+void compress_pool_shutdown(void);
+int compress_tiles_parallel(struct tile_work *tiles, struct tile_result *results, int count);
+
+#endif /* COMPRESS_H */

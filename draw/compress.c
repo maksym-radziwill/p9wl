@@ -13,23 +13,6 @@
 #include <pthread.h>
 #include "compress.h"
 
-/* Per-tile compression result */
-struct tile_result {
-    uint8_t data[TILE_SIZE * TILE_SIZE * 4 + 256];
-    int size;       /* compressed size, 0 if failed */
-    int is_delta;   /* 1 if delta compression, 0 if direct */
-};
-
-/* Work item for parallel compression */
-struct tile_work {
-    uint32_t *pixels;
-    int stride;
-    uint32_t *prev_pixels;
-    int prev_stride;
-    int x1, y1, w, h;
-    struct tile_result *result;
-};
-
 /* Thread pool state */
 static pthread_t *workers;
 static int num_workers;
@@ -50,18 +33,30 @@ static int lz77_compress_row(uint8_t *dst, int dst_max, uint8_t *raw, int pos, i
     while (pos < row_end) {
         int best = 0, boff = 0;
         int maxoff = pos - raw_start;
-        if (maxoff > 1024) maxoff = 1024;
+        /* Reduce window to 256 bytes (4 rows) - enough for tile patterns */
+        if (maxoff > 256) maxoff = 256;
         
-        /* Limit match length to not cross row boundary */
         int maxlen = row_end - pos;
         if (maxlen > 34) maxlen = 34;
         
-        for (int off = 1; off <= maxoff; off++) {
+        /* Search backwards, check row-aligned offsets first (more likely matches) */
+        for (int off = 64; off <= maxoff; off += 64) {
             int len = 0;
             while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
-            if (len > best) { best = len; boff = off; if (best == maxlen) break; }
+            if (len > best) { best = len; boff = off; }
+            if (best >= 16) goto found;  /* good enough */
         }
         
+        /* Then check other offsets */
+        for (int off = 1; off <= maxoff; off++) {
+            if ((off & 63) == 0) continue;  /* skip row-aligned, already checked */
+            int len = 0;
+            while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
+            if (len > best) { best = len; boff = off; }
+            if (best >= 12) break;  /* good enough for non-row match */
+        }
+        
+found:
         if (best >= 3) {
             if (nlit > 0) {
                 if (out + 1 + nlit > dst_max) return -1;
@@ -93,12 +88,35 @@ static int lz77_compress(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, 
     int out = 0;
     int h = raw_size / bytes_per_row;
     
-    for (int row = 0; row < h; row++) {
+    /* First row: must compress normally */
+    int n = lz77_compress_row(dst, dst_max, raw, 0, bytes_per_row, 0);
+    if (n < 0) return 0;
+    out += n;
+    
+    /* Remaining rows: check for duplicate first */
+    for (int row = 1; row < h; row++) {
         int row_start = row * bytes_per_row;
         int row_end = row_start + bytes_per_row;
-        int n = lz77_compress_row(dst + out, dst_max - out, raw, row_start, row_end, 0);
-        if (n < 0) return 0;
-        out += n;
+        uint8_t *curr = raw + row_start;
+        uint8_t *prev = raw + row_start - bytes_per_row;
+        
+        /* Fast path: row identical to previous */
+        if (memcmp(curr, prev, bytes_per_row) == 0) {
+            /* Emit back-references to copy entire row from offset=bytes_per_row */
+            int remaining = bytes_per_row;
+            int off_code = bytes_per_row - 1;
+            while (remaining > 0) {
+                int len = remaining > 34 ? 34 : remaining;
+                if (out + 2 > dst_max) return 0;
+                dst[out++] = ((len - 3) << 2) | ((off_code >> 8) & 0x03);
+                dst[out++] = off_code & 0xFF;
+                remaining -= len;
+            }
+        } else {
+            n = lz77_compress_row(dst + out, dst_max - out, raw, row_start, row_end, 0);
+            if (n < 0) return 0;
+            out += n;
+        }
     }
     
     return out;
