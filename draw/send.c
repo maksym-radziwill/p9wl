@@ -381,8 +381,10 @@ void *send_thread_func(void *arg) {
         wlr_log(WLR_INFO, "Compression pool initialized with %d threads", nthreads);
     }
     
-    /* Allocate work arrays for parallel compression */
-    int max_tiles = s->tiles_x * s->tiles_y;
+    /* Allocate work arrays for parallel compression.
+     * Use max possible size (4096x4096 / 16x16 = 65536 tiles) to handle resizes.
+     * This is about 3MB total which is acceptable. */
+    int max_tiles = (4096 / TILE_SIZE) * (4096 / TILE_SIZE);  /* 65536 tiles max */
     struct tile_work *work = malloc(max_tiles * sizeof(struct tile_work));
     struct tile_result *results = malloc(max_tiles * sizeof(struct tile_result));
     if (!work || !results) {
@@ -548,6 +550,13 @@ void *send_thread_func(void *arg) {
                     int w = x2 - x1, h = y2 - y1;
                     if (w <= 0 || h <= 0) continue;
                     
+                    /* Safety check - should never happen with 4096x4096 max */
+                    if (work_count >= max_tiles) {
+                        wlr_log(WLR_ERROR, "Work array overflow! work_count=%d max=%d", 
+                                work_count, max_tiles);
+                        goto tiles_collected;
+                    }
+                    
                     work[work_count].pixels = send_buf;
                     work[work_count].stride = s->width;
                     work[work_count].prev_pixels = can_delta ? s->prev_framebuf : NULL;
@@ -560,6 +569,7 @@ void *send_thread_func(void *arg) {
                 }
             }
         }
+        tiles_collected:
         
         /* Compress all tiles in parallel */
         if (work_count > 0 && nthreads > 0) {
