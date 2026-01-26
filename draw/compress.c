@@ -11,6 +11,68 @@
 #include <string.h>
 #include "compress.h"
 
+static int lz77_compress_row(uint8_t *dst, int dst_max, uint8_t *raw, int pos, int row_end, int raw_start) {
+    int out = 0;
+    uint8_t lit[128];
+    int nlit = 0;
+    
+    while (pos < row_end) {
+        int best = 0, boff = 0;
+        int maxoff = pos - raw_start;
+        if (maxoff > 1024) maxoff = 1024;
+        
+        /* Limit match length to not cross row boundary */
+        int maxlen = row_end - pos;
+        if (maxlen > 34) maxlen = 34;
+        
+        for (int off = 1; off <= maxoff; off++) {
+            int len = 0;
+            while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
+            if (len > best) { best = len; boff = off; if (best == maxlen) break; }
+        }
+        
+        if (best >= 3) {
+            if (nlit > 0) {
+                if (out + 1 + nlit > dst_max) return -1;
+                dst[out++] = 0x80 | (nlit - 1);
+                memcpy(dst + out, lit, nlit);
+                out += nlit;
+                nlit = 0;
+            }
+            if (out + 2 > dst_max) return -1;
+            dst[out++] = ((best - 3) << 2) | ((boff - 1) >> 8);
+            dst[out++] = (boff - 1) & 0xFF;
+            pos += best;
+        } else {
+            lit[nlit++] = raw[pos++];
+            if (nlit == 128 || pos == row_end) {
+                if (out + 1 + nlit > dst_max) return -1;
+                dst[out++] = 0x80 | (nlit - 1);
+                memcpy(dst + out, lit, nlit);
+                out += nlit;
+                nlit = 0;
+            }
+        }
+    }
+    
+    return out;
+}
+
+static int lz77_compress(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, int bytes_per_row) {
+    int out = 0;
+    int h = raw_size / bytes_per_row;
+    
+    for (int row = 0; row < h; row++) {
+        int row_start = row * bytes_per_row;
+        int row_end = row_start + bytes_per_row;
+        int n = lz77_compress_row(dst + out, dst_max - out, raw, row_start, row_end, 0);
+        if (n < 0) return 0;
+        out += n;
+    }
+    
+    return out;
+}
+
 int compress_tile_data(uint8_t *dst, int dst_max, 
                        uint8_t *raw, int bytes_per_row, int h) {
     int raw_size = h * bytes_per_row;
@@ -38,9 +100,9 @@ int compress_tile_data(uint8_t *dst, int dst_max,
         
         for (int row = 1; row < h; row++) {
             dst[out++] = (31 << 2) | 0;
-            dst[out++] = 3;
+            dst[out++] = 63;
             dst[out++] = (27 << 2) | 0;
-            dst[out++] = 3;
+            dst[out++] = 63;
         }
         return out;
     }
@@ -72,33 +134,13 @@ int compress_tile_data(uint8_t *dst, int dst_max,
         
         for (int row = 1; row < h; row++) {
             dst[out++] = (31 << 2) | 0;
-            dst[out++] = 3;
+            dst[out++] = 63;
             dst[out++] = (27 << 2) | 0;
-            dst[out++] = 3;
+            dst[out++] = 63;
         }
     } else {
-        /* Row-by-row with matching */
-        if (out + 1 + bytes_per_row > dst_max) return 0;
-        dst[out++] = 0x80 | (bytes_per_row - 1);
-        memcpy(dst + out, raw, bytes_per_row);
-        out += bytes_per_row;
-        
-        for (int row = 1; row < h; row++) {
-            uint8_t *curr = raw + row * bytes_per_row;
-            uint8_t *prev = raw + (row - 1) * bytes_per_row;
-            
-            if (memcmp(curr, prev, bytes_per_row) == 0) {
-                dst[out++] = (31 << 2) | 0;
-                dst[out++] = 63;
-                dst[out++] = (27 << 2) | 0;
-                dst[out++] = 63;
-            } else {
-                if (out + 1 + bytes_per_row > dst_max) return 0;
-                dst[out++] = 0x80 | (bytes_per_row - 1);
-                memcpy(dst + out, curr, bytes_per_row);
-                out += bytes_per_row;
-            }
-        }
+        out = lz77_compress(dst, dst_max, raw, raw_size, bytes_per_row);
+        if (out == 0) return 0;
     }
     
     /* Only use if we saved at least 25% */
