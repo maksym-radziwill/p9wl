@@ -142,14 +142,18 @@ void *send_thread_func(void *arg) {
     const size_t comp_buf_size = TILE_SIZE * TILE_SIZE * 4 + 256;
     uint8_t *comp_buf = malloc(comp_buf_size);
     
+    int pending_writes = 0;
+    int write_errors = 0;
     while (s->running) {
-         
+
         /* Wait for work with timeout */
         while (s->pending_buf < 0 && !s->window_changed && s->running) {
-            struct timespec req = {0};
-            req.tv_sec = 0;
-            req.tv_nsec = 100 * 1000000; 
-            nanosleep(&req, (struct timespec *)NULL);       
+            struct timespec ts;
+            ts.tv_sec = 0;         // 0 seconds
+            ts.tv_nsec = 100000; // 500,000,000 nanoseconds = 0.5 seconds
+
+            nanosleep(&ts, NULL); // The second argument can be used to store remaining time if interrupted by a signal
+    
         }
         
         if (!s->running) {
@@ -250,8 +254,6 @@ void *send_thread_func(void *arg) {
             s->force_full_frame = 0;
         }
         
-        int pending_writes = 0;
-        int write_errors = 0;
         uint64_t t_frame_start = now_us();
         uint64_t t_send_done = 0, t_recv_done = 0;
         
@@ -259,14 +261,7 @@ void *send_thread_func(void *arg) {
         int scrolled_regions = 0;
         if (!do_full && !scroll_disabled(s)) {
             detect_scroll(s, send_buf);
-            scrolled_regions = send_scroll_commands(s, &pending_writes);
-            
-            /* Drain responses to maintain adaptive pipeline depth */
-            int depth = pipeline_get_depth();
-            while (pending_writes > depth) {
-                if (p9_write_recv(p9) < 0) write_errors++;
-                pending_writes--;
-            }
+            scrolled_regions = send_scroll_commands(s, &pending_writes);    
         }
         
         /* Send tiles */
@@ -343,12 +338,6 @@ void *send_thread_func(void *arg) {
                         
                         off = 0;
                         
-                        /* Drain to maintain adaptive pipeline depth */
-                        int depth = pipeline_get_depth();
-                        while (pending_writes > depth) {
-                            if (p9_write_recv(p9) < 0) write_errors++;
-                            pending_writes--;
-                        }
                     }
                     
                     if (comp_size > 0) {
@@ -441,12 +430,6 @@ void *send_thread_func(void *arg) {
                 batch_count++;
                 off = 0;
                 
-                /* Drain to maintain adaptive pipeline depth */
-                int depth = pipeline_get_depth();
-                while (pending_writes > depth) {
-                    if (p9_write_recv(p9) < 0) write_errors++;
-                    pending_writes--;
-                }
             }
             
             /* Copy buffer to window */
@@ -566,14 +549,13 @@ void *send_thread_func(void *arg) {
             
             t_send_done = now_us();
             
-            /* Collect remaining pipelined responses */
-            while (pending_writes > 0) {
+            while(pending_writes > 0){
                 if (p9_write_recv(p9) < 0) {
                     write_errors++;
                 }
                 pending_writes--;
             }
-            
+
             t_recv_done = now_us();
             
             if (write_errors > 0) {
@@ -584,9 +566,6 @@ void *send_thread_func(void *arg) {
             double send_ms = (t_send_done - t_frame_start) / 1000.0;
             double recv_ms = (t_recv_done - t_send_done) / 1000.0;
             double total_ms = (t_recv_done - t_frame_start) / 1000.0;
-            
-            /* Adjust pipeline depth based on send/drain ratio */
-            pipeline_adjust(send_ms, recv_ms, batch_count);
             
             if (total_ms > 50 || send_count <= 10) {
                 wlr_log(WLR_INFO, "PIPE(d=%d): %d batches, send=%.1fms, drain=%.1fms, total=%.1fms",
