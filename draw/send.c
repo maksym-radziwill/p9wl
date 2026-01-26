@@ -178,7 +178,6 @@ void *send_thread_func(void *arg) {
             p9->draw_error = 0;
             draw->xor_enabled = 0;
             memset(s->prev_framebuf, 0, s->width * s->height * 4);
-            pipeline_reset();
             do_full = 1;
         }
         
@@ -532,8 +531,8 @@ void *send_thread_func(void *arg) {
             double total_ms = (t_recv_done - t_frame_start) / 1000.0;
             
             if (total_ms > 50 || send_count <= 10) {
-                wlr_log(WLR_INFO, "PIPE(d=%d): %d batches, send=%.1fms, drain=%.1fms, total=%.1fms",
-                    pipeline_get_depth(), batch_count, send_ms, recv_ms, total_ms);
+                wlr_log(WLR_INFO, "PIPE: %d batches, send=%.1fms, drain=%.1fms, total=%.1fms",
+                    batch_count, send_ms, recv_ms, total_ms);
             }
             
             /* Enable alpha-delta mode after first successful full frame */
