@@ -9,7 +9,38 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
+#include <pthread.h>
 #include "compress.h"
+
+/* Per-tile compression result */
+struct tile_result {
+    uint8_t data[TILE_SIZE * TILE_SIZE * 4 + 256];
+    int size;       /* compressed size, 0 if failed */
+    int is_delta;   /* 1 if delta compression, 0 if direct */
+};
+
+/* Work item for parallel compression */
+struct tile_work {
+    uint32_t *pixels;
+    int stride;
+    uint32_t *prev_pixels;
+    int prev_stride;
+    int x1, y1, w, h;
+    struct tile_result *result;
+};
+
+/* Thread pool state */
+static pthread_t *workers;
+static int num_workers;
+static struct tile_work *work_queue;
+static int work_count;
+static int work_next;
+static pthread_mutex_t work_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t work_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t done_cond = PTHREAD_COND_INITIALIZER;
+static int workers_done;
+static int pool_running;
 
 static int lz77_compress_row(uint8_t *dst, int dst_max, uint8_t *raw, int pos, int row_end, int raw_start) {
     int out = 0;
@@ -236,4 +267,122 @@ int compress_tile_adaptive(uint8_t *dst, int dst_max,
     }
     
     return direct_size > 0 ? -direct_size : 0;
+}
+
+/* Worker thread function */
+static void *compress_worker(void *arg) {
+    (void)arg;
+    
+    while (1) {
+        pthread_mutex_lock(&work_lock);
+        
+        while (work_next >= work_count && pool_running) {
+            pthread_cond_wait(&work_cond, &work_lock);
+        }
+        
+        if (!pool_running) {
+            pthread_mutex_unlock(&work_lock);
+            break;
+        }
+        
+        int idx = work_next++;
+        pthread_mutex_unlock(&work_lock);
+        
+        struct tile_work *w = &work_queue[idx];
+        int result = compress_tile_adaptive(
+            w->result->data, sizeof(w->result->data),
+            w->pixels, w->stride,
+            w->prev_pixels, w->prev_stride,
+            w->x1, w->y1, w->w, w->h
+        );
+        
+        if (result > 0) {
+            w->result->size = result;
+            w->result->is_delta = 1;
+        } else if (result < 0) {
+            w->result->size = -result;
+            w->result->is_delta = 0;
+        } else {
+            w->result->size = 0;
+            w->result->is_delta = 0;
+        }
+        
+        pthread_mutex_lock(&work_lock);
+        workers_done++;
+        if (workers_done == work_count) {
+            pthread_cond_signal(&done_cond);
+        }
+        pthread_mutex_unlock(&work_lock);
+    }
+    
+    return NULL;
+}
+
+/* Initialize compression thread pool */
+int compress_pool_init(int nthreads) {
+    if (workers) return 0;
+    
+    num_workers = nthreads;
+    workers = malloc(nthreads * sizeof(pthread_t));
+    if (!workers) return -1;
+    
+    pool_running = 1;
+    for (int i = 0; i < nthreads; i++) {
+        if (pthread_create(&workers[i], NULL, compress_worker, NULL) != 0) {
+            pool_running = 0;
+            for (int j = 0; j < i; j++) {
+                pthread_join(workers[j], NULL);
+            }
+            free(workers);
+            workers = NULL;
+            return -1;
+        }
+    }
+    
+    return 0;
+}
+
+/* Shutdown compression thread pool */
+void compress_pool_shutdown(void) {
+    if (!workers) return;
+    
+    pthread_mutex_lock(&work_lock);
+    pool_running = 0;
+    pthread_cond_broadcast(&work_cond);
+    pthread_mutex_unlock(&work_lock);
+    
+    for (int i = 0; i < num_workers; i++) {
+        pthread_join(workers[i], NULL);
+    }
+    
+    free(workers);
+    workers = NULL;
+}
+
+/* Compress multiple tiles in parallel */
+int compress_tiles_parallel(
+    struct tile_work *tiles, 
+    struct tile_result *results,
+    int count
+) {
+    if (!workers || count == 0) return -1;
+    
+    /* Link results to work items */
+    for (int i = 0; i < count; i++) {
+        tiles[i].result = &results[i];
+    }
+    
+    pthread_mutex_lock(&work_lock);
+    work_queue = tiles;
+    work_count = count;
+    work_next = 0;
+    workers_done = 0;
+    pthread_cond_broadcast(&work_cond);
+    
+    while (workers_done < count) {
+        pthread_cond_wait(&done_cond, &work_lock);
+    }
+    pthread_mutex_unlock(&work_lock);
+    
+    return 0;
 }
