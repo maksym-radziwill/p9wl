@@ -183,12 +183,8 @@ static void drain_pause(void) {
     
     /* Wait for drain thread to finish processing all pending responses */
     while (atomic_load(&drain.pending) > 0) {
-            struct timespec req;
-
-	    req.tv_sec = 0;
-    	    req.tv_nsec = 1000000L; // Use 'L' for long integer
-
-    	    nanosleep(&req, NULL);
+        struct timespec ts = {0, 1000000};  /* 1ms */
+        nanosleep(&ts, NULL);
     }
 }
 
