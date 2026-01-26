@@ -448,18 +448,17 @@ void *send_thread_func(void *arg) {
             relookup_window(s);
             if (s->resize_pending) {
                 /* Keep drain paused - will resume after resize completes */
-                wlr_log(WLR_DEBUG, "Resize pending - waiting for main thread");
-                /* Wait for resize to complete before resuming drain */
+                wlr_log(WLR_DEBUG, "Resize pending - waiting for main thread (%dx%d -> %dx%d)",
+                        s->width, s->height, s->pending_width, s->pending_height);
+                /* Wait for resize to FULLY complete (flag cleared at END of resize) */
                 while (s->resize_pending && s->running) {
                     struct timespec ts = {0, 10000000};  /* 10ms */
                     nanosleep(&ts, NULL);
                 }
-                wlr_log(WLR_DEBUG, "Resize complete - resuming drain");
+                wlr_log(WLR_DEBUG, "Resize complete - now %dx%d, resuming drain", 
+                        s->width, s->height);
             }
             drain_resume(); /* Restart drain */
-            if (s->resize_pending) {
-                continue;
-            }
             do_full = 1;
         }
         
@@ -477,9 +476,6 @@ void *send_thread_func(void *arg) {
                 }
             }
             drain_resume(); /* Restart drain */
-            if (s->resize_pending) {
-                continue;
-            }
             do_full = 1;
         }
         
