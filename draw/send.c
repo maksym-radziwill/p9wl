@@ -149,11 +149,9 @@ void *send_thread_func(void *arg) {
         /* Wait for work with timeout */
         while (s->pending_buf < 0 && !s->window_changed && s->running) {
             struct timespec ts;
-            ts.tv_sec = 0;         // 0 seconds
-            ts.tv_nsec = 100000; // 500,000,000 nanoseconds = 0.5 seconds
-
-            nanosleep(&ts, NULL); // The second argument can be used to store remaining time if interrupted by a signal
-    
+            ts.tv_sec = 0;          
+            ts.tv_nsec = 100000;  
+            nanosleep(&ts, NULL);  
         }
         
         if (!s->running) {
@@ -205,39 +203,6 @@ void *send_thread_func(void *arg) {
                 continue;
             }
             do_full = 1;
-        }
-        
-        /* Periodic probe */
-        uint32_t now = now_ms();
-        if (now - last_probe_time > 2000 && !s->resize_pending) {
-            last_probe_time = now;
-            
-            uint8_t probe[46];
-            int poff = 0;
-            probe[poff++] = 'd';
-            PUT32(probe + poff, draw->screen_id); poff += 4;
-            PUT32(probe + poff, draw->image_id); poff += 4;
-            PUT32(probe + poff, draw->opaque_id); poff += 4;
-            PUT32(probe + poff, draw->win_minx); poff += 4;
-            PUT32(probe + poff, draw->win_miny); poff += 4;
-            PUT32(probe + poff, draw->win_minx + 1); poff += 4;
-            PUT32(probe + poff, draw->win_miny + 1); poff += 4;
-            PUT32(probe + poff, 0); poff += 4;
-            PUT32(probe + poff, 0); poff += 4;
-            PUT32(probe + poff, 0); poff += 4;
-            PUT32(probe + poff, 0); poff += 4;
-            probe[poff++] = 'v';
-            p9_write(p9, draw->drawdata_fid, 0, probe, poff);
-            
-            if (p9->unknown_id_error) {
-                wlr_log(WLR_INFO, "Probe detected window change - re-looking up");
-                p9->unknown_id_error = 0;
-                relookup_window(s);
-                if (s->resize_pending) {
-                    continue;
-                }
-                do_full = 1;
-            }
         }
         
         if (!got_frame) {
