@@ -34,12 +34,6 @@ void send_frame(struct server *s) {
         return;
     }
     
-    /* Only send if we have new content */
-    if (!s->frame_dirty) {
-        pthread_mutex_unlock(&s->send_lock);
-        return;
-    }
-    s->frame_dirty = 0;
 
     /* Find a free buffer */
     int buf = -1;
@@ -68,7 +62,14 @@ void send_frame(struct server *s) {
 }
 
 int send_timer_callback(void *data) {
-    struct server *s = data;
+    struct server *s = data; 
+
+    /* Only send if we have new content */
+    if (!s->frame_dirty) {
+        return 0;
+    }
+    s->frame_dirty = 0;
+ 
     send_frame(s);
     return 0;
 }
