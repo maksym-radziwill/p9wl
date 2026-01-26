@@ -12,13 +12,13 @@ LDFLAGS += -lpthread -lm -lssl -lcrypto -lfftw3f
 # Source files
 SRCS = main.c p9/p9.c p9/p9_tls.c input/input.c draw/draw.c draw/compress.c draw/scroll.c draw/send.c \
        input/clipboard.c input/kbmap.c wayland/focus_manager.c wayland/focus.c wayland/popup.c wayland/toplevel.c wayland/wl_input.c wayland/output.c wayland/client.c \
-       draw/phase_correlate.c draw/pipeline.c draw/thread_pool.c
+       draw/phase_correlate.c draw/thread_pool.c
 OBJS = $(SRCS:.c=.o)
 
 # Headers
 HDRS = types.h p9/p9.h p9/p9_tls.h input/input.h draw/draw.h draw/compress.h draw/scroll.h draw/send.h \
        input/clipboard.h input/kbmap.h wayland/focus_manager.h wayland/focus.h wayland/popup.h wayland/toplevel.h wayland/wl_input.h wayland/output.h wayland/client.h wayland/wayland.h \
-       draw/phase_correlate.h draw/pipeline.h draw/thread_pool.h
+       draw/phase_correlate.h draw/thread_pool.h
 
 TARGET = p9wl
 
