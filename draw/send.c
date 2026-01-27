@@ -721,7 +721,7 @@ void *send_thread_func(void *arg) {
             if (scale <= 0.0f) scale = 1.0f;
             
             /* Matrix diagonal in 25.7 fixed-point: 1/scale * 128 */
-            int matrix_scale = (int)(128.0f / scale);
+            int matrix_scale = (int)(128.0f / scale + 0.5f);
             
             /* smooth=1 enables bilinear interpolation.
              * Only enable for actual upscaling (scale > 1.0).
