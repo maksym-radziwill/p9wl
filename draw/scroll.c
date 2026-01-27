@@ -211,7 +211,7 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     /* Divide frame into 16x4 grid (64 regions) with tile-aligned boundaries.
      * Leave TILE_SIZE margin at edges for exposed region handling. */
     int margin = TILE_SIZE;
-    int cols = 8, rows = 4;
+    int cols = 8, rows = 1;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
@@ -287,12 +287,12 @@ int send_scroll_commands(struct server *s, int *pending_writes) {
         int dx = s->scroll_regions[i].dx;
         int dy = s->scroll_regions[i].dy;
         
-        /* Align region to tile boundaries */
-        int rx1 = (s->scroll_regions[i].x1 / TILE_SIZE) * TILE_SIZE;
-        int ry1 = (s->scroll_regions[i].y1 / TILE_SIZE) * TILE_SIZE;
-        int rx2 = ((s->scroll_regions[i].x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-        int ry2 = ((s->scroll_regions[i].y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+        int rx1 = s->scroll_regions[i].x1;
+        int ry1 = s->scroll_regions[i].y1;
+        int rx2 = s->scroll_regions[i].x2;
+        int ry2 = s->scroll_regions[i].y2;
         
+
         if (rx2 > s->width) rx2 = s->width;
         if (ry2 > s->height) ry2 = s->height;
         

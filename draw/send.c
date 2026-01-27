@@ -91,10 +91,6 @@ static void *drain_thread_func(void *arg) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 10000000;  /* 10ms timeout */
-            if (ts.tv_nsec >= 1000000000) {
-                ts.tv_sec++;
-                ts.tv_nsec -= 1000000000;
-            }
             pthread_cond_timedwait(&drain.cond, &drain.lock, &ts);
         }
         pthread_mutex_unlock(&drain.lock);
@@ -185,7 +181,7 @@ static void drain_pause(void) {
     while (atomic_load(&drain.pending) > 0) {
             struct timespec req;
 
-	    req.tv_sec = 0;
+	        req.tv_sec = 0;
     	    req.tv_nsec = 1000000L; // Use 'L' for long integer
 
     	    nanosleep(&req, NULL);
@@ -340,7 +336,7 @@ void *send_thread_func(void *arg) {
     }
     
     /* Initialize parallel compression pool */
-    int nthreads = 4;  /* TODO: detect CPU cores */
+    int nthreads = sysconf(_SC_NPROCESSORS_ONLN) / 2;  
     if (compress_pool_init(nthreads) < 0) {
         wlr_log(WLR_ERROR, "Failed to init compression pool, falling back to single-threaded");
         nthreads = 0;
@@ -821,7 +817,7 @@ void *send_thread_func(void *arg) {
             int pending = atomic_load(&drain.pending);
             
             /* Log PIPE stats frequently for debugging */
-            if (send_count <= 20 || send_count % 50 == 0 || send_ms > 16.0) {
+            if (send_count % 30 == 0) {
                 wlr_log(WLR_INFO, "PIPE: %d batches, send=%.1fms, pending=%d",
                     batch_count, send_ms, pending);
             }
@@ -833,7 +829,7 @@ void *send_thread_func(void *arg) {
             }
             
             send_count++;
-            if (send_count <= 20 || send_count % 100 == 0) {
+            if (send_count % 30 == 0) {
                 int ratio = bytes_raw > 0 ? (int)(bytes_sent * 100 / bytes_raw) : 100;
                 if (scrolled_regions > 0) {
                     wlr_log(WLR_INFO, "Send #%d: %d tiles (%d comp, %d delta) %zu->%zu bytes (%d%%) [%d regions scrolled] [%d batches]", 
