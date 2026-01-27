@@ -64,17 +64,29 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     s->scroll_regions[reg_idx].dx = 0;
     s->scroll_regions[reg_idx].dy = 0;
     
+    /* Compute max scroll based on region dimensions (FFT limit is half the window) */
+    int max_scroll_x = (rx2 - rx1) / 2;
+    int max_scroll_y = (ry2 - ry1) / 2;
+    int max_scroll = max_scroll_x < max_scroll_y ? max_scroll_x : max_scroll_y;
+    
     /* Detect scroll using phase correlation */
     struct phase_result result = phase_correlate_detect(
         send_buf, prev_buf, width,
         rx1, ry1, rx2, ry2,
-        MAX_SCROLL_PIXELS
+        max_scroll
     );
     
     if (result.dx == 0 && result.dy == 0) return;
     
     int dx = result.dx;
     int dy = result.dy;
+    
+    /* Reject scroll at boundaries - likely aliasing artifact */
+    int abs_dx = dx < 0 ? -dx : dx;
+    int abs_dy = dy < 0 ? -dy : dy;
+    if (abs_dx >= max_scroll_x || abs_dy >= max_scroll_y) {
+        return;
+    }
     
     wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d", reg_idx, dx, dy);
     
@@ -89,9 +101,6 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     int ty1 = ry1 / TILE_SIZE;
     int tx2 = rx2 / TILE_SIZE;
     int ty2 = ry2 / TILE_SIZE;
-    
-    int abs_dx = dx < 0 ? -dx : dx;
-    int abs_dy = dy < 0 ? -dy : dy;
     
     /* Compute src/dst exactly as send_scroll_commands does */
     int dst_x1 = rx1, dst_x2 = rx2;
@@ -232,6 +241,11 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
                 bytes_with_scroll += size_exp;
             }
         }
+    }
+    
+    /* If nothing changed, scroll can't help */
+    if (bytes_no_scroll == 0) {
+        return;
     }
     
     /* Only scroll if it saves bytes */
