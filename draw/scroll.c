@@ -192,31 +192,40 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     double t_start = get_time_us();
     memset(&timing, 0, sizeof(timing));
     
-    /* Divide frame into regions */
-    s->scroll_regions_x = (s->width + REGION_STRIDE - 1) / REGION_STRIDE;
-    s->scroll_regions_y = (s->height + REGION_STRIDE - 1) / REGION_STRIDE;
+    /* Divide frame into 4 quadrants with tile-aligned boundaries.
+     * Leave TILE_SIZE margin at edges for exposed region handling. */
+    int hw = (s->width / 2 / TILE_SIZE) * TILE_SIZE;
+    int hh = (s->height / 2 / TILE_SIZE) * TILE_SIZE;
+    int margin = TILE_SIZE;
+    
+    int regions[4][4] = {
+        {margin, margin, hw, hh},                                    /* top-left */
+        {hw, margin, s->width - margin, hh},                         /* top-right */
+        {margin, hh, hw, s->height - margin},                        /* bottom-left */
+        {hw, hh, s->width - margin, s->height - margin}              /* bottom-right */
+    };
+    
+    s->scroll_regions_x = 2;
+    s->scroll_regions_y = 2;
     s->num_scroll_regions = 0;
     
-    for (int ry = 0; ry < s->scroll_regions_y && s->num_scroll_regions < MAX_SCROLL_REGIONS; ry++) {
-        for (int rx = 0; rx < s->scroll_regions_x && s->num_scroll_regions < MAX_SCROLL_REGIONS; rx++) {
-            int x1 = rx * REGION_STRIDE + TILE_SIZE;
-            int y1 = ry * REGION_STRIDE + TILE_SIZE;
-            int x2 = x1 + SCROLL_REGION_SIZE;
-            int y2 = y1 + SCROLL_REGION_SIZE;
-            
-            if (x2 > s->width) x2 = s->width;
-            if (y2 > s->height) y2 = s->height;
-            if (x2 - x1 < 32 || y2 - y1 < 32) continue;
-            
-            int idx = s->num_scroll_regions++;
-            s->scroll_regions[idx].x1 = x1;
-            s->scroll_regions[idx].y1 = y1;
-            s->scroll_regions[idx].x2 = x2;
-            s->scroll_regions[idx].y2 = y2;
-            s->scroll_regions[idx].detected = 0;
-            s->scroll_regions[idx].dx = 0;
-            s->scroll_regions[idx].dy = 0;
-        }
+    for (int i = 0; i < 4; i++) {
+        int x1 = regions[i][0];
+        int y1 = regions[i][1];
+        int x2 = regions[i][2];
+        int y2 = regions[i][3];
+        
+        /* Skip if region too small */
+        if (x2 - x1 < 64 || y2 - y1 < 64) continue;
+        
+        int idx = s->num_scroll_regions++;
+        s->scroll_regions[idx].x1 = x1;
+        s->scroll_regions[idx].y1 = y1;
+        s->scroll_regions[idx].x2 = x2;
+        s->scroll_regions[idx].y2 = y2;
+        s->scroll_regions[idx].detected = 0;
+        s->scroll_regions[idx].dx = 0;
+        s->scroll_regions[idx].dy = 0;
     }
     
     /* Process regions in parallel using thread pool */
