@@ -64,21 +64,23 @@ static void output_frame(struct wl_listener *listener, void *data) {
             
             if (s->wl_scaling || scale <= 1.001f) {
                 /* Wayland scaling mode: everything at physical resolution */
-                logical_w = (new_w / TILE_SIZE) * TILE_SIZE;
-                logical_h = (new_h / TILE_SIZE) * TILE_SIZE;
+                logical_w = ((new_w + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+                logical_h = ((new_h + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
                 if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
                 if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
                 
                 wlr_log(WLR_INFO, "Resize (Wayland scaling): physical %dx%d, aligned %dx%d",
                         new_w, new_h, logical_w, logical_h);
             } else {
-                /* 9front scaling mode: compositor at logical resolution */
-                logical_w = (int)(new_w / scale + 0.5f);
-                logical_h = (int)(new_h / scale + 0.5f);
+                /* 9front scaling mode: compositor at logical resolution.
+                 * Round UP so logical * scale >= physical.
+                 */
+                logical_w = (int)((new_w + scale - 1) / scale);
+                logical_h = (int)((new_h + scale - 1) / scale);
                 
-                /* Align logical dimensions to tile size */
-                logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
-                logical_h = (logical_h / TILE_SIZE) * TILE_SIZE;
+                /* Align UP to tile size */
+                logical_w = ((logical_w + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+                logical_h = ((logical_h + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
                 if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
                 if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
                 
@@ -130,11 +132,9 @@ static void output_frame(struct wl_listener *listener, void *data) {
                     draw->logical_height = logical_h;
                     draw->scale = 1.0f;
                 } else {
-                    /* 9front scaling mode: draw->width/height = effective physical */
-                    int eff_phys_w = (int)(logical_w * scale + 0.5f);
-                    int eff_phys_h = (int)(logical_h * scale + 0.5f);
-                    draw->width = eff_phys_w;
-                    draw->height = eff_phys_h;
+                    /* 9front scaling mode: draw->width/height = actual physical */
+                    draw->width = new_w;
+                    draw->height = new_h;
                     draw->logical_width = logical_w;
                     draw->logical_height = logical_h;
                     draw->scale = scale;
@@ -324,8 +324,9 @@ void new_output(struct wl_listener *l, void *d) {
     float scale = s->scale;
     if (scale <= 0.0f) scale = 1.0f;
     
-    int phys_w = s->width;
-    int phys_h = s->height;
+    /* Get ACTUAL physical window size (not tile-aligned) */
+    int phys_w = s->draw.actual_maxx - s->draw.actual_minx;
+    int phys_h = s->draw.actual_maxy - s->draw.actual_miny;
     
     /*
      * Two scaling modes:
@@ -385,12 +386,16 @@ void new_output(struct wl_listener *l, void *d) {
     /* 9front scaling mode */
     wlr_log(WLR_INFO, "Using 9front-side scaling (scale=%.2f)", scale);
     
-    int logical_w = (int)(phys_w / scale + 0.5f);
-    int logical_h = (int)(phys_h / scale + 0.5f);
+    /* Compute logical dimensions: round UP so scaled result covers full window.
+     * logical = ceil(physical / scale), then align UP to tile size.
+     * This ensures logical * scale >= physical.
+     */
+    int logical_w = (int)((phys_w + scale - 1) / scale);  /* ceil division */
+    int logical_h = (int)((phys_h + scale - 1) / scale);
     
-    /* Align to tile size */
-    logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
-    logical_h = (logical_h / TILE_SIZE) * TILE_SIZE;
+    /* Align UP to tile size */
+    logical_w = ((logical_w + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    logical_h = ((logical_h + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
     if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
     if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
     
@@ -504,15 +509,12 @@ void new_output(struct wl_listener *l, void *d) {
     s->tiles_x = (logical_w + TILE_SIZE - 1) / TILE_SIZE;
     s->tiles_y = (logical_h + TILE_SIZE - 1) / TILE_SIZE;
     
-    /* Update draw state.
-     * draw->width/height must be the "effective physical" = logical * scale.
-     * This ensures the 'a' command's dest rect R exactly matches the scaled source.
-     * The gap between effective physical and actual window is filled by borders.
+    /* draw->width/height = ACTUAL physical window size.
+     * The 'a' command scales from logical source to physical dest.
+     * Since logical * scale >= physical (due to ceil rounding), this works.
      */
-    int eff_phys_w = (int)(logical_w * scale + 0.5f);
-    int eff_phys_h = (int)(logical_h * scale + 0.5f);
-    s->draw.width = eff_phys_w;
-    s->draw.height = eff_phys_h;
+    s->draw.width = phys_w;
+    s->draw.height = phys_h;
     s->draw.logical_width = logical_w;
     s->draw.logical_height = logical_h;
     s->draw.scale = scale;
@@ -522,8 +524,8 @@ void new_output(struct wl_listener *l, void *d) {
         wlr_scene_rect_set_size(s->background, logical_w, logical_h);
     }
     
-    wlr_log(WLR_INFO, "Output ready: %dx%d actual, %dx%d effective physical, scale=%.2f, %dx%d logical (9front scales)",
-            phys_w, phys_h, eff_phys_w, eff_phys_h, scale, logical_w, logical_h);
+    wlr_log(WLR_INFO, "Output ready: %dx%d physical, scale=%.2f, %dx%d logical (9front scales)",
+            phys_w, phys_h, scale, logical_w, logical_h);
     
     /* Now that everything is set up correctly, trigger first frame */
     s->force_full_frame = 1;
