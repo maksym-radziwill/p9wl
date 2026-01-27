@@ -220,6 +220,9 @@ struct server {
     int tls_insecure;                  /* Insecure mode (-k option) */
     float scale;                       /* Output scale factor for HiDPI (default: 1.0) */
     enum wlr_log_importance log_level; /* Log level */
+
+    float wl_scaling;
+
 };
 
 /* Utility functions */

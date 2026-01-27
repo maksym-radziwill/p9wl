@@ -149,15 +149,12 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     
     /* Mouse coordinates from 9front are in PHYSICAL screen coordinates.
      * Compositor operates at LOGICAL resolution (s->width, s->height).
-     * Convert physical mouse coords to logical.
+     * Convert physical mouse coords to logical using draw->scale.
      *
-     * Physical coords: mx, my (from 9front mouse)
-     * Window physical origin: s->draw.win_minx, s->draw.win_miny
-     * Scale factor: s->scale
-     *
-     * Logical coords = (physical - window_origin) / scale
+     * In 9front scaling mode: draw->scale = user's scale (e.g., 1.5)
+     * In Wayland scaling mode: draw->scale = 1.0 (no conversion needed)
      */
-    float scale = s->scale;
+    float scale = s->draw.scale;
     if (scale <= 0.0f) scale = 1.0f;
     
     /* Convert to window-relative physical, then to logical */
@@ -167,7 +164,7 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     int local_x = (int)(phys_local_x / scale + 0.5f);
     int local_y = (int)(phys_local_y / scale + 0.5f);
     
-    /* s->width, s->height are already LOGICAL dimensions */
+    /* s->width, s->height are the compositor's dimensions (logical in 9front mode) */
     int logical_w = s->width;
     int logical_h = s->height;
     

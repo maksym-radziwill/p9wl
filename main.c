@@ -61,7 +61,9 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -S <scale>     Output scale factor for HiDPI displays (1.0-4.0, default: 1.0)\n");
     fprintf(stderr, "                 Supports fractional values like 1.5, 1.25, 2.0, etc.\n");
     fprintf(stderr, "                 Use -S 2 if fonts appear too small\n");
-    fprintf(stderr, "\nLogging options:\n");
+    fprintf(stderr, "  -W             Use Wayland-side scaling instead of 9front scaling\n");
+    fprintf(stderr, "                 (may look sharper but uses more bandwidth)\n");
+    fprintf(stderr, "\nLogging options:\n");;
     fprintf(stderr, "  -q             Quiet mode (errors only, default)\n");
     fprintf(stderr, "  -v             Verbose mode (info + errors)\n");
     fprintf(stderr, "  -d             Debug mode (all messages)\n");
@@ -116,7 +118,7 @@ static void print_usage(const char *prog) {
 }
 
 static int parse_args(int argc, char *argv[], const char **host, int *port,
-                      const char **uname, float *scale,
+                      const char **uname, float *scale, int *wl_scaling,
                       enum wlr_log_importance *log_level,
                       struct tls_config *tls_cfg,
                       char ***exec_argv, int *exec_argc) {
@@ -126,6 +128,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     *port = -1;  /* Will set default based on TLS config */
     *uname = NULL;
     *scale = 1.0f;  /* Default scale factor */
+    *wl_scaling = 0; /* Default: use 9front scaling */
     *log_level = WLR_ERROR;  /* Default: errors only */
     memset(tls_cfg, 0, sizeof(*tls_cfg));
     *exec_argv = NULL;
@@ -144,6 +147,8 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
             *scale = strtof(argv[++i], NULL);
             if (*scale < 1.0f) *scale = 1.0f;
             if (*scale > 4.0f) *scale = 4.0f;
+        } else if (strcmp(argv[i], "-W") == 0) {
+            *wl_scaling = 1;
         } else if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             *log_level = WLR_ERROR;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
@@ -383,14 +388,15 @@ int main(int argc, char *argv[]) {
     const char *host = NULL;
     int port = P9_PORT;
     float scale = 1.0f;
+    int wl_scaling = 0;  /* 0 = 9front scaling (default), 1 = Wayland scaling */
     enum wlr_log_importance log_level = WLR_ERROR;
     struct tls_config tls_cfg = {0};
     char **exec_argv = NULL;
     int exec_argc = 0;
 
     /* Parse arguments */
-    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg,
-                   &exec_argv, &exec_argc) < 0) {
+    if (parse_args(argc, argv, &host, &port, &uname, &scale, &wl_scaling,
+                   &log_level, &tls_cfg, &exec_argv, &exec_argc) < 0) {
         print_usage(argv[0]);
         return 1;
     }
@@ -458,6 +464,7 @@ int main(int argc, char *argv[]) {
     }
     s.tls_insecure = tls_cfg.insecure;
     s.scale = (scale > 0.0f) ? scale : 1.0f;  /* HiDPI scale factor, default 1.0 */
+    s.wl_scaling = wl_scaling;  /* 0 = 9front scaling, 1 = Wayland scaling */
     s.log_level = log_level;
 
     wlr_log(WLR_INFO, "Connecting to %s:%d", s.host, s.port);
@@ -486,6 +493,14 @@ int main(int argc, char *argv[]) {
     s.tiles_x = (s.width + TILE_SIZE - 1) / TILE_SIZE;
     s.tiles_y = (s.height + TILE_SIZE - 1) / TILE_SIZE;
 
+    /* Initialize draw.scale BEFORE starting send_thread to avoid race condition.
+     * Without this, send_thread might send a frame with scale=0 (identity matrix)
+     * before new_output() has a chance to set the correct scale.
+     */
+    s.draw.scale = s.scale;
+    s.draw.logical_width = s.draw.width;   /* Will be updated by new_output() */
+    s.draw.logical_height = s.draw.height;
+
     if (s.scale > 1.0f) {
         int logical_w = (int)(s.width / s.scale + 0.5f);
         int logical_h = (int)(s.height / s.scale + 0.5f);
@@ -506,8 +521,11 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    s.force_full_frame = 1;
-    s.frame_dirty = 1;
+    /* Don't set force_full_frame yet - wait until Wayland is initialized
+     * so new_output() can reallocate buffers at logical resolution first.
+     */
+    s.force_full_frame = 0;
+    s.frame_dirty = 0;
     s.last_frame_ms = 0;
 
     /* Initialize send thread synchronization */
