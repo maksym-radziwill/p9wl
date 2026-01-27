@@ -121,7 +121,19 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
             /* Check with scroll */
             int src_x1 = x1 - dx;
             int src_y1 = y1 - dy;
-            if (src_x1 >= 0 && src_y1 >= 0 && 
+            
+            /* Check if tile falls in exposed region after blit.
+             * The blit only covers dst=[ry1+abs_dy, ry2] for dy>0,
+             * so tiles at [ry1, ry1+abs_dy) are exposed. */
+            int in_exposed = 0;
+            int abs_dx = dx < 0 ? -dx : dx;
+            int abs_dy = dy < 0 ? -dy : dy;
+            if (dy > 0 && y1 < ry1 + abs_dy) in_exposed = 1;
+            if (dy < 0 && y1 + TILE_SIZE > ry2 - abs_dy) in_exposed = 1;
+            if (dx > 0 && x1 < rx1 + abs_dx) in_exposed = 1;
+            if (dx < 0 && x1 + TILE_SIZE > rx2 - abs_dx) in_exposed = 1;
+            
+            if (!in_exposed && src_x1 >= 0 && src_y1 >= 0 && 
                 src_x1 + TILE_SIZE <= s->width && src_y1 + TILE_SIZE <= s->height) {
                 
                 /* Check if tile is identical with scroll */
@@ -192,40 +204,36 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     double t_start = get_time_us();
     memset(&timing, 0, sizeof(timing));
     
-    /* Divide frame into 4 quadrants with tile-aligned boundaries.
+    /* Divide frame into 2x2 grid (4 quadrants) with tile-aligned boundaries.
      * Leave TILE_SIZE margin at edges for exposed region handling. */
-    int hw = (s->width / 2 / TILE_SIZE) * TILE_SIZE;
-    int hh = (s->height / 2 / TILE_SIZE) * TILE_SIZE;
     int margin = TILE_SIZE;
+    int cols = 2, rows = 2;
+    int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
+    int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
-    int regions[4][4] = {
-        {margin, margin, hw, hh},                                    /* top-left */
-        {hw, margin, s->width - margin, hh},                         /* top-right */
-        {margin, hh, hw, s->height - margin},                        /* bottom-left */
-        {hw, hh, s->width - margin, s->height - margin}              /* bottom-right */
-    };
-    
-    s->scroll_regions_x = 2;
-    s->scroll_regions_y = 2;
+    s->scroll_regions_x = cols;
+    s->scroll_regions_y = rows;
     s->num_scroll_regions = 0;
     
-    for (int i = 0; i < 4; i++) {
-        int x1 = regions[i][0];
-        int y1 = regions[i][1];
-        int x2 = regions[i][2];
-        int y2 = regions[i][3];
-        
-        /* Skip if region too small */
-        if (x2 - x1 < 64 || y2 - y1 < 64) continue;
-        
-        int idx = s->num_scroll_regions++;
-        s->scroll_regions[idx].x1 = x1;
-        s->scroll_regions[idx].y1 = y1;
-        s->scroll_regions[idx].x2 = x2;
-        s->scroll_regions[idx].y2 = y2;
-        s->scroll_regions[idx].detected = 0;
-        s->scroll_regions[idx].dx = 0;
-        s->scroll_regions[idx].dy = 0;
+    for (int ry = 0; ry < rows; ry++) {
+        for (int rx = 0; rx < cols; rx++) {
+            int x1 = margin + rx * cell_w;
+            int y1 = margin + ry * cell_h;
+            int x2 = (rx == cols - 1) ? s->width - margin : x1 + cell_w;
+            int y2 = (ry == rows - 1) ? s->height - margin : y1 + cell_h;
+            
+            /* Skip if region too small */
+            if (x2 - x1 < 64 || y2 - y1 < 64) continue;
+            
+            int idx = s->num_scroll_regions++;
+            s->scroll_regions[idx].x1 = x1;
+            s->scroll_regions[idx].y1 = y1;
+            s->scroll_regions[idx].x2 = x2;
+            s->scroll_regions[idx].y2 = y2;
+            s->scroll_regions[idx].detected = 0;
+            s->scroll_regions[idx].dx = 0;
+            s->scroll_regions[idx].dy = 0;
+        }
     }
     
     /* Process regions in parallel using thread pool */

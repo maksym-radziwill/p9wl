@@ -494,9 +494,17 @@ void *send_thread_func(void *arg) {
                         goto tiles_collected;
                     }
                     
+                    /* Check if tile is in scroll-exposed region (marked 0xDEADBEEF).
+                     * Server's buffer has garbage there after blit, so delta
+                     * encoding would produce wrong pixels. Force raw. */
+                    int use_delta = can_delta;
+                    if (use_delta && s->prev_framebuf[y1 * s->width + x1] == 0xDEADBEEF) {
+                        use_delta = 0;
+                    }
+                    
                     work[work_count].pixels = send_buf;
                     work[work_count].stride = s->width;
-                    work[work_count].prev_pixels = can_delta ? s->prev_framebuf : NULL;
+                    work[work_count].prev_pixels = use_delta ? s->prev_framebuf : NULL;
                     work[work_count].prev_stride = s->width;
                     work[work_count].x1 = x1;
                     work[work_count].y1 = y1;
