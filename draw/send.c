@@ -494,12 +494,20 @@ void *send_thread_func(void *arg) {
                         goto tiles_collected;
                     }
                     
-                    /* Check if tile is in scroll-exposed region (marked 0xDEADBEEF).
+                    /* Check if tile overlaps scroll-exposed region (marked 0xDEADBEEF).
                      * Server's buffer has garbage there after blit, so delta
-                     * encoding would produce wrong pixels. Force raw. */
+                     * encoding would produce wrong pixels. Force raw.
+                     * Check all 4 corners since tile may straddle region boundary. */
                     int use_delta = can_delta;
-                    if (use_delta && s->prev_framebuf[y1 * s->width + x1] == 0xDEADBEEF) {
-                        use_delta = 0;
+                    if (use_delta) {
+                        int x2m1 = x1 + w - 1;
+                        int y2m1 = y1 + h - 1;
+                        if (s->prev_framebuf[y1 * s->width + x1] == 0xDEADBEEF ||
+                            s->prev_framebuf[y1 * s->width + x2m1] == 0xDEADBEEF ||
+                            s->prev_framebuf[y2m1 * s->width + x1] == 0xDEADBEEF ||
+                            s->prev_framebuf[y2m1 * s->width + x2m1] == 0xDEADBEEF) {
+                            use_delta = 0;
+                        }
                     }
                     
                     work[work_count].pixels = send_buf;

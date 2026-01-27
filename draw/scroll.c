@@ -54,10 +54,14 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     uint32_t *prev_buf = s->prev_framebuf;
     int width = s->width;
     
-    int rx1 = s->scroll_regions[reg_idx].x1;
-    int ry1 = s->scroll_regions[reg_idx].y1;
-    int rx2 = s->scroll_regions[reg_idx].x2;
-    int ry2 = s->scroll_regions[reg_idx].y2;
+    /* Align region to tile boundaries (same as send_scroll_commands) */
+    int rx1 = (s->scroll_regions[reg_idx].x1 / TILE_SIZE) * TILE_SIZE;
+    int ry1 = (s->scroll_regions[reg_idx].y1 / TILE_SIZE) * TILE_SIZE;
+    int rx2 = ((s->scroll_regions[reg_idx].x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    int ry2 = ((s->scroll_regions[reg_idx].y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    
+    if (rx2 > s->width) rx2 = s->width;
+    if (ry2 > s->height) ry2 = s->height;
     
     s->scroll_regions[reg_idx].detected = 0;
     s->scroll_regions[reg_idx].dx = 0;
@@ -204,12 +208,16 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     double t_start = get_time_us();
     memset(&timing, 0, sizeof(timing));
     
-    /* Divide frame into 4x4 grid (16 regions) with tile-aligned boundaries.
+    /* Divide frame into 16x4 grid (64 regions) with tile-aligned boundaries.
      * Leave TILE_SIZE margin at edges for exposed region handling. */
     int margin = TILE_SIZE;
-    int cols = 5, rows = 5;
+    int cols = 16, rows = 4;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
+    
+    /* Ensure minimum cell size */
+    if (cell_w < TILE_SIZE) cell_w = TILE_SIZE;
+    if (cell_h < TILE_SIZE) cell_h = TILE_SIZE;
     
     s->scroll_regions_x = cols;
     s->scroll_regions_y = rows;
@@ -219,8 +227,10 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
         for (int rx = 0; rx < cols; rx++) {
             int x1 = margin + rx * cell_w;
             int y1 = margin + ry * cell_h;
-            int x2 = (rx == cols - 1) ? s->width - margin : x1 + cell_w;
-            int y2 = (ry == rows - 1) ? s->height - margin : y1 + cell_h;
+            int x2 = (rx == cols - 1) ? 
+                ((s->width - margin) / TILE_SIZE) * TILE_SIZE : x1 + cell_w;
+            int y2 = (ry == rows - 1) ? 
+                ((s->height - margin) / TILE_SIZE) * TILE_SIZE : y1 + cell_h;
             
             /* Skip if region too small */
             if (x2 - x1 < 64 || y2 - y1 < 64) continue;
