@@ -54,14 +54,11 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     uint32_t *prev_buf = s->prev_framebuf;
     int width = s->width;
     
-    /* Align region to tile boundaries (same as send_scroll_commands) */
-    int rx1 = (s->scroll_regions[reg_idx].x1 / TILE_SIZE) * TILE_SIZE;
-    int ry1 = (s->scroll_regions[reg_idx].y1 / TILE_SIZE) * TILE_SIZE;
-    int rx2 = ((s->scroll_regions[reg_idx].x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    int ry2 = ((s->scroll_regions[reg_idx].y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    
-    if (rx2 > s->width) rx2 = s->width;
-    if (ry2 > s->height) ry2 = s->height;
+    /* Region bounds are already tile-aligned from detect_scroll */
+    int rx1 = s->scroll_regions[reg_idx].x1;
+    int ry1 = s->scroll_regions[reg_idx].y1;
+    int rx2 = s->scroll_regions[reg_idx].x2;
+    int ry2 = s->scroll_regions[reg_idx].y2;
     
     s->scroll_regions[reg_idx].detected = 0;
     s->scroll_regions[reg_idx].dx = 0;
@@ -88,8 +85,54 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     
     int tx1 = rx1 / TILE_SIZE;
     int ty1 = ry1 / TILE_SIZE;
-    int tx2 = (rx2 + TILE_SIZE - 1) / TILE_SIZE;
-    int ty2 = (ry2 + TILE_SIZE - 1) / TILE_SIZE;
+    int tx2 = rx2 / TILE_SIZE;
+    int ty2 = ry2 / TILE_SIZE;
+    
+    int abs_dx = dx < 0 ? -dx : dx;
+    int abs_dy = dy < 0 ? -dy : dy;
+    
+    /* Compute src/dst exactly as send_scroll_commands does */
+    int dst_x1 = rx1, dst_x2 = rx2;
+    int dst_y1, dst_y2;
+    
+    if (dy < 0) {
+        dst_y1 = ry1;
+        dst_y2 = ry2 - abs_dy;
+    } else if (dy > 0) {
+        dst_y1 = ry1 + abs_dy;
+        dst_y2 = ry2;
+    } else {
+        dst_y1 = ry1;
+        dst_y2 = ry2;
+    }
+    
+    if (dx < 0) {
+        dst_x1 = rx1;
+        dst_x2 = rx2 - abs_dx;
+    } else if (dx > 0) {
+        dst_x1 = rx1 + abs_dx;
+        dst_x2 = rx2;
+    }
+    
+    /* Compute tile-aligned exposed boundaries EXACTLY as send_scroll_commands does */
+    int exposed_x1 = 0, exposed_x2 = 0;
+    int exposed_y1 = 0, exposed_y2 = 0;
+    
+    if (dy < 0) {
+        exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
+        exposed_y2 = ry2;
+    } else if (dy > 0) {
+        exposed_y1 = ry1;
+        exposed_y2 = ((dst_y1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    }
+    
+    if (dx < 0) {
+        exposed_x1 = (dst_x2 / TILE_SIZE) * TILE_SIZE;
+        exposed_x2 = rx2;
+    } else if (dx > 0) {
+        exposed_x1 = rx1;
+        exposed_x2 = ((dst_x1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    }
     
     for (int ty = ty1; ty < ty2; ty++) {
         for (int tx = tx1; tx < tx2; tx++) {
@@ -126,16 +169,10 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
             int src_x1 = x1 - dx;
             int src_y1 = y1 - dy;
             
-            /* Check if tile falls in exposed region after blit.
-             * The blit only covers dst=[ry1+abs_dy, ry2] for dy>0,
-             * so tiles at [ry1, ry1+abs_dy) are exposed. */
+            /* Check if tile falls in exposed region after blit */
             int in_exposed = 0;
-            int abs_dx = dx < 0 ? -dx : dx;
-            int abs_dy = dy < 0 ? -dy : dy;
-            if (dy > 0 && y1 < ry1 + abs_dy) in_exposed = 1;
-            if (dy < 0 && y1 + TILE_SIZE > ry2 - abs_dy) in_exposed = 1;
-            if (dx > 0 && x1 < rx1 + abs_dx) in_exposed = 1;
-            if (dx < 0 && x1 + TILE_SIZE > rx2 - abs_dx) in_exposed = 1;
+            if (dy != 0 && y1 >= exposed_y1 && y1 < exposed_y2) in_exposed = 1;
+            if (dx != 0 && x1 >= exposed_x1 && x1 < exposed_x2) in_exposed = 1;
             
             if (!in_exposed && src_x1 >= 0 && src_y1 >= 0 && 
                 src_x1 + TILE_SIZE <= s->width && src_y1 + TILE_SIZE <= s->height) {
@@ -223,6 +260,10 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     s->scroll_regions_y = rows;
     s->num_scroll_regions = 0;
     
+    /* Maximum valid tile-aligned coordinates */
+    int max_x = (s->width / TILE_SIZE) * TILE_SIZE;
+    int max_y = (s->height / TILE_SIZE) * TILE_SIZE;
+    
     for (int ry = 0; ry < rows; ry++) {
         for (int rx = 0; rx < cols; rx++) {
             int x1 = margin + rx * cell_w;
@@ -231,6 +272,16 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
                 ((s->width - margin) / TILE_SIZE) * TILE_SIZE : x1 + cell_w;
             int y2 = (ry == rows - 1) ? 
                 ((s->height - margin) / TILE_SIZE) * TILE_SIZE : y1 + cell_h;
+            
+            /* Tile-align all boundaries */
+            x1 = (x1 / TILE_SIZE) * TILE_SIZE;
+            y1 = (y1 / TILE_SIZE) * TILE_SIZE;
+            x2 = ((x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+            y2 = ((y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+            
+            /* Clamp to frame bounds (tile-aligned) */
+            if (x2 > max_x) x2 = max_x;
+            if (y2 > max_y) y2 = max_y;
             
             /* Skip if region too small */
             if (x2 - x1 < 64 || y2 - y1 < 64) continue;
@@ -276,9 +327,12 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     }
 }
 
-int send_scroll_commands(struct server *s, int *pending_writes) {
-    struct draw_state *draw = &s->draw;
-    struct p9conn *p9 = draw->p9;
+/*
+ * Apply scroll to prev_framebuf only (shift pixels + mark exposed dirty).
+ * Must be called BEFORE tile change detection so tiles compare against
+ * the post-scroll state.
+ */
+int apply_scroll_to_prevbuf(struct server *s) {
     int scrolled_count = 0;
     
     for (int i = 0; i < s->num_scroll_regions; i++) {
@@ -292,9 +346,122 @@ int send_scroll_commands(struct server *s, int *pending_writes) {
         int rx2 = s->scroll_regions[i].x2;
         int ry2 = s->scroll_regions[i].y2;
         
+        int rw = rx2 - rx1;
+        int rh = ry2 - ry1;
+        if (rw < 16 || rh < 16) continue;
+        
+        int abs_dy = dy < 0 ? -dy : dy;
+        int abs_dx = dx < 0 ? -dx : dx;
+        if (abs_dy >= rh || abs_dx >= rw) continue;
+        
+        /* Compute src/dst rectangles */
+        int src_x1 = rx1;
+        int dst_x1 = rx1, dst_x2 = rx2;
+        int dst_y1, dst_y2;
+        
+        if (dy < 0) {
+            dst_y1 = ry1;
+            dst_y2 = ry2 - abs_dy;
+        } else if (dy > 0) {
+            dst_y1 = ry1 + abs_dy;
+            dst_y2 = ry2;
+        } else {
+            dst_y1 = ry1;
+            dst_y2 = ry2;
+        }
+        
+        if (dx < 0) {
+            src_x1 = rx1 + abs_dx;
+            dst_x1 = rx1;
+            dst_x2 = rx2 - abs_dx;
+        } else if (dx > 0) {
+            src_x1 = rx1;
+            dst_x1 = rx1 + abs_dx;
+            dst_x2 = rx2;
+        }
+        
+        /* Shift prev_framebuf to match the blit */
+        int copy_w = dst_x2 - dst_x1;
+        
+        if (dy < 0) {
+            for (int y = dst_y1; y < dst_y2; y++) {
+                int sy = y + abs_dy;
+                memmove(&s->prev_framebuf[y * s->width + dst_x1],
+                        &s->prev_framebuf[sy * s->width + src_x1],
+                        copy_w * sizeof(uint32_t));
+            }
+        } else if (dy > 0) {
+            for (int y = dst_y2 - 1; y >= dst_y1; y--) {
+                int sy = y - abs_dy;
+                memmove(&s->prev_framebuf[y * s->width + dst_x1],
+                        &s->prev_framebuf[sy * s->width + src_x1],
+                        copy_w * sizeof(uint32_t));
+            }
+        } else if (dx != 0) {
+            for (int y = dst_y1; y < dst_y2; y++) {
+                memmove(&s->prev_framebuf[y * s->width + dst_x1],
+                        &s->prev_framebuf[y * s->width + src_x1],
+                        copy_w * sizeof(uint32_t));
+            }
+        }
+        
+        /* Mark exposed strips as dirty (tile-aligned) */
+        if (dy < 0) {
+            int exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
+            for (int y = exposed_y1; y < ry2; y++) {
+                for (int x = rx1; x < rx2; x++) {
+                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
+                }
+            }
+        } else if (dy > 0) {
+            int exposed_y2 = ((dst_y1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+            for (int y = ry1; y < exposed_y2; y++) {
+                for (int x = rx1; x < rx2; x++) {
+                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
+                }
+            }
+        }
+        
+        if (dx < 0) {
+            int exposed_x1 = (dst_x2 / TILE_SIZE) * TILE_SIZE;
+            for (int y = ry1; y < ry2; y++) {
+                for (int x = exposed_x1; x < rx2; x++) {
+                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
+                }
+            }
+        } else if (dx > 0) {
+            int exposed_x2 = ((dst_x1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+            for (int y = ry1; y < ry2; y++) {
+                for (int x = rx1; x < exposed_x2; x++) {
+                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
+                }
+            }
+        }
+        
+        scrolled_count++;
+    }
+    
+    return scrolled_count;
+}
 
-        if (rx2 > s->width) rx2 = s->width;
-        if (ry2 > s->height) ry2 = s->height;
+/*
+ * Write scroll 'd' commands to batch buffer. Returns bytes written.
+ * Does NOT update prev_framebuf - call apply_scroll_to_prevbuf first.
+ */
+int write_scroll_commands(struct server *s, uint8_t *batch, size_t max_size) {
+    struct draw_state *draw = &s->draw;
+    int off = 0;
+    
+    for (int i = 0; i < s->num_scroll_regions; i++) {
+        if (!s->scroll_regions[i].detected) continue;
+        
+        int dx = s->scroll_regions[i].dx;
+        int dy = s->scroll_regions[i].dy;
+        
+        int rx1 = s->scroll_regions[i].x1;
+        int ry1 = s->scroll_regions[i].y1;
+        int rx2 = s->scroll_regions[i].x2;
+        int ry2 = s->scroll_regions[i].y2;
         
         int rw = rx2 - rx1;
         int rh = ry2 - ry1;
@@ -342,102 +509,31 @@ int send_scroll_commands(struct server *s, int *pending_writes) {
         if (src_y2 <= src_y1 || dst_y2 <= dst_y1) continue;
         if (src_x2 <= src_x1 || dst_x2 <= dst_x1) continue;
         
-        /* Send 'd' command (pipelined) */
-        uint8_t dcmd[64];
-        int off = 0;
-        dcmd[off++] = 'd';
-        PUT32(dcmd + off, draw->image_id); off += 4;
-        PUT32(dcmd + off, draw->image_id); off += 4;
-        PUT32(dcmd + off, draw->opaque_id); off += 4;
-        PUT32(dcmd + off, dst_x1); off += 4;
-        PUT32(dcmd + off, dst_y1); off += 4;
-        PUT32(dcmd + off, dst_x2); off += 4;
-        PUT32(dcmd + off, dst_y2); off += 4;
-        PUT32(dcmd + off, src_x1); off += 4;
-        PUT32(dcmd + off, src_y1); off += 4;
-        PUT32(dcmd + off, 0); off += 4;
-        PUT32(dcmd + off, 0); off += 4;
-        
-        if (p9_write_send(p9, draw->drawdata_fid, 0, dcmd, off) < 0) {
-            wlr_log(WLR_ERROR, "Scroll command send failed");
-            /* Mark region dirty for full retransmit */
-            for (int y = ry1; y < ry2; y++) {
-                for (int x = rx1; x < rx2; x++) {
-                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
-                }
-            }
-            continue;
-        }
-        (*pending_writes)++;
-        
-        /* Shift prev_framebuf to match the blit */
-        int copy_w = dst_x2 - dst_x1;
-        
-        if (dy < 0) {
-            for (int y = dst_y1; y < dst_y2; y++) {
-                int sy = y + abs_dy;
-                memmove(&s->prev_framebuf[y * s->width + dst_x1],
-                        &s->prev_framebuf[sy * s->width + src_x1],
-                        copy_w * sizeof(uint32_t));
-            }
-        } else if (dy > 0) {
-            for (int y = dst_y2 - 1; y >= dst_y1; y--) {
-                int sy = y - abs_dy;
-                memmove(&s->prev_framebuf[y * s->width + dst_x1],
-                        &s->prev_framebuf[sy * s->width + src_x1],
-                        copy_w * sizeof(uint32_t));
-            }
-        } else if (dx != 0) {
-            for (int y = dst_y1; y < dst_y2; y++) {
-                memmove(&s->prev_framebuf[y * s->width + dst_x1],
-                        &s->prev_framebuf[y * s->width + src_x1],
-                        copy_w * sizeof(uint32_t));
-            }
+        /* Check space */
+        if (off + 45 > (int)max_size) {
+            wlr_log(WLR_ERROR, "Scroll batch overflow");
+            break;
         }
         
-        /* Mark exposed strip as dirty */
-        if (dy < 0) {
-            int exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
-            for (int y = exposed_y1; y < ry2; y++) {
-                for (int x = rx1; x < rx2; x++) {
-                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
-                }
-            }
-        } else if (dy > 0) {
-            int exposed_y2 = ((dst_y1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-            for (int y = ry1; y < exposed_y2; y++) {
-                for (int x = rx1; x < rx2; x++) {
-                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
-                }
-            }
-        }
+        /* Write 'd' command to batch */
+        batch[off++] = 'd';
+        PUT32(batch + off, draw->image_id); off += 4;
+        PUT32(batch + off, draw->image_id); off += 4;
+        PUT32(batch + off, draw->opaque_id); off += 4;
+        PUT32(batch + off, dst_x1); off += 4;
+        PUT32(batch + off, dst_y1); off += 4;
+        PUT32(batch + off, dst_x2); off += 4;
+        PUT32(batch + off, dst_y2); off += 4;
+        PUT32(batch + off, src_x1); off += 4;
+        PUT32(batch + off, src_y1); off += 4;
+        PUT32(batch + off, 0); off += 4;
+        PUT32(batch + off, 0); off += 4;
         
-        if (dx < 0) {
-            int exposed_x1 = (dst_x2 / TILE_SIZE) * TILE_SIZE;
-            for (int y = ry1; y < ry2; y++) {
-                for (int x = exposed_x1; x < rx2; x++) {
-                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
-                }
-            }
-        } else if (dx > 0) {
-            int exposed_x2 = ((dst_x1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-            for (int y = ry1; y < ry2; y++) {
-                for (int x = rx1; x < exposed_x2; x++) {
-                    s->prev_framebuf[y * s->width + x] = 0xDEADBEEF;
-                }
-            }
-        }
-        
-        scrolled_count++;
         wlr_log(WLR_DEBUG, "Scroll region %d: dy=%d dx=%d src=(%d,%d)-(%d,%d) dst=(%d,%d)-(%d,%d)",
                 i, dy, dx, src_x1, src_y1, src_x2, src_y2, dst_x1, dst_y1, dst_x2, dst_y2);
     }
     
-    if (scrolled_count > 0) {
-        wlr_log(WLR_INFO, "Executed %d scroll commands", scrolled_count);
-    }
-    
-    return scrolled_count;
+    return off;
 }
 
 const struct scroll_timing *scroll_get_timing(void) {

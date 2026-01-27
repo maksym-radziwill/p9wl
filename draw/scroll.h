@@ -9,6 +9,7 @@
 #define SCROLL_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* Forward declarations */
 struct server;
@@ -35,16 +36,24 @@ struct scroll_region {
 void detect_scroll(struct server *s, uint32_t *send_buf);
 
 /*
- * Send 9P blit commands for detected scroll regions.
+ * Apply scroll to prev_framebuf only (shift pixels + mark exposed dirty).
+ * Must be called BEFORE tile change detection so tiles compare against
+ * the post-scroll state.
  *
- * For each region where scroll was detected, sends a 'd' (draw) command
- * to blit the scrolled content, avoiding the need to retransmit unchanged pixels.
- *
- * pending_writes: incremented for each pipelined write sent
- *
- * Returns number of scroll regions processed.
+ * Returns number of scroll regions applied.
  */
-int send_scroll_commands(struct server *s, int *pending_writes);
+int apply_scroll_to_prevbuf(struct server *s);
+
+/*
+ * Write scroll 'd' commands to batch buffer.
+ * Does NOT update prev_framebuf - call apply_scroll_to_prevbuf first.
+ *
+ * batch: buffer to write commands to
+ * max_size: maximum bytes to write
+ *
+ * Returns number of bytes written.
+ */
+int write_scroll_commands(struct server *s, uint8_t *batch, size_t max_size);
 
 /*
  * Timing statistics from the last detect_scroll() call.

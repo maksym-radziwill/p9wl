@@ -223,7 +223,7 @@ void send_frame(struct server *s) {
         pthread_mutex_unlock(&s->send_lock);
         return;
     }
-    
+
 
     /* Find a free buffer */
     int buf = -1;
@@ -451,16 +451,19 @@ void *send_thread_func(void *arg) {
         int scrolled_regions = 0;
         if (!do_full && !scroll_disabled(s)) {
             detect_scroll(s, send_buf);
-            int scroll_writes = 0;
-            scrolled_regions = send_scroll_commands(s, &scroll_writes);
-            /* Notify drain thread for each scroll write */
-            for (int i = 0; i < scroll_writes; i++) {
-                drain_notify();
-            }
+            /* Apply scroll to prev_framebuf BEFORE tile detection */
+            scrolled_regions = apply_scroll_to_prevbuf(s);
         }
         
         /* Send tiles */
         size_t off = 0;
+        
+        /* Write scroll commands to batch first (batched with tiles) */
+        if (scrolled_regions > 0) {
+            off = write_scroll_commands(s, batch, max_batch);
+            wlr_log(WLR_DEBUG, "Batched %d scroll regions (%d bytes)", scrolled_regions, (int)off);
+        }
+        
         int tile_count = 0;
         int batch_count = 0;
         int comp_tiles = 0, delta_tiles = 0;
