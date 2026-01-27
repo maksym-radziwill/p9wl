@@ -497,16 +497,25 @@ void *send_thread_func(void *arg) {
                     /* Check if tile overlaps scroll-exposed region (marked 0xDEADBEEF).
                      * Server's buffer has garbage there after blit, so delta
                      * encoding would produce wrong pixels. Force raw.
-                     * Check all 4 corners since tile may straddle region boundary. */
+                     * Check all 4 edges since exposed boundary may cut through
+                     * tile from any direction (vertical or horizontal scroll). */
                     int use_delta = can_delta;
                     if (use_delta) {
                         int x2m1 = x1 + w - 1;
                         int y2m1 = y1 + h - 1;
-                        if (s->prev_framebuf[y1 * s->width + x1] == 0xDEADBEEF ||
-                            s->prev_framebuf[y1 * s->width + x2m1] == 0xDEADBEEF ||
-                            s->prev_framebuf[y2m1 * s->width + x1] == 0xDEADBEEF ||
-                            s->prev_framebuf[y2m1 * s->width + x2m1] == 0xDEADBEEF) {
-                            use_delta = 0;
+                        /* Check top and bottom rows */
+                        for (int x = x1; x < x1 + w && use_delta; x++) {
+                            if (s->prev_framebuf[y1 * s->width + x] == 0xDEADBEEF ||
+                                s->prev_framebuf[y2m1 * s->width + x] == 0xDEADBEEF) {
+                                use_delta = 0;
+                            }
+                        }
+                        /* Check left and right columns */
+                        for (int y = y1; y <= y2m1 && use_delta; y++) {
+                            if (s->prev_framebuf[y * s->width + x1] == 0xDEADBEEF ||
+                                s->prev_framebuf[y * s->width + x2m1] == 0xDEADBEEF) {
+                                use_delta = 0;
+                            }
                         }
                     }
                     

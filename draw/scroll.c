@@ -211,7 +211,7 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     /* Divide frame into 16x4 grid (64 regions) with tile-aligned boundaries.
      * Leave TILE_SIZE margin at edges for exposed region handling. */
     int margin = TILE_SIZE;
-    int cols = 16, rows = 4;
+    int cols = 8, rows = 4;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
