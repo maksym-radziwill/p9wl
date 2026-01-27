@@ -147,20 +147,39 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
 void handle_mouse(struct server *s, int mx, int my, int buttons) {
     struct focus_manager *fm = &s->focus;
     
-    /* Translate from screen coordinates to window-local coordinates */
-    int local_x = mx - s->draw.win_minx;
-    int local_y = my - s->draw.win_miny;
+    /* Mouse coordinates from 9front are in PHYSICAL screen coordinates.
+     * For fractional scaling, we need to convert to LOGICAL coordinates.
+     *
+     * Physical coords: mx, my (from 9front mouse)
+     * Window physical origin: s->draw.win_minx, s->draw.win_miny
+     * Scale factor: s->scale
+     *
+     * Logical coords = (physical - window_origin) / scale
+     */
+    float scale = s->scale;
+    if (scale <= 0.0f) scale = 1.0f;
     
-    /* Clamp to window bounds */
+    /* Convert to window-relative physical, then to logical */
+    int phys_local_x = mx - s->draw.win_minx;
+    int phys_local_y = my - s->draw.win_miny;
+    
+    int local_x = (int)(phys_local_x / scale + 0.5f);
+    int local_y = (int)(phys_local_y / scale + 0.5f);
+    
+    /* Logical dimensions (what wlroots/clients see) */
+    int logical_w = (int)(s->width / scale + 0.5f);
+    int logical_h = (int)(s->height / scale + 0.5f);
+    
+    /* Clamp to logical bounds */
     if (local_x < 0) local_x = 0;
     if (local_y < 0) local_y = 0;
-    if (local_x >= s->width) local_x = s->width - 1;
-    if (local_y >= s->height) local_y = s->height - 1;
+    if (local_x >= logical_w) local_x = logical_w - 1;
+    if (local_y >= logical_h) local_y = logical_h - 1;
     
-    /* Update cursor position */
+    /* Update cursor position (using logical coordinates) */
     wlr_cursor_warp_absolute(s->cursor, NULL,
-                             (double)local_x / s->width,
-                             (double)local_y / s->height);
+                             (double)local_x / logical_w,
+                             (double)local_y / logical_h);
     
     /* Find surface under cursor */
     double sx, sy;

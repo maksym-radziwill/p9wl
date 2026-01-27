@@ -85,6 +85,11 @@ struct draw_state {
     int winimage_id;   /* the image ID assigned to the window */
     int xor_enabled;   /* whether XOR delta mode is active (after first frame) */
     uint32_t iounit;
+
+
+    int logical_width;
+    int logical_height;
+    float scale;
 };
 
 /* Subsurface tracking */

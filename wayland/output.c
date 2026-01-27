@@ -48,16 +48,38 @@ static void output_frame(struct wl_listener *listener, void *data) {
     pthread_mutex_unlock(&s->send_lock);
     
     if (resize_pending) {
-        if (new_w == s->width && new_h == s->height) {
+        if (new_w == s->draw.width && new_h == s->draw.height) {
             struct draw_state *draw = &s->draw;
             draw->win_minx = new_minx;
             draw->win_miny = new_miny;
             wlr_log(WLR_DEBUG, "Position update only: (%d,%d)", new_minx, new_miny);
         } else {
-            wlr_log(WLR_INFO, "Main thread handling resize: %dx%d -> %dx%d", 
-                    s->width, s->height, new_w, new_h);
+            wlr_log(WLR_INFO, "Main thread handling resize: %dx%d -> %dx%d (physical)", 
+                    s->draw.width, s->draw.height, new_w, new_h);
             
-            size_t fb_size = new_w * new_h * sizeof(uint32_t);
+            /* new_w, new_h are PHYSICAL dimensions from 9front window.
+             * For fractional scaling, we need:
+             *   - Compositor buffers at LOGICAL resolution
+             *   - Plan 9 source image at LOGICAL resolution
+             *   - 'a' command scales logical -> physical
+             */
+            float scale = s->scale;
+            if (scale <= 0.0f) scale = 1.0f;
+            
+            int logical_w = (int)(new_w / scale + 0.5f);
+            int logical_h = (int)(new_h / scale + 0.5f);
+            
+            /* Align logical dimensions to tile size */
+            logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
+            logical_h = (logical_h / TILE_SIZE) * TILE_SIZE;
+            if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
+            if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
+            
+            wlr_log(WLR_INFO, "Resize: physical %dx%d, scale %.2f, logical %dx%d",
+                    new_w, new_h, scale, logical_w, logical_h);
+            
+            /* Allocate compositor buffers at LOGICAL resolution */
+            size_t fb_size = logical_w * logical_h * sizeof(uint32_t);
             uint32_t *new_framebuf = calloc(1, fb_size);
             uint32_t *new_prev_framebuf = calloc(1, fb_size);
             uint32_t *new_send_buf0 = calloc(1, fb_size);
@@ -86,14 +108,20 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 s->pending_buf = -1;
                 s->active_buf = -1;
                 
-                s->width = new_w;
-                s->height = new_h;
-                s->tiles_x = (new_w + TILE_SIZE - 1) / TILE_SIZE;
-                s->tiles_y = (new_h + TILE_SIZE - 1) / TILE_SIZE;
+                /* s->width, s->height = LOGICAL (compositor buffers) */
+                s->width = logical_w;
+                s->height = logical_h;
+                s->tiles_x = (logical_w + TILE_SIZE - 1) / TILE_SIZE;
+                s->tiles_y = (logical_h + TILE_SIZE - 1) / TILE_SIZE;
+                
+                /* draw->width, draw->height = PHYSICAL (9front window) */
                 draw->width = new_w;
                 draw->height = new_h;
                 draw->win_minx = new_minx;
                 draw->win_miny = new_miny;
+                draw->logical_width = logical_w;
+                draw->logical_height = logical_h;
+                draw->scale = scale;
                 pthread_mutex_unlock(&s->send_lock);
                 
                 free(old_framebuf);
@@ -101,7 +129,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 free(old_send_buf0);
                 free(old_send_buf1);
                 
-                /* Reallocate Plan 9 images */
+                /* Reallocate Plan 9 images at LOGICAL resolution */
                 struct p9conn *p9 = draw->p9;
                 uint8_t freecmd[5];
                 freecmd[0] = 'f';
@@ -120,12 +148,12 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 bcmd[off++] = 0;
                 PUT32(bcmd + off, 0); off += 4;
                 PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
+                PUT32(bcmd + off, logical_w); off += 4;  /* LOGICAL width */
+                PUT32(bcmd + off, logical_h); off += 4;  /* LOGICAL height */
                 PUT32(bcmd + off, 0); off += 4;
                 PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
+                PUT32(bcmd + off, logical_w); off += 4;
+                PUT32(bcmd + off, logical_h); off += 4;
                 PUT32(bcmd + off, 0x00000000); off += 4;
                 p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
                 
@@ -138,28 +166,24 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 bcmd[off++] = 0;
                 PUT32(bcmd + off, 0); off += 4;
                 PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
+                PUT32(bcmd + off, logical_w); off += 4;  /* LOGICAL width */
+                PUT32(bcmd + off, logical_h); off += 4;  /* LOGICAL height */
                 PUT32(bcmd + off, 0); off += 4;
                 PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
+                PUT32(bcmd + off, logical_w); off += 4;
+                PUT32(bcmd + off, logical_h); off += 4;
                 PUT32(bcmd + off, 0x00000000); off += 4;
                 p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
                 
-                /* Resize wlroots output */
+                /* Resize wlroots output: PHYSICAL mode with scale */
                 struct wlr_output_state state;
                 wlr_output_state_init(&state);
                 wlr_output_state_set_custom_mode(&state, new_w, new_h, 0);
-                if (s->scale > 1.0f) {
-                    wlr_output_state_set_scale(&state, s->scale);
+                if (scale > 1.0f) {
+                    wlr_output_state_set_scale(&state, scale);
                 }
                 wlr_output_commit_state(s->output, &state);
                 wlr_output_state_finish(&state);
-                
-                /* Compute logical dimensions for Wayland clients */
-                int logical_w = (int)(new_w / s->scale + 0.5f);
-                int logical_h = (int)(new_h / s->scale + 0.5f);
                 
                 /* Send configure to all toplevels (using logical dimensions) */
                 struct toplevel *tl;
