@@ -54,7 +54,6 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     uint32_t *prev_buf = s->prev_framebuf;
     int width = s->width;
     
-    /* Region bounds are already tile-aligned from detect_scroll */
     int rx1 = s->scroll_regions[reg_idx].x1;
     int ry1 = s->scroll_regions[reg_idx].y1;
     int rx2 = s->scroll_regions[reg_idx].x2;
@@ -85,54 +84,8 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     
     int tx1 = rx1 / TILE_SIZE;
     int ty1 = ry1 / TILE_SIZE;
-    int tx2 = rx2 / TILE_SIZE;
-    int ty2 = ry2 / TILE_SIZE;
-    
-    int abs_dx = dx < 0 ? -dx : dx;
-    int abs_dy = dy < 0 ? -dy : dy;
-    
-    /* Compute src/dst exactly as send_scroll_commands does */
-    int dst_x1 = rx1, dst_x2 = rx2;
-    int dst_y1, dst_y2;
-    
-    if (dy < 0) {
-        dst_y1 = ry1;
-        dst_y2 = ry2 - abs_dy;
-    } else if (dy > 0) {
-        dst_y1 = ry1 + abs_dy;
-        dst_y2 = ry2;
-    } else {
-        dst_y1 = ry1;
-        dst_y2 = ry2;
-    }
-    
-    if (dx < 0) {
-        dst_x1 = rx1;
-        dst_x2 = rx2 - abs_dx;
-    } else if (dx > 0) {
-        dst_x1 = rx1 + abs_dx;
-        dst_x2 = rx2;
-    }
-    
-    /* Compute tile-aligned exposed boundaries EXACTLY as send_scroll_commands does */
-    int exposed_x1 = 0, exposed_x2 = 0;
-    int exposed_y1 = 0, exposed_y2 = 0;
-    
-    if (dy < 0) {
-        exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
-        exposed_y2 = ry2;
-    } else if (dy > 0) {
-        exposed_y1 = ry1;
-        exposed_y2 = ((dst_y1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    }
-    
-    if (dx < 0) {
-        exposed_x1 = (dst_x2 / TILE_SIZE) * TILE_SIZE;
-        exposed_x2 = rx2;
-    } else if (dx > 0) {
-        exposed_x1 = rx1;
-        exposed_x2 = ((dst_x1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    }
+    int tx2 = (rx2 + TILE_SIZE - 1) / TILE_SIZE;
+    int ty2 = (ry2 + TILE_SIZE - 1) / TILE_SIZE;
     
     for (int ty = ty1; ty < ty2; ty++) {
         for (int tx = tx1; tx < tx2; tx++) {
@@ -168,13 +121,7 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
             /* Check with scroll */
             int src_x1 = x1 - dx;
             int src_y1 = y1 - dy;
-            
-            /* Check if tile falls in exposed region after blit */
-            int in_exposed = 0;
-            if (dy != 0 && y1 >= exposed_y1 && y1 < exposed_y2) in_exposed = 1;
-            if (dx != 0 && x1 >= exposed_x1 && x1 < exposed_x2) in_exposed = 1;
-            
-            if (!in_exposed && src_x1 >= 0 && src_y1 >= 0 && 
+            if (src_x1 >= 0 && src_y1 >= 0 && 
                 src_x1 + TILE_SIZE <= s->width && src_y1 + TILE_SIZE <= s->height) {
                 
                 /* Check if tile is identical with scroll */
@@ -215,8 +162,8 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         }
     }
     
-    /* Only scroll if it saves */
-    if (bytes_with_scroll > bytes_no_scroll) return;
+    /* Only scroll if it saves at least 5% */
+    if (bytes_with_scroll * 20 >= bytes_no_scroll * 19) return;
     
     s->scroll_regions[reg_idx].detected = 1;
     s->scroll_regions[reg_idx].dx = dx;
@@ -245,46 +192,21 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     double t_start = get_time_us();
     memset(&timing, 0, sizeof(timing));
     
-    /* Divide frame into 16x4 grid (64 regions) with tile-aligned boundaries.
-     * Leave TILE_SIZE margin at edges for exposed region handling. */
-    int margin = TILE_SIZE;
-    int cols = 8, rows = 1;
-    int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
-    int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
-    
-    /* Ensure minimum cell size */
-    if (cell_w < TILE_SIZE) cell_w = TILE_SIZE;
-    if (cell_h < TILE_SIZE) cell_h = TILE_SIZE;
-    
-    s->scroll_regions_x = cols;
-    s->scroll_regions_y = rows;
+    /* Divide frame into regions */
+    s->scroll_regions_x = (s->width + REGION_STRIDE - 1) / REGION_STRIDE;
+    s->scroll_regions_y = (s->height + REGION_STRIDE - 1) / REGION_STRIDE;
     s->num_scroll_regions = 0;
     
-    /* Maximum valid tile-aligned coordinates */
-    int max_x = (s->width / TILE_SIZE) * TILE_SIZE;
-    int max_y = (s->height / TILE_SIZE) * TILE_SIZE;
-    
-    for (int ry = 0; ry < rows; ry++) {
-        for (int rx = 0; rx < cols; rx++) {
-            int x1 = margin + rx * cell_w;
-            int y1 = margin + ry * cell_h;
-            int x2 = (rx == cols - 1) ? 
-                ((s->width - margin) / TILE_SIZE) * TILE_SIZE : x1 + cell_w;
-            int y2 = (ry == rows - 1) ? 
-                ((s->height - margin) / TILE_SIZE) * TILE_SIZE : y1 + cell_h;
+    for (int ry = 0; ry < s->scroll_regions_y && s->num_scroll_regions < MAX_SCROLL_REGIONS; ry++) {
+        for (int rx = 0; rx < s->scroll_regions_x && s->num_scroll_regions < MAX_SCROLL_REGIONS; rx++) {
+            int x1 = rx * REGION_STRIDE + TILE_SIZE;
+            int y1 = ry * REGION_STRIDE + TILE_SIZE;
+            int x2 = x1 + SCROLL_REGION_SIZE;
+            int y2 = y1 + SCROLL_REGION_SIZE;
             
-            /* Tile-align all boundaries */
-            x1 = (x1 / TILE_SIZE) * TILE_SIZE;
-            y1 = (y1 / TILE_SIZE) * TILE_SIZE;
-            x2 = ((x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-            y2 = ((y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-            
-            /* Clamp to frame bounds (tile-aligned) */
-            if (x2 > max_x) x2 = max_x;
-            if (y2 > max_y) y2 = max_y;
-            
-            /* Skip if region too small */
-            if (x2 - x1 < 64 || y2 - y1 < 64) continue;
+            if (x2 > s->width) x2 = s->width;
+            if (y2 > s->height) y2 = s->height;
+            if (x2 - x1 < 32 || y2 - y1 < 32) continue;
             
             int idx = s->num_scroll_regions++;
             s->scroll_regions[idx].x1 = x1;
@@ -341,10 +263,14 @@ int apply_scroll_to_prevbuf(struct server *s) {
         int dx = s->scroll_regions[i].dx;
         int dy = s->scroll_regions[i].dy;
         
-        int rx1 = s->scroll_regions[i].x1;
-        int ry1 = s->scroll_regions[i].y1;
-        int rx2 = s->scroll_regions[i].x2;
-        int ry2 = s->scroll_regions[i].y2;
+        /* Align region to tile boundaries */
+        int rx1 = (s->scroll_regions[i].x1 / TILE_SIZE) * TILE_SIZE;
+        int ry1 = (s->scroll_regions[i].y1 / TILE_SIZE) * TILE_SIZE;
+        int rx2 = ((s->scroll_regions[i].x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+        int ry2 = ((s->scroll_regions[i].y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+        
+        if (rx2 > s->width) rx2 = s->width;
+        if (ry2 > s->height) ry2 = s->height;
         
         int rw = rx2 - rx1;
         int rh = ry2 - ry1;
@@ -405,7 +331,7 @@ int apply_scroll_to_prevbuf(struct server *s) {
             }
         }
         
-        /* Mark exposed strips as dirty (tile-aligned) */
+        /* Mark exposed strip as dirty */
         if (dy < 0) {
             int exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
             for (int y = exposed_y1; y < ry2; y++) {
@@ -458,10 +384,14 @@ int write_scroll_commands(struct server *s, uint8_t *batch, size_t max_size) {
         int dx = s->scroll_regions[i].dx;
         int dy = s->scroll_regions[i].dy;
         
-        int rx1 = s->scroll_regions[i].x1;
-        int ry1 = s->scroll_regions[i].y1;
-        int rx2 = s->scroll_regions[i].x2;
-        int ry2 = s->scroll_regions[i].y2;
+        /* Align region to tile boundaries */
+        int rx1 = (s->scroll_regions[i].x1 / TILE_SIZE) * TILE_SIZE;
+        int ry1 = (s->scroll_regions[i].y1 / TILE_SIZE) * TILE_SIZE;
+        int rx2 = ((s->scroll_regions[i].x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+        int ry2 = ((s->scroll_regions[i].y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+        
+        if (rx2 > s->width) rx2 = s->width;
+        if (ry2 > s->height) ry2 = s->height;
         
         int rw = rx2 - rx1;
         int rh = ry2 - ry1;
@@ -509,7 +439,7 @@ int write_scroll_commands(struct server *s, uint8_t *batch, size_t max_size) {
         if (src_y2 <= src_y1 || dst_y2 <= dst_y1) continue;
         if (src_x2 <= src_x1 || dst_x2 <= dst_x1) continue;
         
-        /* Check space */
+        /* Check space in batch buffer */
         if (off + 45 > (int)max_size) {
             wlr_log(WLR_ERROR, "Scroll batch overflow");
             break;
