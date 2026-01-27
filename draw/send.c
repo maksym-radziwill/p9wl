@@ -525,7 +525,7 @@ void *send_thread_func(void *arg) {
         }
         
         /* Throttle if too many writes pending */
-        drain_throttle(32);
+        drain_throttle(2);
         
         /* Second pass: build batches from results */
         for (int i = 0; i < work_count; i++) {
