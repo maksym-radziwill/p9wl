@@ -699,19 +699,36 @@ void *send_thread_func(void *arg) {
                 
             }
             
-            /* Copy buffer to window */
-            batch[off++] = 'd';
+            /* Copy buffer to window using 'a' (affine warp) command.
+             * Matrix uses 25.7 fixed-point (1.0 = 0x80).
+             * 
+             * Assuming window's clipr (dr) starts at (0,0):
+             * local = r.min - dr.min = (win_minx, win_miny) - (0,0) = (win_minx, win_miny)
+             * sp = sp0 + local
+             * We want sp = (0,0), so sp0 = (-win_minx, -win_miny)
+             */
+            batch[off++] = 'a';
             PUT32(batch + off, draw->screen_id); off += 4;
-            PUT32(batch + off, draw->image_id); off += 4;
-            PUT32(batch + off, draw->opaque_id); off += 4;
+            /* R same as 'd' command */
             PUT32(batch + off, draw->win_minx); off += 4;
             PUT32(batch + off, draw->win_miny); off += 4;
             PUT32(batch + off, draw->win_minx + draw->width); off += 4;
             PUT32(batch + off, draw->win_miny + draw->height); off += 4;
+            PUT32(batch + off, draw->image_id); off += 4;
+            /* sp0 = (-win_minx, -win_miny) */
+            PUT32(batch + off, -draw->win_minx); off += 4;
+            PUT32(batch + off, -draw->win_miny); off += 4;
+            /* identity matrix */
+            PUT32(batch + off, 0x80); off += 4;
             PUT32(batch + off, 0); off += 4;
             PUT32(batch + off, 0); off += 4;
             PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0x80); off += 4;
             PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0x80); off += 4;
+            batch[off++] = 0;
             
             /* 
              * Draw borders using actual window bounds.
