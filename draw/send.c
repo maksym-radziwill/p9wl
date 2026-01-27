@@ -451,30 +451,15 @@ void *send_thread_func(void *arg) {
         uint64_t t_frame_start = now_us();
         uint64_t t_send_done = 0;
         
-        /* Try to detect scroll (disabled for fractional scaling).
-         * Skip scroll detection if too many writes pending - on slow networks,
-         * scroll assumptions can get out of sync with actual server state. */
+        /* Try to detect scroll (disabled for fractional scaling) */
         int scrolled_regions = 0;
-        if (!do_full && !scroll_disabled(s) && atomic_load(&drain.pending) < 4) {
-            /* Multi-pass scroll detection to catch accumulated scrolls */
-            for (int pass = 0; pass < 4; pass++) {
-                detect_scroll(s, send_buf);
-                
-                int any_scroll = 0;
-                for (int i = 0; i < s->num_scroll_regions; i++) {
-                    if (s->scroll_regions[i].detected) {
-                        any_scroll = 1;
-                        break;
-                    }
-                }
-                if (!any_scroll) break;
-                
-                int scroll_writes = 0;
-                scrolled_regions += send_scroll_commands(s, &scroll_writes);
-                /* Notify drain thread for each scroll write */
-                for (int i = 0; i < scroll_writes; i++) {
-                    drain_notify();
-                }
+        if (!do_full && !scroll_disabled(s)) {
+            detect_scroll(s, send_buf);
+            int scroll_writes = 0;
+            scrolled_regions = send_scroll_commands(s, &scroll_writes);
+            /* Notify drain thread for each scroll write */
+            for (int i = 0; i < scroll_writes; i++) {
+                drain_notify();
             }
         }
         
@@ -509,17 +494,9 @@ void *send_thread_func(void *arg) {
                         goto tiles_collected;
                     }
                     
-                    /* Check if tile is in scroll-exposed region (marked 0xDEADBEEF).
-                     * Exposed regions have no valid prev content on server,
-                     * so delta encoding would produce garbage. Force raw. */
-                    int use_delta = can_delta;
-                    if (use_delta && s->prev_framebuf[y1 * s->width + x1] == 0xDEADBEEF) {
-                        use_delta = 0;
-                    }
-                    
                     work[work_count].pixels = send_buf;
                     work[work_count].stride = s->width;
-                    work[work_count].prev_pixels = use_delta ? s->prev_framebuf : NULL;
+                    work[work_count].prev_pixels = can_delta ? s->prev_framebuf : NULL;
                     work[work_count].prev_stride = s->width;
                     work[work_count].x1 = x1;
                     work[work_count].y1 = y1;
@@ -537,7 +514,7 @@ void *send_thread_func(void *arg) {
         }
         
         /* Throttle if too many writes pending */
-        drain_throttle(32);
+        drain_throttle(2);
         
         /* Second pass: build batches from results */
         for (int i = 0; i < work_count; i++) {
