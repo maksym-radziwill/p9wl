@@ -162,8 +162,8 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         }
     }
     
-    /* Only scroll if it saves at least 5% */
-    if (bytes_with_scroll * 20 >= bytes_no_scroll * 19) return;
+    /* Only scroll if it saves */
+    if (bytes_with_scroll > bytes_no_scroll) return;
     
     s->scroll_regions[reg_idx].detected = 1;
     s->scroll_regions[reg_idx].dx = dx;

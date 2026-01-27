@@ -454,15 +454,26 @@ void *send_thread_func(void *arg) {
         /* Try to detect scroll (disabled for fractional scaling) */
         int scrolled_regions = 0;
         if (!do_full && !scroll_disabled(s)) {
-            detect_scroll(s, send_buf);
-            int scroll_writes = 0;
-            scrolled_regions = send_scroll_commands(s, &scroll_writes);
-            /* Notify drain thread for each scroll write */
-            for (int i = 0; i < scroll_writes; i++) {
-                drain_notify();
+            for (int pass = 0; pass < 4; pass++) {
+                detect_scroll(s, send_buf);
+                
+                int any_scroll = 0;
+                for (int i = 0; i < s->num_scroll_regions; i++) {
+                    if (s->scroll_regions[i].detected) {
+                        any_scroll = 1;
+                        break;
+                    }
+                }
+                if (!any_scroll) break;
+                
+                int scroll_writes = 0;
+                scrolled_regions += send_scroll_commands(s, &scroll_writes);
+                for (int i = 0; i < scroll_writes; i++) {
+                    drain_notify();
+                }
             }
         }
-        
+
         /* Send tiles */
         size_t off = 0;
         int tile_count = 0;
