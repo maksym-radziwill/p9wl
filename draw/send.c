@@ -453,7 +453,7 @@ void *send_thread_func(void *arg) {
         
         /* Try to detect scroll (disabled for fractional scaling) */
         int scrolled_regions = 0;
-        if (!do_full && !scroll_disabled(s)) {
+        if (!do_full && !scroll_disabled(s) && atomic_load(&drain.pending) < 4) {
             for (int pass = 0; pass < 4; pass++) {
                 detect_scroll(s, send_buf);
                 
