@@ -212,7 +212,24 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
                     tiles_identical_with++;
                 }
             } else {
-                bytes_with_scroll += TILE_SIZE * TILE_SIZE * 4;  /* exposed area */
+                /* Exposed area - compress against original prev_buf for fair delta estimate */
+                uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
+                uint32_t prev_tile[TILE_SIZE * TILE_SIZE];
+                for (int row = 0; row < TILE_SIZE; row++) {
+                    memcpy(&curr_tile[row * TILE_SIZE],
+                           &send_buf[(y1 + row) * width + x1],
+                           TILE_SIZE * sizeof(uint32_t));
+                    memcpy(&prev_tile[row * TILE_SIZE],
+                           &prev_buf[(y1 + row) * width + x1],
+                           TILE_SIZE * sizeof(uint32_t));
+                }
+                int size_exp = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
+                                                       curr_tile, TILE_SIZE,
+                                                       prev_tile, TILE_SIZE,
+                                                       0, 0, TILE_SIZE, TILE_SIZE);
+                if (size_exp < 0) size_exp = -size_exp;
+                if (size_exp == 0) size_exp = TILE_SIZE * TILE_SIZE * 4;
+                bytes_with_scroll += size_exp;
             }
         }
     }
