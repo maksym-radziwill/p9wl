@@ -91,10 +91,6 @@ static void *drain_thread_func(void *arg) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
             ts.tv_nsec += 10000000;  /* 10ms timeout */
-            if (ts.tv_nsec >= 1000000000) {
-                ts.tv_sec++;
-                ts.tv_nsec -= 1000000000;
-            }
             pthread_cond_timedwait(&drain.cond, &drain.lock, &ts);
         }
         pthread_mutex_unlock(&drain.lock);
@@ -185,7 +181,7 @@ static void drain_pause(void) {
     while (atomic_load(&drain.pending) > 0) {
             struct timespec req;
 
-	    req.tv_sec = 0;
+	        req.tv_sec = 0;
     	    req.tv_nsec = 1000000L; // Use 'L' for long integer
 
     	    nanosleep(&req, NULL);
@@ -227,7 +223,7 @@ void send_frame(struct server *s) {
         pthread_mutex_unlock(&s->send_lock);
         return;
     }
-    
+
 
     /* Find a free buffer */
     int buf = -1;
@@ -340,7 +336,7 @@ void *send_thread_func(void *arg) {
     }
     
     /* Initialize parallel compression pool */
-    int nthreads = 4;  /* TODO: detect CPU cores */
+    int nthreads = sysconf(_SC_NPROCESSORS_ONLN) / 2;  
     if (compress_pool_init(nthreads) < 0) {
         wlr_log(WLR_ERROR, "Failed to init compression pool, falling back to single-threaded");
         nthreads = 0;
@@ -465,6 +461,7 @@ void *send_thread_func(void *arg) {
         /* Write scroll commands to batch first (batched with tiles) */
         if (scrolled_regions > 0) {
             off = write_scroll_commands(s, batch, max_batch);
+            wlr_log(WLR_DEBUG, "Batched %d scroll regions (%d bytes)", scrolled_regions, (int)off);
         }
         
         int tile_count = 0;
@@ -496,9 +493,34 @@ void *send_thread_func(void *arg) {
                         goto tiles_collected;
                     }
                     
+                    /* Check if tile overlaps scroll-exposed region (marked 0xDEADBEEF).
+                     * Server's buffer has garbage there after blit, so delta
+                     * encoding would produce wrong pixels. Force raw.
+                     * Check all 4 edges since exposed boundary may cut through
+                     * tile from any direction (vertical or horizontal scroll). */
+                    int use_delta = can_delta;
+                    if (use_delta) {
+                        int x2m1 = x1 + w - 1;
+                        int y2m1 = y1 + h - 1;
+                        /* Check top and bottom rows */
+                        for (int x = x1; x < x1 + w && use_delta; x++) {
+                            if (s->prev_framebuf[y1 * s->width + x] == 0xDEADBEEF ||
+                                s->prev_framebuf[y2m1 * s->width + x] == 0xDEADBEEF) {
+                                use_delta = 0;
+                            }
+                        }
+                        /* Check left and right columns */
+                        for (int y = y1; y <= y2m1 && use_delta; y++) {
+                            if (s->prev_framebuf[y * s->width + x1] == 0xDEADBEEF ||
+                                s->prev_framebuf[y * s->width + x2m1] == 0xDEADBEEF) {
+                                use_delta = 0;
+                            }
+                        }
+                    }
+                    
                     work[work_count].pixels = send_buf;
                     work[work_count].stride = s->width;
-                    work[work_count].prev_pixels = can_delta ? s->prev_framebuf : NULL;
+                    work[work_count].prev_pixels = use_delta ? s->prev_framebuf : NULL;
                     work[work_count].prev_stride = s->width;
                     work[work_count].x1 = x1;
                     work[work_count].y1 = y1;
@@ -516,7 +538,7 @@ void *send_thread_func(void *arg) {
         }
         
         /* Throttle if too many writes pending */
-        drain_throttle(32);
+        drain_throttle(2);
         
         /* Second pass: build batches from results */
         for (int i = 0; i < work_count; i++) {
@@ -798,7 +820,7 @@ void *send_thread_func(void *arg) {
             int pending = atomic_load(&drain.pending);
             
             /* Log PIPE stats frequently for debugging */
-            if (send_count <= 20 || send_count % 50 == 0 || send_ms > 16.0) {
+            if (send_count % 30 == 0) {
                 wlr_log(WLR_INFO, "PIPE: %d batches, send=%.1fms, pending=%d",
                     batch_count, send_ms, pending);
             }
@@ -810,7 +832,7 @@ void *send_thread_func(void *arg) {
             }
             
             send_count++;
-            if (send_count <= 20 || send_count % 100 == 0) {
+            if (send_count % 30 == 0) {
                 int ratio = bytes_raw > 0 ? (int)(bytes_sent * 100 / bytes_raw) : 100;
                 if (scrolled_regions > 0) {
                     wlr_log(WLR_INFO, "Send #%d: %d tiles (%d comp, %d delta) %zu->%zu bytes (%d%%) [%d regions scrolled] [%d batches]", 
