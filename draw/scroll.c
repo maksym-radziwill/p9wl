@@ -175,7 +175,7 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     }
     
     /* Only scroll if it saves */
-    if (bytes_with_scroll * 10 > bytes_no_scroll) return;
+    if (bytes_with_scroll > bytes_no_scroll) return;
     
     s->scroll_regions[reg_idx].detected = 1;
     s->scroll_regions[reg_idx].dx = dx;
@@ -207,7 +207,7 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     /* Divide frame into 4x4 grid (16 regions) with tile-aligned boundaries.
      * Leave TILE_SIZE margin at edges for exposed region handling. */
     int margin = TILE_SIZE;
-    int cols = 3, rows = 3;
+    int cols = 5, rows = 5;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
