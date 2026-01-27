@@ -76,6 +76,8 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     int dx = result.dx;
     int dy = result.dy;
     
+    wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d", reg_idx, dx, dy);
+    
     /* Compare actual compressed sizes */
     int bytes_no_scroll = 0;
     int bytes_with_scroll = 0;
@@ -215,18 +217,24 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         }
     }
     
-    /* Only scroll if it saves */
-    if (bytes_with_scroll > bytes_no_scroll) return;
+    /* Only scroll if it saves bytes */
+    if (bytes_with_scroll > bytes_no_scroll) {
+        int extra = bytes_with_scroll - bytes_no_scroll;
+        wlr_log(WLR_INFO, "Region %d: REJECTED dx=%d dy=%d - scroll costs %d more bytes (%d vs %d), identical %d->%d",
+                reg_idx, dx, dy, extra, bytes_with_scroll, bytes_no_scroll,
+                tiles_identical_no, tiles_identical_with);
+        return;
+    }
     
     s->scroll_regions[reg_idx].detected = 1;
     s->scroll_regions[reg_idx].dx = dx;
     s->scroll_regions[reg_idx].dy = dy;
     
-    wlr_log(WLR_DEBUG, "Scroll dx=%d dy=%d: %d tiles, identical %d->%d, bytes %d->%d (%.0f%% saved)",
-            dx, dy, tiles_checked,
-            tiles_identical_no, tiles_identical_with,
-            bytes_no_scroll, bytes_with_scroll,
-            bytes_no_scroll > 0 ? (1.0 - (double)bytes_with_scroll / bytes_no_scroll) * 100 : 0);
+    int saved = bytes_no_scroll - bytes_with_scroll;
+    int pct = bytes_no_scroll > 0 ? (saved * 100 / bytes_no_scroll) : 0;
+    wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d - saves %d bytes (%d%%), %d vs %d bytes, identical %d->%d tiles",
+            reg_idx, dx, dy, saved, pct, bytes_with_scroll, bytes_no_scroll,
+            tiles_identical_no, tiles_identical_with);
 }
 
 void scroll_init(void) {
