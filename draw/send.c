@@ -713,30 +713,23 @@ void *send_thread_func(void *arg) {
              * - Window is at physical resolution
              * - Matrix diagonal = 1/S (each dest pixel step = 1/S src pixel step)
              *
-             * Example: 1.5x scale
-             * - Physical window: 1552x880
-             * - Logical source: 1035x587 (1552/1.5 x 880/1.5)
-             * - Matrix: m[0][0] = m[1][1] = 1/1.5 = 0.667 * 128 = 85
-             *
-             * sp0 compensates for window border offset.
+             * For scale=1.0, this is just an identity transform (1:1 copy).
              */
             
-            /* Get scale from draw state (set in draw.c) */
+            /* Get scale from draw state (set at runtime from -S flag) */
             float scale = draw->scale;
-            if (scale <= 0.0f) scale = 1.0f;  /* safety */
+            if (scale <= 0.0f) scale = 1.0f;
             
             /* Matrix diagonal in 25.7 fixed-point: 1/scale * 128 */
             int matrix_scale = (int)(128.0f / scale + 0.5f);
             
-            /* smooth=1 enables bilinear interpolation (important for fractional scaling) */
+            /* smooth=1 enables bilinear interpolation (for fractional scaling) */
             int smooth = (scale != 1.0f) ? 1 : 0;
             
             /* sp0 must be in SOURCE (logical) coordinates.
-             * The transform does: p2 = M * local, then sp = sp0 + p2
-             * where local = (win_minx, win_miny) in physical coords.
+             * p2 = M * local, sp = sp0 + p2
              * After matrix: p2 = (win_minx/scale, win_miny/scale)
-             * We want sp = (0,0), so sp0 = -p2 = (-win_minx/scale, -win_miny/scale)
-             * Use proper rounding for the division.
+             * We want sp = (0,0), so sp0 = (-win_minx/scale, -win_miny/scale)
              */
             int sp_x = -(int)(draw->win_minx / scale + 0.5f);
             int sp_y = -(int)(draw->win_miny / scale + 0.5f);

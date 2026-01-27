@@ -148,7 +148,8 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     struct focus_manager *fm = &s->focus;
     
     /* Mouse coordinates from 9front are in PHYSICAL screen coordinates.
-     * For fractional scaling, we need to convert to LOGICAL coordinates.
+     * Compositor operates at LOGICAL resolution (s->width, s->height).
+     * Convert physical mouse coords to logical.
      *
      * Physical coords: mx, my (from 9front mouse)
      * Window physical origin: s->draw.win_minx, s->draw.win_miny
@@ -166,9 +167,9 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     int local_x = (int)(phys_local_x / scale + 0.5f);
     int local_y = (int)(phys_local_y / scale + 0.5f);
     
-    /* Logical dimensions (what wlroots/clients see) */
-    int logical_w = (int)(s->width / scale + 0.5f);
-    int logical_h = (int)(s->height / scale + 0.5f);
+    /* s->width, s->height are already LOGICAL dimensions */
+    int logical_w = s->width;
+    int logical_h = s->height;
     
     /* Clamp to logical bounds */
     if (local_x < 0) local_x = 0;
