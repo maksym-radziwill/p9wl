@@ -175,7 +175,7 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     }
     
     /* Only scroll if it saves */
-    if (bytes_with_scroll > bytes_no_scroll) return;
+    if (bytes_with_scroll * 4 > bytes_no_scroll) return;
     
     s->scroll_regions[reg_idx].detected = 1;
     s->scroll_regions[reg_idx].dx = dx;
