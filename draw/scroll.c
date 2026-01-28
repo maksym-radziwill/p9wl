@@ -50,6 +50,104 @@ struct scroll_cost_result {
 };
 
 /*
+ * Quick count of identical tiles for a scroll offset (no compression).
+ * Used for fast pre-filtering before expensive full compression.
+ */
+static int quick_count_identical(
+    struct server *s,
+    uint32_t *send_buf,
+    uint32_t *prev_buf,
+    int rx1, int ry1, int rx2, int ry2,
+    int dx, int dy)
+{
+    int width = s->width;
+    int abs_dx = dx < 0 ? -dx : dx;
+    int abs_dy = dy < 0 ? -dy : dy;
+    int identical = 0;
+    
+    int tx1 = rx1 / TILE_SIZE;
+    int ty1 = ry1 / TILE_SIZE;
+    int tx2 = rx2 / TILE_SIZE;
+    int ty2 = ry2 / TILE_SIZE;
+    
+    /* Compute dst bounds */
+    int dst_x1 = rx1, dst_x2 = rx2;
+    int dst_y1, dst_y2;
+    
+    if (dy < 0) {
+        dst_y1 = ry1;
+        dst_y2 = ry2 - abs_dy;
+    } else if (dy > 0) {
+        dst_y1 = ry1 + abs_dy;
+        dst_y2 = ry2;
+    } else {
+        dst_y1 = ry1;
+        dst_y2 = ry2;
+    }
+    
+    if (dx < 0) {
+        dst_x1 = rx1;
+        dst_x2 = rx2 - abs_dx;
+    } else if (dx > 0) {
+        dst_x1 = rx1 + abs_dx;
+        dst_x2 = rx2;
+    }
+    
+    /* Compute exposed boundaries */
+    int exposed_x1 = 0, exposed_x2 = 0;
+    int exposed_y1 = 0, exposed_y2 = 0;
+    
+    if (dy < 0) {
+        exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
+        exposed_y2 = ry2;
+    } else if (dy > 0) {
+        exposed_y1 = ry1;
+        exposed_y2 = ((dst_y1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    }
+    
+    if (dx < 0) {
+        exposed_x1 = (dst_x2 / TILE_SIZE) * TILE_SIZE;
+        exposed_x2 = rx2;
+    } else if (dx > 0) {
+        exposed_x1 = rx1;
+        exposed_x2 = ((dst_x1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+    }
+    
+    for (int ty = ty1; ty < ty2; ty++) {
+        for (int tx = tx1; tx < tx2; tx++) {
+            int x1 = tx * TILE_SIZE;
+            int y1 = ty * TILE_SIZE;
+            
+            if (x1 + TILE_SIZE > s->width || y1 + TILE_SIZE > s->height) continue;
+            
+            int src_x1 = x1 - dx;
+            int src_y1 = y1 - dy;
+            
+            /* Check if in exposed region */
+            int in_exposed = 0;
+            if (dy != 0 && y1 >= exposed_y1 && y1 < exposed_y2) in_exposed = 1;
+            if (dx != 0 && x1 >= exposed_x1 && x1 < exposed_x2) in_exposed = 1;
+            
+            if (!in_exposed && src_x1 >= 0 && src_y1 >= 0 && 
+                src_x1 + TILE_SIZE <= s->width && src_y1 + TILE_SIZE <= s->height) {
+                
+                int is_identical = 1;
+                for (int row = 0; row < TILE_SIZE && is_identical; row++) {
+                    if (memcmp(&send_buf[(y1 + row) * width + x1],
+                               &prev_buf[(src_y1 + row) * width + src_x1],
+                               TILE_SIZE * sizeof(uint32_t)) != 0) {
+                        is_identical = 0;
+                    }
+                }
+                if (is_identical) identical++;
+            }
+        }
+    }
+    
+    return identical;
+}
+
+/*
  * Compute compression cost for a given scroll offset (dx, dy).
  * Returns the total bytes needed if this scroll is applied.
  */
@@ -287,52 +385,84 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         return;
     }
     
-    /* Test scroll candidates: base value and ±4 pixel variations
+    /* Smart refinement: only test variations in the relevant direction(s).
      * With 4× downsampled FFT, results are quantized to 4 pixels.
-     * Test axis-aligned variations to find exact optimal offset.
-     * This catches quantization errors in FFT phase correlation */
-    static const int offsets[][2] = {
-        {0, 0},    /* Original detected scroll */
-        /* dx variations */
-        {-4, 0}, {-3, 0}, {-2, 0}, {-1, 0},
-        {+1, 0}, {+2, 0}, {+3, 0}, {+4, 0},
-        /* dy variations */
-        {0, -4}, {0, -3}, {0, -2}, {0, -1},
-        {0, +1}, {0, +2}, {0, +3}, {0, +4},
-    };
-    const int num_candidates = sizeof(offsets) / sizeof(offsets[0]);
+     * If dx=0, only test dy variations (and vice versa).
+     * Two-pass approach: quick identical count, then full compression only for best. */
     
-    int best_dx = 0, best_dy = 0;
-    int best_bytes = bytes_no_scroll;  /* Start with no-scroll as baseline */
-    int best_tiles_identical = tiles_identical_no;
+    /* Build list of candidates to test */
+    struct { int dx, dy; } candidates[16];
+    int num_candidates = 0;
     
-    for (int c = 0; c < num_candidates; c++) {
-        int test_dx = base_dx + offsets[c][0];
-        int test_dy = base_dy + offsets[c][1];
-        
-        /* Skip zero scroll */
-        if (test_dx == 0 && test_dy == 0) continue;
-        
-        /* Validate scroll is within bounds */
-        int test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
-        int test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
-        if (test_abs_dx >= max_scroll_x || test_abs_dy >= max_scroll_y) continue;
-        
-        struct scroll_cost_result cost = compute_scroll_cost(
-            s, send_buf, prev_buf,
-            rx1, ry1, rx2, ry2,
-            test_dx, test_dy);
-        
-        wlr_log(WLR_DEBUG, "Region %d: testing dx=%d dy=%d -> %d bytes (identical=%d)",
-                reg_idx, test_dx, test_dy, cost.bytes_with_scroll, cost.tiles_identical_with);
-        
-        if (cost.bytes_with_scroll < best_bytes) {
-            best_dx = test_dx;
-            best_dy = test_dy;
-            best_bytes = cost.bytes_with_scroll;
-            best_tiles_identical = cost.tiles_identical_with;
+    /* Always include base FFT result */
+    if (base_dx != 0 || base_dy != 0) {
+        candidates[num_candidates].dx = base_dx;
+        candidates[num_candidates].dy = base_dy;
+        num_candidates++;
+    }
+    
+    /* Add dy variations if dy != 0 */
+    if (base_dy != 0) {
+        static const int dy_offsets[] = {-3, -2, -1, +1, +2, +3};
+        for (int i = 0; i < 6 && num_candidates < 15; i++) {
+            int test_dy = base_dy + dy_offsets[i];
+            int test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
+            if (test_abs_dy < max_scroll_y) {
+                candidates[num_candidates].dx = base_dx;
+                candidates[num_candidates].dy = test_dy;
+                num_candidates++;
+            }
         }
     }
+    
+    /* Add dx variations if dx != 0 */
+    if (base_dx != 0) {
+        static const int dx_offsets[] = {-3, -2, -1, +1, +2, +3};
+        for (int i = 0; i < 6 && num_candidates < 15; i++) {
+            int test_dx = base_dx + dx_offsets[i];
+            int test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
+            if (test_abs_dx < max_scroll_x) {
+                candidates[num_candidates].dx = test_dx;
+                candidates[num_candidates].dy = base_dy;
+                num_candidates++;
+            }
+        }
+    }
+    
+    /* Pass 1: Quick identical tile count for all candidates */
+    int best_quick_idx = -1;
+    int best_quick_identical = 0;
+    
+    for (int c = 0; c < num_candidates; c++) {
+        int identical = quick_count_identical(
+            s, send_buf, prev_buf, rx1, ry1, rx2, ry2,
+            candidates[c].dx, candidates[c].dy);
+        
+        if (identical > best_quick_identical) {
+            best_quick_identical = identical;
+            best_quick_idx = c;
+        }
+    }
+    
+    /* If no candidate has more identical tiles than baseline, reject */
+    if (best_quick_idx < 0 || best_quick_identical <= tiles_identical_no) {
+        wlr_log(WLR_DEBUG, "Region %d: REJECTED dx=%d dy=%d - quick check shows no improvement (%d vs %d identical)",
+                reg_idx, base_dx, base_dy, best_quick_identical, tiles_identical_no);
+        return;
+    }
+    
+    /* Pass 2: Full compression only for the best candidate */
+    int best_dx = candidates[best_quick_idx].dx;
+    int best_dy = candidates[best_quick_idx].dy;
+    
+    struct scroll_cost_result cost = compute_scroll_cost(
+        s, send_buf, prev_buf, rx1, ry1, rx2, ry2, best_dx, best_dy);
+    
+    wlr_log(WLR_DEBUG, "Region %d: best candidate dx=%d dy=%d -> %d bytes (identical=%d)",
+            reg_idx, best_dx, best_dy, cost.bytes_with_scroll, cost.tiles_identical_with);
+    
+    int best_bytes = cost.bytes_with_scroll;
+    int best_tiles_identical = cost.tiles_identical_with;
     
     /* Check if any scroll variant was better than no scroll */
     if (best_dx == 0 && best_dy == 0) {
@@ -388,7 +518,6 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     int margin = TILE_SIZE;
     int dim = 256; 
     int cols = s->width / dim > 0 ? s->width / dim : 1, rows = s->height / dim > 0 ? s->height / dim : 1;
-    cols = 4; rows = 4;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
