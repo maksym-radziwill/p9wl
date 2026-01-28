@@ -134,6 +134,8 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         draw->height = new_h;
         draw->scale = scale / 2.0f;       /* Matrix = 128/(scale/2) = 2/scale */
         draw->input_scale = scale;        /* Mouse conversion */
+        draw->scene_width = scene_w;
+        draw->scene_height = scene_h;
     } else if (s->wl_scaling || scale <= 1.001f) {
         /* Regular Wayland scaling mode: no 9front scaling */
         draw->width = wl_phys_w;
@@ -142,6 +144,8 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         draw->logical_height = wl_phys_h;
         draw->scale = 1.0f;
         draw->input_scale = 1.0f;
+        draw->scene_width = scene_w;
+        draw->scene_height = scene_h;
     } else {
         /* 9front scaling mode: draw->width/height = effective physical */
         int eff_phys_w = (int)(wl_phys_w * scale);
@@ -152,6 +156,8 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         draw->logical_height = wl_phys_h;
         draw->scale = scale;
         draw->input_scale = scale;
+        draw->scene_width = scene_w;
+        draw->scene_height = scene_h;
     }
     draw->win_minx = new_minx;
     draw->win_miny = new_miny;
@@ -546,6 +552,10 @@ void new_output(struct wl_listener *l, void *d) {
          * Mouse physical (rio) -> cursor position (scene logical = rio/scale) */
         s->draw.input_scale = scale;
         
+        /* Scene dimensions = what Wayland apps see */
+        s->draw.scene_width = scene_w;
+        s->draw.scene_height = scene_h;
+        
         /* Resize background to scene dimensions */
         if (s->background) {
             wlr_scene_rect_set_size(s->background, scene_w, scene_h);
@@ -597,12 +607,16 @@ void new_output(struct wl_listener *l, void *d) {
         if (scale > 1.001f) {
             int scene_w = (int)(phys_w / scale);
             int scene_h = (int)(phys_h / scale);
+            s->draw.scene_width = scene_w;
+            s->draw.scene_height = scene_h;
             if (s->background) {
                 wlr_scene_rect_set_size(s->background, scene_w, scene_h);
             }
             wlr_log(WLR_INFO, "Output ready: %dx%d physical, Wayland scale=%.2f, scene %dx%d", 
                     phys_w, phys_h, scale, scene_w, scene_h);
         } else {
+            s->draw.scene_width = phys_w;
+            s->draw.scene_height = phys_h;
             wlr_log(WLR_INFO, "Output ready: %dx%d", phys_w, phys_h);
         }
         
@@ -747,6 +761,8 @@ void new_output(struct wl_listener *l, void *d) {
     s->draw.logical_height = logical_h;
     s->draw.scale = scale;
     s->draw.input_scale = scale;  /* Mouse coord conversion uses same scale */
+    s->draw.scene_width = logical_w;   /* Scene = logical in 9front mode */
+    s->draw.scene_height = logical_h;
     
     /* Resize background to logical dimensions */
     if (s->background) {

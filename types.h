@@ -91,6 +91,8 @@ struct draw_state {
     int logical_height;
     float scale;        /* Scale factor for 'a' command matrix: matrix = 128/scale */
     float input_scale;  /* Scale factor for mouse coord conversion: logical = physical / input_scale */
+    int scene_width;    /* Scene/logical dimensions (what Wayland apps see) */
+    int scene_height;
 };
 
 /* Subsurface tracking */

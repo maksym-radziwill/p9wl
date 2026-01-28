@@ -120,18 +120,22 @@ static void toplevel_commit(struct wl_listener *l, void *d) {
     struct wlr_surface *surface = xdg_surface->surface;
     
     if (xdg_surface->initial_commit) {
-        /* For 9front scaling mode, s->width/height are already logical.
-         * For Wayland scaling or no scaling, convert physical to logical.
-         */
-        int logical_w, logical_h;
-        if (!s->wl_scaling && s->scale > 1.001f) {
-            /* 9front scaling: s->width is already logical */
-            logical_w = s->width;
-            logical_h = s->height;
-        } else {
-            /* Wayland scaling or no scaling */
-            logical_w = focus_phys_to_logical(s->width, s->scale);
-            logical_h = focus_phys_to_logical(s->height, s->scale);
+        /* Use scene dimensions (what Wayland apps see).
+         * This is set by output.c based on the scaling mode. */
+        int logical_w = s->draw.scene_width;
+        int logical_h = s->draw.scene_height;
+        
+        /* Fallback if not yet set */
+        if (logical_w <= 0 || logical_h <= 0) {
+            if (!s->wl_scaling && s->scale > 1.001f) {
+                /* 9front scaling: s->width is already logical */
+                logical_w = s->width;
+                logical_h = s->height;
+            } else {
+                /* Wayland scaling or no scaling */
+                logical_w = focus_phys_to_logical(s->width, s->scale);
+                logical_h = focus_phys_to_logical(s->height, s->scale);
+            }
         }
         
         wlr_xdg_toplevel_set_size(tl->xdg, logical_w, logical_h);

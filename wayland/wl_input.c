@@ -165,20 +165,23 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     int local_x = (int)(phys_local_x / scale + 0.5f);
     int local_y = (int)(phys_local_y / scale + 0.5f);
     
-    /* s->width, s->height are the compositor's dimensions (logical in 9front mode) */
-    int logical_w = s->width;
-    int logical_h = s->height;
+    /* Use scene dimensions (what Wayland apps see) for cursor positioning.
+     * This differs from s->width/height in fractional Wayland mode. */
+    int scene_w = s->draw.scene_width;
+    int scene_h = s->draw.scene_height;
+    if (scene_w <= 0) scene_w = s->width;
+    if (scene_h <= 0) scene_h = s->height;
     
-    /* Clamp to logical bounds */
+    /* Clamp to scene bounds */
     if (local_x < 0) local_x = 0;
     if (local_y < 0) local_y = 0;
-    if (local_x >= logical_w) local_x = logical_w - 1;
-    if (local_y >= logical_h) local_y = logical_h - 1;
+    if (local_x >= scene_w) local_x = scene_w - 1;
+    if (local_y >= scene_h) local_y = scene_h - 1;
     
-    /* Update cursor position (using logical coordinates) */
+    /* Update cursor position (using scene logical coordinates) */
     wlr_cursor_warp_absolute(s->cursor, NULL,
-                             (double)local_x / logical_w,
-                             (double)local_y / logical_h);
+                             (double)local_x / scene_w,
+                             (double)local_y / scene_h);
     
     /* Find surface under cursor */
     double sx, sy;
