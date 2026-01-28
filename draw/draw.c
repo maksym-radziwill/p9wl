@@ -454,71 +454,31 @@ int init_draw(struct server *s) {
     /* Allocate memory image for framebuffer */
     draw->image_id = 1;
     
-    /* Get scale from server config.
-     * For 9front sharp scaling (scale=1.5, wl_scaling=0):
-     *   Physical: draw->width × draw->height (9front window)
-     *   Logical: physical / 1.5 (what Wayland clients see)
-     *   Render: logical × 2 = physical × 4/3 (Wayland renders at 2× DPI)
-     *   9P images: allocated at RENDER resolution
-     *   9front: downscales render → physical (sharp)
-     *
-     * For no scaling or Wayland scaling:
-     *   All images at physical resolution
+    /* Compute logical dimensions for the source image.
+     * Physical dimensions: draw->width x draw->height
+     * Logical dimensions: physical / DRAW_SCALE
+     * The 'a' command will scale from logical to physical.
      */
-    float scale = s->scale;
-    if (scale <= 0.0f) scale = 1.0f;
+    int logical_width = (int)(draw->width / DRAW_SCALE + 0.5f);
+    int logical_height = (int)(draw->height / DRAW_SCALE + 0.5f);
     
-    int render_width, render_height;
-    int logical_width, logical_height;
+    /* Ensure logical dimensions are tile-aligned */
+    logical_width = TILE_ALIGN_DOWN(logical_width);
+    logical_height = TILE_ALIGN_DOWN(logical_height);
+    if (logical_width < MIN_ALIGNED_DIM) logical_width = MIN_ALIGNED_DIM;
+    if (logical_height < MIN_ALIGNED_DIM) logical_height = MIN_ALIGNED_DIM;
     
-    if (!s->wl_scaling && scale > 1.001f) {
-        /* 9front SHARP scaling mode */
-        int phys_w = draw->width;
-        int phys_h = draw->height;
-        
-        /* Logical = physical / scale, aligned to even for clean 2× */
-        logical_width = (int)(phys_w / scale + 0.5f);
-        logical_height = (int)(phys_h / scale + 0.5f);
-        logical_width = (logical_width / 2) * 2;
-        logical_height = (logical_height / 2) * 2;
-        
-        /* Render = logical × 2 */
-        render_width = logical_width * 2;
-        render_height = logical_height * 2;
-        
-        /* Tile-align render dimensions */
-        render_width = TILE_ALIGN_DOWN(render_width);
-        render_height = TILE_ALIGN_DOWN(render_height);
-        if (render_width < MIN_ALIGNED_DIM) render_width = MIN_ALIGNED_DIM;
-        if (render_height < MIN_ALIGNED_DIM) render_height = MIN_ALIGNED_DIM;
-        
-        wlr_log(WLR_INFO, "Sharp %.1fx scaling: physical %dx%d, logical %dx%d, render %dx%d",
-                scale, phys_w, phys_h, logical_width, logical_height, render_width, render_height);
-    } else {
-        /* No scaling or Wayland scaling: all at physical resolution */
-        render_width = draw->width;
-        render_height = draw->height;
-        logical_width = draw->width;
-        logical_height = draw->height;
-        
-        if (s->wl_scaling && scale > 1.001f) {
-            logical_width = (int)(draw->width / scale + 0.5f);
-            logical_height = (int)(draw->height / scale + 0.5f);
-        }
+    if (DRAW_SCALE != 1.0f) {
+        wlr_log(WLR_INFO, "Fractional scaling: physical %dx%d -> logical %dx%d (scale=%.2f)",
+                draw->width, draw->height, logical_width, logical_height, DRAW_SCALE);
     }
     
-    /* Store dimensions for use by send.c and output.c */
+    /* Store logical dimensions for use by send.c */
     draw->logical_width = logical_width;
     draw->logical_height = logical_height;
-    draw->render_width = render_width;
-    draw->render_height = render_height;
-    draw->scale = (!s->wl_scaling && scale > 1.001f) ? 
-                  ((float)render_width / (float)draw->width) : 1.0f;
+    draw->scale = DRAW_SCALE;
     
-    wlr_log(WLR_INFO, "9P image dimensions: %dx%d (scale factor=%.3f)",
-            render_width, render_height, draw->scale);
-    
-    /* 'b' command: allocate image at RENDER resolution */
+    /* 'b' command: allocate image at LOGICAL resolution */
     uint8_t bcmd[1 + 4 + 4 + 1 + 4 + 1 + 16 + 16 + 4];
     int off = 0;
     
@@ -530,12 +490,12 @@ int init_draw(struct server *s) {
     bcmd[off++] = 0;                              /* repl = 0 */
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_width); off += 4;
-    PUT32(bcmd + off, render_height); off += 4;
+    PUT32(bcmd + off, logical_width); off += 4;   /* width at logical resolution */
+    PUT32(bcmd + off, logical_height); off += 4;  /* height at logical resolution */
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_width); off += 4;
-    PUT32(bcmd + off, render_height); off += 4;
+    PUT32(bcmd + off, logical_width); off += 4;
+    PUT32(bcmd + off, logical_height); off += 4;
     PUT32(bcmd + off, 0xFF000000); off += 4;      /* color = black */
     
     wlr_log(WLR_DEBUG, "Allocating image: 'b' cmd size=%d", off);
@@ -545,8 +505,8 @@ int init_draw(struct server *s) {
         wlr_log(WLR_ERROR, "Failed to allocate framebuffer image");
         return -1;
     }
-    wlr_log(WLR_INFO, "Allocated framebuffer image %d (%dx%d) format=XRGB32", 
-            draw->image_id, render_width, render_height);
+    wlr_log(WLR_INFO, "Allocated framebuffer image %d (%dx%d logical, %.2fx scale) format=XRGB32", 
+            draw->image_id, logical_width, logical_height, DRAW_SCALE);
     
     /* Allocate opaque mask: 1x1 white image with repl=1 */
     draw->opaque_id = 2;
@@ -600,9 +560,7 @@ int init_draw(struct server *s) {
     }
     wlr_log(WLR_INFO, "Allocated border color image %d", draw->border_id);
     
-    /* Allocate delta image with ARGB32 for sparse updates.
-     * MUST be same size as main image (render resolution).
-     */
+    /* Allocate delta image with ARGB32 for sparse updates */
     draw->delta_id = 5;
     off = 0;
     bcmd[off++] = 'b';
@@ -613,12 +571,12 @@ int init_draw(struct server *s) {
     bcmd[off++] = 0;
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_width); off += 4;
-    PUT32(bcmd + off, render_height); off += 4;
+    PUT32(bcmd + off, draw->width); off += 4;
+    PUT32(bcmd + off, draw->height); off += 4;
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_width); off += 4;
-    PUT32(bcmd + off, render_height); off += 4;
+    PUT32(bcmd + off, draw->width); off += 4;
+    PUT32(bcmd + off, draw->height); off += 4;
     PUT32(bcmd + off, 0x00000000); off += 4;  /* color = transparent black */
     
     written = p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
@@ -626,8 +584,8 @@ int init_draw(struct server *s) {
         wlr_log(WLR_ERROR, "Failed to allocate delta image");
         return -1;
     }
-    wlr_log(WLR_INFO, "Allocated delta image %d (%dx%d) ARGB32", 
-            draw->delta_id, render_width, render_height);
+    wlr_log(WLR_INFO, "Allocated delta image %d (%dx%d) ARGB32 for alpha-delta compression", 
+            draw->delta_id, draw->width, draw->height);
     
     draw->xor_enabled = 0;  /* Will be enabled after first successful full frame */
     

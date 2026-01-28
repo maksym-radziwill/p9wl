@@ -1,14 +1,8 @@
 /*
- * output.c - Output and input device handlers (SHARP SCALING VERSION)
+ * output.c - Output and input device handlers
  *
- * For 9front scaling mode, renders at HIGH resolution (physical × scale)
- * then DOWNSCALES to the physical window for sharp results.
- *
- * Previous approach (blurry):
- *   Compositor at logical (phys/scale) → upscale → blurry
- *
- * New approach (sharp):
- *   Compositor at render (phys×scale) → downscale → sharp
+ * Handles output frame rendering, resize handling,
+ * and input device attachment.
  */
 
 #include <stdlib.h>
@@ -27,72 +21,42 @@
 #include "../draw/send.h"
 #include "../p9/p9.h"
 
-/* From send.c - pause/resume for resize synchronization */
-extern void send_system_pause(void);
-extern void send_system_resume(void);
-
 /* Handle resize to new physical dimensions */
 void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new_miny) {
     wlr_log(WLR_INFO, "handle_resize: %dx%d -> %dx%d at (%d,%d)", 
             s->draw.width, s->draw.height, new_w, new_h, new_minx, new_miny);
     
-    /* CRITICAL: Pause send system to wait for all in-flight 9P writes.
-     * This prevents "bad writeimage call" errors from stale scroll commands.
-     */
-    send_system_pause();
-    
-    /* Take lock to synchronize with send thread.
-     * This ensures no frames are being processed while we resize.
-     */
-    pthread_mutex_lock(&s->send_lock);
-    
     float scale = s->scale;
     if (scale <= 0.0f) scale = 1.0f;
     
-    int render_w, render_h;
-    int phys_w, phys_h;
     int logical_w, logical_h;
     
     if (s->wl_scaling || scale <= 1.001f) {
-        /* Wayland scaling mode or no scaling: physical resolution */
-        phys_w = (new_w / TILE_SIZE) * TILE_SIZE;
-        phys_h = (new_h / TILE_SIZE) * TILE_SIZE;
-        if (phys_w < TILE_SIZE * 4) phys_w = TILE_SIZE * 4;
-        if (phys_h < TILE_SIZE * 4) phys_h = TILE_SIZE * 4;
+        /* Wayland scaling mode: everything at physical resolution */
+        logical_w = (new_w / TILE_SIZE) * TILE_SIZE;
+        logical_h = (new_h / TILE_SIZE) * TILE_SIZE;
+        if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
+        if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
         
-        render_w = phys_w;
-        render_h = phys_h;
-        logical_w = phys_w;
-        logical_h = phys_h;
-        
-        wlr_log(WLR_INFO, "Resize (Wayland/no scaling): %dx%d", phys_w, phys_h);
+        wlr_log(WLR_INFO, "Resize (Wayland scaling): physical %dx%d, aligned %dx%d",
+                new_w, new_h, logical_w, logical_h);
     } else {
-        /* 9front SHARP 1.5× scaling mode:
-         * - Physical: tile-aligned window size
-         * - Logical: physical / 1.5 (what clients see)
-         * - Render: logical × 2 = physical × (4/3)
-         */
-        phys_w = (new_w / TILE_SIZE) * TILE_SIZE;
-        phys_h = (new_h / TILE_SIZE) * TILE_SIZE;
-        if (phys_w < TILE_SIZE * 4) phys_w = TILE_SIZE * 4;
-        if (phys_h < TILE_SIZE * 4) phys_h = TILE_SIZE * 4;
+        /* 9front scaling mode: compositor at logical resolution */
+        logical_w = (int)(new_w / scale);
+        logical_h = (int)(new_h / scale);
         
-        /* Logical = physical / 1.5, aligned to even for clean 2× */
-        logical_w = (phys_w * 2) / 3;
-        logical_h = (phys_h * 2) / 3;
-        logical_w = (logical_w / 2) * 2;
-        logical_h = (logical_h / 2) * 2;
+        /* Align logical dimensions to tile size */
+        logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
+        logical_h = (logical_h / TILE_SIZE) * TILE_SIZE;
+        if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
+        if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
         
-        /* Render = logical × 2 */
-        render_w = logical_w * 2;
-        render_h = logical_h * 2;
-        
-        wlr_log(WLR_INFO, "Resize (9front 1.5× SHARP): physical %dx%d, logical %dx%d, render %dx%d",
-                phys_w, phys_h, logical_w, logical_h, render_w, render_h);
+        wlr_log(WLR_INFO, "Resize (9front scaling): physical %dx%d, scale %.2f, logical %dx%d",
+                new_w, new_h, scale, logical_w, logical_h);
     }
     
-    /* Allocate compositor buffers at RENDER resolution */
-    size_t fb_size = render_w * render_h * sizeof(uint32_t);
+    /* Allocate compositor buffers at LOGICAL resolution */
+    size_t fb_size = logical_w * logical_h * sizeof(uint32_t);
     uint32_t *new_framebuf = calloc(1, fb_size);
     uint32_t *new_prev_framebuf = calloc(1, fb_size);
     uint32_t *new_send_buf0 = calloc(1, fb_size);
@@ -104,18 +68,18 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         free(new_prev_framebuf);
         free(new_send_buf0);
         free(new_send_buf1);
-        pthread_mutex_unlock(&s->send_lock);
-        send_system_resume();  /* Resume on failure */
         return;
     }
     
     uint32_t *old_framebuf = s->framebuf;
     uint32_t *old_prev_framebuf = s->prev_framebuf;
-    uint32_t *old_send_buf0 = s->send_buf[0];
-    uint32_t *old_send_buf1 = s->send_buf[1];
+    uint32_t *old_send_buf0, *old_send_buf1;
     struct draw_state *draw = &s->draw;
     
-    /* We already hold send_lock from the start of this function */
+    pthread_mutex_lock(&s->send_lock);
+    old_send_buf0 = s->send_buf[0];
+    old_send_buf1 = s->send_buf[1];
+    
     s->framebuf = new_framebuf;
     s->prev_framebuf = new_prev_framebuf;
     s->send_buf[0] = new_send_buf0;
@@ -123,125 +87,104 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     s->pending_buf = -1;
     s->active_buf = -1;
     
-    /* s->width, s->height = RENDER resolution (compositor buffers) */
-    s->width = render_w;
-    s->height = render_h;
-    s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
-    s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
-    
-    /* Check if 9P images need reallocation BEFORE updating draw dimensions */
-    int old_render_w = draw->render_width;
-    int old_render_h = draw->render_height;
-    int need_realloc = (old_render_w != render_w || old_render_h != render_h);
+    /* s->width, s->height = LOGICAL (compositor buffers) */
+    s->width = logical_w;
+    s->height = logical_h;
+    s->tiles_x = (logical_w + TILE_SIZE - 1) / TILE_SIZE;
+    s->tiles_y = (logical_h + TILE_SIZE - 1) / TILE_SIZE;
     
     if (s->wl_scaling || scale <= 1.001f) {
         /* Wayland scaling mode: no 9front scaling */
-        draw->width = render_w;
-        draw->height = render_h;
-        draw->logical_width = render_w;
-        draw->logical_height = render_h;
-        draw->render_width = render_w;
-        draw->render_height = render_h;
-        draw->scale = 1.0f;
-    } else {
-        /* 9front 1.5× SHARP scaling mode:
-         * - width/height = physical (dest for 'a' command)
-         * - logical = physical / 1.5 (what clients see)
-         * - render = logical × 2 (what we render at)
-         * - scale = render / physical = 4/3 (9front downscale factor)
-         */
-        draw->width = phys_w;
-        draw->height = phys_h;
+        draw->width = logical_w;
+        draw->height = logical_h;
         draw->logical_width = logical_w;
         draw->logical_height = logical_h;
-        draw->render_width = render_w;
-        draw->render_height = render_h;
-        draw->scale = (float)render_w / (float)phys_w;  /* 4/3 ≈ 1.333 */
+        draw->scale = 1.0f;
+    } else {
+        /* 9front scaling mode: draw->width/height = effective physical */
+        int eff_phys_w = (int)(logical_w * scale);
+        int eff_phys_h = (int)(logical_h * scale);
+        draw->width = eff_phys_w;
+        draw->height = eff_phys_h;
+        draw->logical_width = logical_w;
+        draw->logical_height = logical_h;
+        draw->scale = scale;
     }
     draw->win_minx = new_minx;
     draw->win_miny = new_miny;
-    
-    /* Reallocate Plan 9 images at RENDER resolution.
-     * This ensures no frame can be sent to mismatched image dimensions.
-     */
-    struct p9conn *p9 = draw->p9;
-    
-    if (need_realloc) {
-        wlr_log(WLR_INFO, "handle_resize: Reallocating 9P images: %dx%d -> %dx%d",
-                old_render_w, old_render_h, render_w, render_h);
-        
-        uint8_t freecmd[5];
-        freecmd[0] = 'f';
-        PUT32(freecmd + 1, draw->image_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        PUT32(freecmd + 1, draw->delta_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        
-        uint8_t bcmd[64];
-        int off = 0;
-        bcmd[off++] = 'b';
-        PUT32(bcmd + off, draw->image_id); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0x68081828); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0x00000000); off += 4;
-        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-        
-        off = 0;
-        bcmd[off++] = 'b';
-        PUT32(bcmd + off, draw->delta_id); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0x48081828); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0x00000000); off += 4;
-        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-    }
-    
-    /* Now safe to release lock - 9P images match buffer dimensions */
     pthread_mutex_unlock(&s->send_lock);
     
-    /* Free old buffers AFTER releasing lock (they're no longer referenced) */
     free(old_framebuf);
     free(old_prev_framebuf);
     free(old_send_buf0);
     free(old_send_buf1);
     
-    /* Resize wlroots output to RENDER dimensions */
+    /* Reallocate Plan 9 images at LOGICAL resolution */
+    struct p9conn *p9 = draw->p9;
+    uint8_t freecmd[5];
+    freecmd[0] = 'f';
+    PUT32(freecmd + 1, draw->image_id);
+    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+    PUT32(freecmd + 1, draw->delta_id);
+    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+    
+    uint8_t bcmd[64];
+    int off = 0;
+    bcmd[off++] = 'b';
+    PUT32(bcmd + off, draw->image_id); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    bcmd[off++] = 0;
+    PUT32(bcmd + off, 0x68081828); off += 4;
+    bcmd[off++] = 0;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, logical_w); off += 4;
+    PUT32(bcmd + off, logical_h); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, logical_w); off += 4;
+    PUT32(bcmd + off, logical_h); off += 4;
+    PUT32(bcmd + off, 0x00000000); off += 4;
+    p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+    
+    off = 0;
+    bcmd[off++] = 'b';
+    PUT32(bcmd + off, draw->delta_id); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    bcmd[off++] = 0;
+    PUT32(bcmd + off, 0x48081828); off += 4;
+    bcmd[off++] = 0;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, logical_w); off += 4;
+    PUT32(bcmd + off, logical_h); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, 0); off += 4;
+    PUT32(bcmd + off, logical_w); off += 4;
+    PUT32(bcmd + off, logical_h); off += 4;
+    PUT32(bcmd + off, 0x00000000); off += 4;
+    p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+    
+    /* Resize wlroots output */
     struct wlr_output_state state;
     wlr_output_state_init(&state);
-    wlr_output_state_set_custom_mode(&state, render_w, render_h, 0);
-    if (!s->wl_scaling && scale > 1.001f) {
-        /* 9front 1.5× sharp scaling: set Wayland output scale=2 */
-        wlr_output_state_set_scale(&state, 2.0f);
-    } else if (s->wl_scaling && scale > 1.001f) {
+    wlr_output_state_set_custom_mode(&state, logical_w, logical_h, 0);
+    if (s->wl_scaling && scale > 1.001f) {
         wlr_output_state_set_scale(&state, scale);
     }
     wlr_output_commit_state(s->output, &state);
     wlr_output_state_finish(&state);
     
-    /* Scene uses LOGICAL coordinates.
-     * With 9front 1.5× scaling: scene = logical = physical / 1.5
+    /* Send configure to all toplevels.
+     * When Wayland scaling is active, scene graph uses logical coords
+     * (physical / output_scale), not physical coords.
      */
     int scene_w = logical_w;
     int scene_h = logical_h;
+    if (s->wl_scaling && scale > 1.001f) {
+        scene_w = (int)(logical_w / scale);
+        scene_h = (int)(logical_h / scale);
+    }
     
     struct toplevel *tl;
     wl_list_for_each(tl, &s->toplevels, link) {
@@ -250,6 +193,7 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         }
     }
     
+    /* Resize background (scene uses logical coordinates) */
     if (s->background) {
         wlr_scene_rect_set_size(s->background, scene_w, scene_h);
     }
@@ -257,31 +201,23 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     draw->xor_enabled = 0;
     s->force_full_frame = 1;
     
-    /* Resume send system now that 9P images are ready */
-    send_system_resume();
-    
-    wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical, %dx%d render at (%d,%d)", 
-            phys_w, phys_h, logical_w, logical_h, render_w, render_h, new_minx, new_miny);
+    wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical, %dx%d scene at (%d,%d)", 
+            new_w, new_h, logical_w, logical_h, scene_w, scene_h, new_minx, new_miny);
 }
 
-static uint32_t now_ms_local(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
-
-static uint64_t frame_count = 0;
-
-void output_frame(struct wl_listener *l, void *data) {
-    struct server *s = wl_container_of(l, s, output_frame);
-    struct wlr_scene_output *so = s->scene_output;
+static void output_destroy(struct wl_listener *listener, void *data) {
+    struct server *s = wl_container_of(listener, s, output_destroy);
     (void)data;
-    
-    static int frame_log_count = 0;
-    frame_log_count++;
-    if (frame_log_count <= 5 || frame_log_count % 60 == 0) {
-        wlr_log(WLR_INFO, "output_frame #%d called", frame_log_count);
-    }
+    wl_list_remove(&s->output_frame.link);
+    wl_list_remove(&s->output_destroy.link);
+}
+
+static void output_frame(struct wl_listener *listener, void *data) {
+    struct server *s = wl_container_of(listener, s, output_frame);
+    struct wlr_scene_output *so = s->scene_output;
+    static int frame_count = 0;
+    static uint32_t last_first_pixel = 0;
+    (void)data;
     
     /* Check if window was resized - read atomically under lock */
     pthread_mutex_lock(&s->send_lock);
@@ -307,7 +243,7 @@ void output_frame(struct wl_listener *l, void *data) {
         }
     }
     
-    uint32_t now = now_ms_local();
+    uint32_t now = now_ms();
 #if FRAME_INTERVAL_MS > 0
     if (now - s->last_frame_ms < FRAME_INTERVAL_MS) {
         struct timespec ts;
@@ -324,103 +260,102 @@ void output_frame(struct wl_listener *l, void *data) {
     struct wlr_scene_output_state_options opts = {0};
     
     if (!wlr_scene_output_build_state(so, &ostate, &opts)) {
-        wlr_output_state_finish(&ostate);
-        return;
-    }
-    
-    struct wlr_buffer *buf = ostate.buffer;
-    if (!buf) {
-        wlr_output_state_finish(&ostate);
-        return;
-    }
-    
-    void *data_ptr;
-    uint32_t format;
-    size_t stride;
-    if (!wlr_buffer_begin_data_ptr_access(buf, WLR_BUFFER_DATA_PTR_ACCESS_READ,
-                                           &data_ptr, &format, &stride)) {
-        wlr_output_state_finish(&ostate);
-        return;
-    }
-    
-    /* Copy rendered frame to our buffer */
-    int w = s->width;
-    int h = s->height;
-    uint32_t *framebuf = s->framebuf;
-    
-    if (stride == (size_t)(w * 4)) {
-        memcpy(framebuf, data_ptr, w * h * 4);
-    } else {
-        uint8_t *src = data_ptr;
-        uint8_t *dst = (uint8_t *)framebuf;
-        for (int y = 0; y < h; y++) {
-            memcpy(dst, src, w * 4);
-            src += stride;
-            dst += w * 4;
+        if (frame_count <= 10 || frame_count % 60 == 0) {
+            wlr_log(WLR_DEBUG, "Frame %d: build_state failed", frame_count);
         }
+        wlr_output_state_finish(&ostate);
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        wlr_scene_output_send_frame_done(so, &ts);
+        return;
     }
     
-    wlr_buffer_end_data_ptr_access(buf);
-    
-    if (!wlr_output_commit_state(s->output, &ostate)) {
-        wlr_log(WLR_ERROR, "Output commit failed");
+    struct wlr_buffer *buffer = ostate.buffer;
+    if (buffer) {
+        void *data_ptr;
+        uint32_t format;
+        size_t stride;
+        
+        if (wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ,
+                                              &data_ptr, &format, &stride)) {
+            pthread_mutex_lock(&s->send_lock);
+            
+            int w = s->width;
+            int h = s->height;
+            uint32_t *fb = s->framebuf;
+            uint32_t first_pix = 0, mid_pix = 0;
+            int valid_fb = 0;
+            
+            if (fb && w > 0 && h > 0 && w <= 4096 && h <= 4096) {
+                valid_fb = 1;
+                int buf_w = buffer->width;
+                int buf_h = buffer->height;
+                int copy_w = (buf_w < w) ? buf_w : w;
+                int copy_h = (buf_h < h) ? buf_h : h;
+                
+                for (int y = 0; y < copy_h; y++) {
+                    memcpy(&fb[y * w],
+                           (uint8_t*)data_ptr + y * stride,
+                           copy_w * 4);
+                }
+                
+                first_pix = fb[0];
+                mid_pix = fb[(h/2) * w + w/2];
+            }
+            
+            pthread_mutex_unlock(&s->send_lock);
+            wlr_buffer_end_data_ptr_access(buffer);
+            
+            if (valid_fb) {
+                if (first_pix != last_first_pixel || frame_count <= 10 || frame_count % 60 == 0) {
+                    wlr_log(WLR_INFO, "Frame %d: first=0x%08x mid=0x%08x (changed=%d)", 
+                            frame_count, first_pix, mid_pix, first_pix != last_first_pixel);
+                    last_first_pixel = first_pix;
+                }
+            }
+        } else {
+            if (frame_count <= 10 || frame_count % 60 == 0)
+                wlr_log(WLR_ERROR, "Frame %d: buffer access failed", frame_count);
+        }
+    } else {
+        if (frame_count <= 10 || frame_count % 60 == 0)
+            wlr_log(WLR_DEBUG, "Frame %d: no buffer in state", frame_count);
     }
+    
+    wlr_output_commit_state(s->output, &ostate);
     wlr_output_state_finish(&ostate);
-    
-    /* Send frame to 9front - call directly for immediate delivery */
-    s->frame_dirty = 1;
-    send_frame(s);
     
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     wlr_scene_output_send_frame_done(so, &ts);
-}
-
-static void output_destroy(struct wl_listener *l, void *d) {
-    struct server *s = wl_container_of(l, s, output_destroy);
-    (void)d;
-    wlr_log(WLR_INFO, "Output destroyed");
-    wl_list_remove(&s->output_frame.link);
-    wl_list_remove(&s->output_destroy.link);
-    s->output = NULL;
-    s->scene_output = NULL;
+    
+    send_frame(s);
 }
 
 void new_output(struct wl_listener *l, void *d) {
     struct server *s = wl_container_of(l, s, new_output);
     struct wlr_output *out = d;
     
-    /* Initialize output rendering - REQUIRED for cursor and other operations */
     wlr_output_init_render(out, s->allocator, s->renderer);
-    
-    wlr_log(WLR_INFO, "New output: %s (%s)", out->name, out->description ? out->description : "no desc");
-    
-    /* Get physical window dimensions from draw state */
-    int phys_w = s->draw.actual_maxx - s->draw.actual_minx;
-    int phys_h = s->draw.actual_maxy - s->draw.actual_miny;
-    
-    if (phys_w <= 0 || phys_h <= 0) {
-        phys_w = s->draw.width;
-        phys_h = s->draw.height;
-    }
-    
-    wlr_log(WLR_INFO, "Physical window: %dx%d", phys_w, phys_h);
     
     float scale = s->scale;
     if (scale <= 0.0f) scale = 1.0f;
     
+    int phys_w = s->width;
+    int phys_h = s->height;
+    
     /*
      * Two scaling modes:
-     *
-     * 1. 9front SHARP scaling (s->wl_scaling == 0, default with -S flag):
-     *    - Compositor renders at HIGH resolution (physical × scale)
-     *    - 9front DOWNSCALES to physical window = SHARP
-     *    - Higher bandwidth but sharp results
+     * 
+     * 1. 9front scaling (default, s->wl_scaling == 0):
+     *    - Compositor renders at LOGICAL resolution (physical / scale)
+     *    - 9front 'a' command scales to physical window
+     *    - Lower bandwidth, quality depends on 9front bilinear
      *
      * 2. Wayland scaling (s->wl_scaling == 1, or -W flag):
      *    - Compositor renders at PHYSICAL resolution
      *    - wlroots uses output scale to report logical size to clients
-     *    - No 9front scaling needed
+     *    - Higher bandwidth, may look sharper
      */
     
     if (s->wl_scaling || scale <= 1.001f) {
@@ -446,14 +381,14 @@ void new_output(struct wl_listener *l, void *d) {
         s->output_destroy.notify = output_destroy;
         wl_signal_add(&out->events.destroy, &s->output_destroy);
         
-        s->draw.width = phys_w;
-        s->draw.height = phys_h;
+        /* For Wayland scaling, dimensions stay physical, scale=1 for 9front */
         s->draw.logical_width = phys_w;
         s->draw.logical_height = phys_h;
-        s->draw.render_width = phys_w;
-        s->draw.render_height = phys_h;
-        s->draw.scale = 1.0f;
+        s->draw.scale = 1.0f;  /* No 9front scaling */
         
+        /* When Wayland scaling is active, scene graph uses logical coordinates.
+         * Resize background to logical dimensions (physical / output_scale).
+         */
         if (scale > 1.001f) {
             int scene_w = (int)(phys_w / scale);
             int scene_h = (int)(phys_h / scale);
@@ -466,72 +401,45 @@ void new_output(struct wl_listener *l, void *d) {
             wlr_log(WLR_INFO, "Output ready: %dx%d", phys_w, phys_h);
         }
         
+        /* Now that everything is set up correctly, trigger first frame */
         s->force_full_frame = 1;
         s->frame_dirty = 1;
-        wlr_output_schedule_frame(out);
         return;
     }
     
-    /* 9front SHARP scaling mode for 1.5× overall scale:
-     *
-     * Goal: clients see physical/1.5 logical pixels, sharp output
-     * 
-     * Method:
-     * - Wayland scale = 2 (integer for clean scroll detection)
-     * - Logical = physical / 1.5 (what clients see)
-     * - Render = logical × 2 = physical × (4/3)
-     * - 9front downscales render → physical by factor 4/3
-     *
-     * Example for 1440×1008 physical:
-     * - Logical: 960×672 (clients see this)
-     * - Render: 1920×1344 (what Wayland renders)
-     * - 9front: 1920×1344 → 1440×1008 (4/3 downscale)
-     */
-    wlr_log(WLR_INFO, "Using 9front-side SHARP 1.5× scaling (2× Wayland, 4/3 downscale)");
+    /* 9front scaling mode */
+    wlr_log(WLR_INFO, "Using 9front-side scaling (scale=%.2f)", scale);
     
-    /* Use dimensions already computed by draw_init() */
-    int aligned_phys_w = s->draw.width;
-    int aligned_phys_h = s->draw.height;
-    int logical_w = s->draw.logical_width;
-    int logical_h = s->draw.logical_height;
-    int render_w = s->draw.render_width;
-    int render_h = s->draw.render_height;
+    int logical_w = (int)(phys_w / scale);
+    int logical_h = (int)(phys_h / scale);
     
-    wlr_log(WLR_INFO, "Using draw_init dimensions: physical=%dx%d, logical=%dx%d, render=%dx%d",
-            aligned_phys_w, aligned_phys_h, logical_w, logical_h, render_w, render_h);
+    /* Align to tile size */
+    logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
+    logical_h = (logical_h / TILE_SIZE) * TILE_SIZE;
+    if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
+    if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
     
-    /* Set wlroots output to RENDER dimensions with scale=2.
-     * Clients will see logical = render/2.
+    /* Set wlroots output to LOGICAL dimensions.
+     * Do NOT use wlr_output_state_set_scale() - we handle scaling in 9front.
      */
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
-    wlr_output_state_set_custom_mode(&state, render_w, render_h, 60000);
-    wlr_output_state_set_scale(&state, 2.0f);  /* Integer scale for clean scrolling */
-    if (!wlr_output_commit_state(out, &state)) {
-        wlr_log(WLR_ERROR, "Failed to commit output state for %dx%d mode", render_w, render_h);
-        wlr_output_state_finish(&state);
-        return;
-    }
+    wlr_output_state_set_custom_mode(&state, logical_w, logical_h, 60000);
+    wlr_output_commit_state(out, &state);
     wlr_output_state_finish(&state);
     
     wlr_output_layout_add_auto(s->output_layout, out);
     s->output = out;
     s->scene_output = wlr_scene_output_create(s->scene, out);
-    if (!s->scene_output) {
-        wlr_log(WLR_ERROR, "Failed to create scene output for %dx%d", render_w, render_h);
-        return;
-    }
     
     s->output_frame.notify = output_frame;
     wl_signal_add(&out->events.frame, &s->output_frame);
     s->output_destroy.notify = output_destroy;
     wl_signal_add(&out->events.destroy, &s->output_destroy);
     
-    /* Allocate compositor buffers at RENDER resolution.
-     * 9P images were already allocated by init_draw() at render resolution.
-     */
-    size_t fb_size = render_w * render_h * sizeof(uint32_t);
+    /* Reallocate buffers at logical resolution */
+    size_t fb_size = logical_w * logical_h * sizeof(uint32_t);
     uint32_t *new_framebuf = calloc(1, fb_size);
     uint32_t *new_prev_framebuf = calloc(1, fb_size);
     uint32_t *new_send_buf0 = calloc(1, fb_size);
@@ -549,42 +457,102 @@ void new_output(struct wl_listener *l, void *d) {
         s->send_buf[1] = new_send_buf1;
         s->pending_buf = -1;
         s->active_buf = -1;
-        
-        /* Update dimensions - 9P images already correct size from init_draw() */
-        s->width = render_w;
-        s->height = render_h;
-        s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
-        s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
-        
-        /* draw state already set by init_draw(), just verify */
-        wlr_log(WLR_INFO, "Compositor buffers: %dx%d render, 9P images: %dx%d",
-                render_w, render_h, s->draw.render_width, s->draw.render_height);
-        
         pthread_mutex_unlock(&s->send_lock);
+        
+        wlr_log(WLR_INFO, "Reallocated buffers: %dx%d -> %dx%d for logical resolution",
+                phys_w, phys_h, logical_w, logical_h);
+        
+        /* Reallocate 9front source image at logical resolution */
+        struct draw_state *draw = &s->draw;
+        struct p9conn *p9 = draw->p9;
+        
+        /* Free old images */
+        uint8_t freecmd[5];
+        freecmd[0] = 'f';
+        PUT32(freecmd + 1, draw->image_id);
+        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+        PUT32(freecmd + 1, draw->delta_id);
+        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+        
+        /* Allocate new image at logical resolution */
+        uint8_t bcmd[64];
+        int off = 0;
+        bcmd[off++] = 'b';
+        PUT32(bcmd + off, draw->image_id); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0x68081828); off += 4;  /* XRGB32 */
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, logical_w); off += 4;
+        PUT32(bcmd + off, logical_h); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, logical_w); off += 4;
+        PUT32(bcmd + off, logical_h); off += 4;
+        PUT32(bcmd + off, 0x00000000); off += 4;
+        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+        
+        /* Allocate delta image at logical resolution */
+        off = 0;
+        bcmd[off++] = 'b';
+        PUT32(bcmd + off, draw->delta_id); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0x48081828); off += 4;  /* ARGB32 */
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, logical_w); off += 4;
+        PUT32(bcmd + off, logical_h); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, logical_w); off += 4;
+        PUT32(bcmd + off, logical_h); off += 4;
+        PUT32(bcmd + off, 0x00000000); off += 4;
+        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+        
+        wlr_log(WLR_INFO, "Reallocated 9front images at %dx%d logical", 
+                logical_w, logical_h);
     } else {
-        wlr_log(WLR_ERROR, "Failed to allocate compositor buffers");
+        wlr_log(WLR_ERROR, "Failed to reallocate buffers for logical resolution");
         free(new_framebuf);
         free(new_prev_framebuf);
         free(new_send_buf0);
         free(new_send_buf1);
-        s->width = render_w;
-        s->height = render_h;
-        s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
-        s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
     }
     
-    /* Background at LOGICAL dimensions (scene uses logical coords with output scale=2) */
+    /* Update s->width/height to logical (compositor operates at logical resolution) */
+    s->width = logical_w;
+    s->height = logical_h;
+    s->tiles_x = (logical_w + TILE_SIZE - 1) / TILE_SIZE;
+    s->tiles_y = (logical_h + TILE_SIZE - 1) / TILE_SIZE;
+    
+    /* Update draw state.
+     * draw->width/height must be the "effective physical" = logical * scale.
+     * This ensures the 'a' command's dest rect R exactly matches the scaled source.
+     * The gap between effective physical and actual window is filled by borders.
+     */
+    int eff_phys_w = (int)(logical_w * scale);
+    int eff_phys_h = (int)(logical_h * scale);
+    s->draw.width = eff_phys_w;
+    s->draw.height = eff_phys_h;
+    s->draw.logical_width = logical_w;
+    s->draw.logical_height = logical_h;
+    s->draw.scale = scale;
+    
+    /* Resize background to logical dimensions */
     if (s->background) {
         wlr_scene_rect_set_size(s->background, logical_w, logical_h);
     }
     
-    wlr_log(WLR_INFO, "Output ready: %dx%d physical, %dx%d render, %dx%d logical, 9front scale=%.3f (1.5× overall)",
-            aligned_phys_w, aligned_phys_h, render_w, render_h, logical_w, logical_h, s->draw.scale);
+    wlr_log(WLR_INFO, "Output ready: %dx%d actual, %dx%d effective physical, scale=%.2f, %dx%d logical (9front scales)",
+            phys_w, phys_h, eff_phys_w, eff_phys_h, scale, logical_w, logical_h);
     
-    /* Trigger first frame - headless backend needs explicit scheduling */
+    /* Now that everything is set up correctly, trigger first frame */
     s->force_full_frame = 1;
     s->frame_dirty = 1;
-    wlr_output_schedule_frame(out);
 }
 
 void new_input(struct wl_listener *l, void *d) {
