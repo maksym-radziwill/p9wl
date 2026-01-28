@@ -62,7 +62,9 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "                 Supports fractional values like 1.5, 1.25, 2.0, etc.\n");
     fprintf(stderr, "                 Use -S 2 if fonts appear too small\n");
     fprintf(stderr, "  -W             Use Wayland-side scaling instead of 9front scaling\n");
-    fprintf(stderr, "                 (may look sharper but uses more bandwidth)\n");
+    fprintf(stderr, "                 For 1 < scale <= 2: uses fractional Wayland mode\n");
+    fprintf(stderr, "                   (output_scale=2.0, buffer=(2/scale)*window, downscales to fit)\n");
+    fprintf(stderr, "                 For scale > 2: uses regular Wayland scaling\n");
     fprintf(stderr, "\nLogging options:\n");;
     fprintf(stderr, "  -q             Quiet mode (errors only, default)\n");
     fprintf(stderr, "  -v             Verbose mode (info + errors)\n");

@@ -477,6 +477,7 @@ int init_draw(struct server *s) {
     draw->logical_width = logical_width;
     draw->logical_height = logical_height;
     draw->scale = DRAW_SCALE;
+    draw->input_scale = DRAW_SCALE;  /* Default: same as draw scale */
     
     /* 'b' command: allocate image at LOGICAL resolution */
     uint8_t bcmd[1 + 4 + 4 + 1 + 4 + 1 + 16 + 16 + 4];

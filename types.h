@@ -89,7 +89,8 @@ struct draw_state {
 
     int logical_width;
     int logical_height;
-    float scale;
+    float scale;        /* Scale factor for 'a' command matrix: matrix = 128/scale */
+    float input_scale;  /* Scale factor for mouse coord conversion: logical = physical / input_scale */
 };
 
 /* Subsurface tracking */

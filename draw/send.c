@@ -727,7 +727,7 @@ void *send_thread_func(void *arg) {
              * Only enable for actual upscaling (scale > 1.0).
              * At scale=1.0, bilinear causes unnecessary blurring.
              */
-            int smooth = (scale > 1.001f) ? 1 : 0;
+            int smooth = (scale > 1.001f) ? 1 : 1;
             
             /* sp0 must be in SOURCE (logical) coordinates.
              * p2 = M * local, sp = sp0 + p2
