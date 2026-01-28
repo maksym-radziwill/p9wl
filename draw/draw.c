@@ -457,8 +457,8 @@ int init_draw(struct server *s) {
      * Logical dimensions: physical / DRAW_SCALE
      * The 'a' command will scale from logical to physical.
      */
-    int logical_width = (int)(draw->width / s->scale + 0.5f);
-    int logical_height = (int)(draw->height / s->scale + 0.5f);
+    int logical_width = (int)(draw->width / DRAW_SCALE + 0.5f);
+    int logical_height = (int)(draw->height / DRAW_SCALE + 0.5f);
     
     /* Ensure logical dimensions are tile-aligned */
     logical_width = TILE_ALIGN_DOWN(logical_width);

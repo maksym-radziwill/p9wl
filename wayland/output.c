@@ -73,8 +73,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
                         new_w, new_h, logical_w, logical_h);
             } else {
                 /* 9front scaling mode: compositor at logical resolution */
-                logical_w = (int)(new_w / scale + 0.5f);
-                logical_h = (int)(new_h / scale + 0.5f);
+                logical_w = (int)(new_w / scale);
+                logical_h = (int)(new_h / scale);
                 
                 /* Align logical dimensions to tile size */
                 logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
@@ -131,8 +131,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
                     draw->scale = 1.0f;
                 } else {
                     /* 9front scaling mode: draw->width/height = effective physical */
-                    int eff_phys_w = (int)(logical_w * scale + 0.5f);
-                    int eff_phys_h = (int)(logical_h * scale + 0.5f);
+                    int eff_phys_w = (int)(logical_w * scale);
+                    int eff_phys_h = (int)(logical_h * scale);
                     draw->width = eff_phys_w;
                     draw->height = eff_phys_h;
                     draw->logical_width = logical_w;
@@ -204,24 +204,34 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 wlr_output_commit_state(s->output, &state);
                 wlr_output_state_finish(&state);
                 
-                /* Send configure to all toplevels (using logical dimensions) */
+                /* Send configure to all toplevels.
+                 * When Wayland scaling is active, scene graph uses logical coords
+                 * (physical / output_scale), not physical coords.
+                 */
+                int scene_w = logical_w;
+                int scene_h = logical_h;
+                if (s->wl_scaling && scale > 1.001f) {
+                    scene_w = (int)(logical_w / scale);
+                    scene_h = (int)(logical_h / scale);
+                }
+                
                 struct toplevel *tl;
                 wl_list_for_each(tl, &s->toplevels, link) {
                     if (tl->xdg && tl->xdg->base && tl->xdg->base->initialized) {
-                        wlr_xdg_toplevel_set_size(tl->xdg, logical_w, logical_h);
+                        wlr_xdg_toplevel_set_size(tl->xdg, scene_w, scene_h);
                     }
                 }
                 
                 /* Resize background (scene uses logical coordinates) */
                 if (s->background) {
-                    wlr_scene_rect_set_size(s->background, logical_w, logical_h);
+                    wlr_scene_rect_set_size(s->background, scene_w, scene_h);
                 }
                 
                 draw->xor_enabled = 0;
                 s->force_full_frame = 1;
                 
-                wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical at (%d,%d)", 
-                        new_w, new_h, logical_w, logical_h, new_minx, new_miny);
+                wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical, %dx%d scene at (%d,%d)", 
+                        new_w, new_h, logical_w, logical_h, scene_w, scene_h, new_minx, new_miny);
             }
         }
     }
@@ -369,9 +379,17 @@ void new_output(struct wl_listener *l, void *d) {
         s->draw.logical_height = phys_h;
         s->draw.scale = 1.0f;  /* No 9front scaling */
         
+        /* When Wayland scaling is active, scene graph uses logical coordinates.
+         * Resize background to logical dimensions (physical / output_scale).
+         */
         if (scale > 1.001f) {
-            wlr_log(WLR_INFO, "Output ready: %dx%d physical, Wayland scale=%.2f", 
-                    phys_w, phys_h, scale);
+            int scene_w = (int)(phys_w / scale);
+            int scene_h = (int)(phys_h / scale);
+            if (s->background) {
+                wlr_scene_rect_set_size(s->background, scene_w, scene_h);
+            }
+            wlr_log(WLR_INFO, "Output ready: %dx%d physical, Wayland scale=%.2f, scene %dx%d", 
+                    phys_w, phys_h, scale, scene_w, scene_h);
         } else {
             wlr_log(WLR_INFO, "Output ready: %dx%d", phys_w, phys_h);
         }
@@ -385,8 +403,8 @@ void new_output(struct wl_listener *l, void *d) {
     /* 9front scaling mode */
     wlr_log(WLR_INFO, "Using 9front-side scaling (scale=%.2f)", scale);
     
-    int logical_w = (int)(phys_w / scale + 0.5f);
-    int logical_h = (int)(phys_h / scale + 0.5f);
+    int logical_w = (int)(phys_w / scale);
+    int logical_h = (int)(phys_h / scale);
     
     /* Align to tile size */
     logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
@@ -509,8 +527,8 @@ void new_output(struct wl_listener *l, void *d) {
      * This ensures the 'a' command's dest rect R exactly matches the scaled source.
      * The gap between effective physical and actual window is filled by borders.
      */
-    int eff_phys_w = (int)(logical_w * scale + 0.5f);
-    int eff_phys_h = (int)(logical_h * scale + 0.5f);
+    int eff_phys_w = (int)(logical_w * scale);
+    int eff_phys_h = (int)(logical_h * scale);
     s->draw.width = eff_phys_w;
     s->draw.height = eff_phys_h;
     s->draw.logical_width = logical_w;
