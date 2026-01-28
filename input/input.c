@@ -694,41 +694,46 @@ void *kbd_thread_func(void *arg) {
 }
 
 /* Window control thread - watches /dev/wctl for geometry changes.
- * In Plan 9, reading from wctl blocks until the window state changes.
- * This is the "watch file" pattern - no polling needed!
+ * Opens/reads/closes each iteration to allow other programs (like riow) to access wctl.
  */
 void *wctl_thread_func(void *arg) {
     struct server *s = arg;
     struct p9conn *p9 = &s->p9_wctl;
-    uint32_t wctl_fid;
-    const char *wnames[] = { "wctl" };
     char buf[128];
     int last_x0 = -1, last_y0 = -1, last_x1 = -1, last_y1 = -1;
     
-    /* Walk to /dev/wctl */
-    wctl_fid = p9->next_fid++;
-    if (p9_walk(p9, p9->root_fid, wctl_fid, 1, wnames) < 0) {
-        wlr_log(WLR_ERROR, "Wctl thread: failed to walk to /dev/wctl");
-        return NULL;
-    }
-    if (p9_open(p9, wctl_fid, OREAD, NULL) < 0) {
-        wlr_log(WLR_ERROR, "Wctl thread: failed to open /dev/wctl");
-        return NULL;
-    }
-    
-    wlr_log(WLR_INFO, "Wctl thread started - watching /dev/wctl for window changes");
+    wlr_log(WLR_INFO, "Wctl thread started - polling /dev/wctl for window changes");
     
     while (s->running) {
-        /* This read BLOCKS until window state changes!
-         * wctl format: "x0 y0 x1 y1 current|notcurrent hidden|visible"
-         * ~72 bytes of space-separated values
-         */
+        /* Open wctl fresh each time to allow other programs to access it */
+        uint32_t wctl_fid = p9->next_fid++;
+        const char *wnames[] = { "wctl" };
+        
+        if (p9_walk(p9, p9->root_fid, wctl_fid, 1, wnames) < 0) {
+            wlr_log(WLR_DEBUG, "Wctl thread: walk failed, retrying...");
+            usleep(100000);
+            continue;
+        }
+        
+        if (p9_open(p9, wctl_fid, OREAD, NULL) < 0) {
+            p9_clunk(p9, wctl_fid);
+            wlr_log(WLR_DEBUG, "Wctl thread: open failed, retrying...");
+            usleep(100000);
+            continue;
+        }
+        
+        /* Read wctl: "x0 y0 x1 y1 current|notcurrent hidden|visible" */
         int n = p9_read(p9, wctl_fid, 0, sizeof(buf) - 1, (uint8_t*)buf);
+        
+        /* Close immediately to release the file for other programs */
+        p9_clunk(p9, wctl_fid);
+        
         if (n <= 0) {
             if (s->running) {
-                wlr_log(WLR_ERROR, "Wctl thread: read failed");
+                wlr_log(WLR_DEBUG, "Wctl thread: read failed, retrying...");
             }
-            break;
+            usleep(100000);
+            continue;
         }
         
         buf[n] = '\0';
@@ -757,13 +762,10 @@ void *wctl_thread_func(void *arg) {
                 pthread_cond_signal(&s->send_cond);
                 pthread_mutex_unlock(&s->send_lock);
             }
-            /* Note: If /dev/wctl doesn't actually block, this loop will spin.
-             * But we have the 2-second probe fallback in send thread anyway.
-             * Don't sleep here - if wctl blocks we want fast response. */
         }
         
-        /* Small sleep to prevent busy loop if wctl doesn't block */
-        usleep(50000);  /* 50ms */
+        /* Poll interval - 50ms gives responsive resize detection */
+        usleep(50000);
     }
     
     wlr_log(WLR_INFO, "Wctl thread exiting");
