@@ -61,10 +61,8 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -S <scale>     Output scale factor for HiDPI displays (1.0-4.0, default: 1.0)\n");
     fprintf(stderr, "                 Supports fractional values like 1.5, 1.25, 2.0, etc.\n");
     fprintf(stderr, "                 Use -S 2 if fonts appear too small\n");
-    fprintf(stderr, "  -W             Use Wayland-side scaling instead of 9front scaling\n");
-    fprintf(stderr, "                 For 1 < scale <= 2: uses fractional Wayland mode\n");
-    fprintf(stderr, "                   (output_scale=2.0, buffer=(2/scale)*window, downscales to fit)\n");
-    fprintf(stderr, "                 For scale > 2: uses regular Wayland scaling\n");
+    fprintf(stderr, "  -B             Use 9front backend scaling instead of Wayland scaling\n");
+    fprintf(stderr, "                 (lower bandwidth but may have quality loss)\n");
     fprintf(stderr, "\nLogging options:\n");;
     fprintf(stderr, "  -q             Quiet mode (errors only, default)\n");
     fprintf(stderr, "  -v             Verbose mode (info + errors)\n");
@@ -130,7 +128,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     *port = -1;  /* Will set default based on TLS config */
     *uname = NULL;
     *scale = 1.0f;  /* Default scale factor */
-    *wl_scaling = 0; /* Default: use 9front scaling */
+    *wl_scaling = 1; /* Default: use Wayland scaling */
     *log_level = WLR_ERROR;  /* Default: errors only */
     memset(tls_cfg, 0, sizeof(*tls_cfg));
     *exec_argv = NULL;
@@ -149,8 +147,8 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
             *scale = strtof(argv[++i], NULL);
             if (*scale < 1.0f) *scale = 1.0f;
             if (*scale > 4.0f) *scale = 4.0f;
-        } else if (strcmp(argv[i], "-W") == 0) {
-            *wl_scaling = 1;
+        } else if (strcmp(argv[i], "-B") == 0) {
+            *wl_scaling = 0;  /* Use 9front backend scaling */
         } else if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             *log_level = WLR_ERROR;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
@@ -390,7 +388,7 @@ int main(int argc, char *argv[]) {
     const char *host = NULL;
     int port = P9_PORT;
     float scale = 1.0f;
-    int wl_scaling = 0;  /* 0 = 9front scaling (default), 1 = Wayland scaling */
+    int wl_scaling = 1;  /* 1 = Wayland scaling (default), 0 = 9front backend scaling (-B) */
     enum wlr_log_importance log_level = WLR_ERROR;
     struct tls_config tls_cfg = {0};
     char **exec_argv = NULL;
@@ -466,7 +464,7 @@ int main(int argc, char *argv[]) {
     }
     s.tls_insecure = tls_cfg.insecure;
     s.scale = (scale > 0.0f) ? scale : 1.0f;  /* HiDPI scale factor, default 1.0 */
-    s.wl_scaling = wl_scaling;  /* 0 = 9front scaling, 1 = Wayland scaling */
+    s.wl_scaling = wl_scaling;  /* 1 = Wayland scaling (default), 0 = 9front backend (-B) */
     s.log_level = log_level;
 
     wlr_log(WLR_INFO, "Connecting to %s:%d", s.host, s.port);

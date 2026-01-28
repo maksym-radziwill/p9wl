@@ -724,10 +724,11 @@ void *send_thread_func(void *arg) {
             int matrix_scale = (int)(128.0f / scale + 0.5f);
             
             /* smooth=1 enables bilinear interpolation.
-             * Only enable for actual upscaling (scale > 1.0).
-             * At scale=1.0, bilinear causes unnecessary blurring.
+             * Enable for fractional scaling (scale != 1.0) to prevent aliasing.
+             * Disable for identity transform (scale ≈ 1.0) to avoid blurring.
              */
-            int smooth = (scale > 1.001f) ? 1 : 1;
+            float scale_diff = (scale > 1.0f) ? (scale - 1.0f) : (1.0f - scale);
+            int smooth = (scale_diff > 0.001f) ? 1 : 0;
             
             /* sp0 must be in SOURCE (logical) coordinates.
              * p2 = M * local, sp = sp0 + p2
