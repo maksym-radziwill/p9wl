@@ -487,25 +487,33 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Set dimensions from draw device */
-    s.width = s.draw.width;
-    s.height = s.draw.height;
+    /* Set dimensions from draw device.
+     * For 9front scaling mode, use logical dimensions (compositor runs at logical).
+     * For Wayland scaling or no scaling, use physical dimensions.
+     * PATCHED: Was always using physical, now uses logical for 9front scaling.
+     */
+    if (!s.wl_scaling && s.scale > 1.001f) {
+        /* 9front scaling: compositor at logical resolution */
+        s.width = s.draw.width * s.scale; 
+        s.height = s.draw.height * s.scale; 
+        wlr_log(WLR_INFO, "9front scaling: using logical %dx%d (physical %dx%d, scale %.2f)",
+                s.width, s.height, s.draw.width, s.draw.height, s.scale);
+    } else {
+        /* Wayland scaling or no scaling: compositor at physical resolution */
+        s.width = s.draw.width;
+        s.height = s.draw.height;
+    }
     s.tiles_x = (s.width + TILE_SIZE - 1) / TILE_SIZE;
     s.tiles_y = (s.height + TILE_SIZE - 1) / TILE_SIZE;
 
-    /* Initialize draw.scale BEFORE starting send_thread to avoid race condition.
-     * Without this, send_thread might send a frame with scale=0 (identity matrix)
-     * before new_output() has a chance to set the correct scale.
+    /* draw.scale is already set by init_draw() using s.scale.
+     * Verify logical dimensions are consistent.
      */
-    s.draw.scale = s.scale;
-    s.draw.logical_width = s.draw.width;   /* Will be updated by new_output() */
-    s.draw.logical_height = s.draw.height;
-
-    if (s.scale > 1.0f) {
-        int logical_w = (int)(s.width / s.scale + 0.5f);
-        int logical_h = (int)(s.height / s.scale + 0.5f);
-        wlr_log(WLR_INFO, "Physical: %dx%d, Scale: %.2f, Logical: %dx%d",
-                s.width, s.height, s.scale, logical_w, logical_h);
+    if (s.scale > 1.001f) {
+        wlr_log(WLR_INFO, "Scale mode: %s, Physical: %dx%d, Logical: %dx%d, Scale: %.2f",
+                s.wl_scaling ? "Wayland" : "9front",
+                s.draw.width, s.draw.height, 
+                s.draw.logical_width, s.draw.logical_height, s.scale);
     }
 
     /* Allocate framebuffers */
