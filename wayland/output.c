@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <pthread.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_output.h>
@@ -29,15 +30,22 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     float scale = s->scale;
     if (scale <= 0.0f) scale = 1.0f;
     
-    /* Check for fractional Wayland mode: -W with 1 < scale <= 2 */
-    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f && scale <= 2.001f);
+    /* Fractional Wayland mode: -W with scale > 1
+     * For scale x where k-1 < x <= k (k = ceil(x)):
+     *   - Wayland output scale = k
+     *   - Buffer = (k/x) * rio_window
+     *   - Scene = buffer/k = rio_window/x
+     *   - 'a' command downscales by k/x
+     */
+    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f);
+    int k = (int)ceilf(scale);  /* Integer output scale */
     
     int wl_phys_w, wl_phys_h;  /* Wayland buffer dimensions */
     int scene_w, scene_h;      /* Scene/logical dimensions */
     
     if (fractional_wl_mode) {
-        /* Fractional Wayland mode: buffer = (2/scale) * physical */
-        float buffer_factor = 2.0f / scale;
+        /* Fractional Wayland mode: buffer = (k/scale) * physical */
+        float buffer_factor = (float)k / scale;
         wl_phys_w = (int)(new_w * buffer_factor + 0.5f);
         wl_phys_h = (int)(new_h * buffer_factor + 0.5f);
         
@@ -47,26 +55,21 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
         if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
         
-        /* Scene dims = wl_phys / 2 */
-        scene_w = wl_phys_w / 2;
-        scene_h = wl_phys_h / 2;
+        /* Scene dims = wl_phys / k = rio / scale */
+        scene_w = wl_phys_w / k;
+        scene_h = wl_phys_h / k;
         
-        wlr_log(WLR_INFO, "Resize (fractional Wayland): rio %dx%d, wl_buf %dx%d, scene %dx%d",
-                new_w, new_h, wl_phys_w, wl_phys_h, scene_w, scene_h);
+        wlr_log(WLR_INFO, "Resize (fractional Wayland k=%d): rio %dx%d, wl_buf %dx%d, scene %dx%d",
+                k, new_w, new_h, wl_phys_w, wl_phys_h, scene_w, scene_h);
     } else if (s->wl_scaling || scale <= 1.001f) {
-        /* Regular Wayland scaling mode: everything at physical resolution */
+        /* Wayland scaling mode (no -S) or no scaling needed (scale <= 1) */
         wl_phys_w = (new_w / TILE_SIZE) * TILE_SIZE;
         wl_phys_h = (new_h / TILE_SIZE) * TILE_SIZE;
         if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
         if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
         
-        if (s->wl_scaling && scale > 1.001f) {
-            scene_w = (int)(wl_phys_w / scale);
-            scene_h = (int)(wl_phys_h / scale);
-        } else {
-            scene_w = wl_phys_w;
-            scene_h = wl_phys_h;
-        }
+        scene_w = wl_phys_w;
+        scene_h = wl_phys_h;
         
         wlr_log(WLR_INFO, "Resize (Wayland scaling): physical %dx%d, scene %dx%d",
                 new_w, new_h, scene_w, scene_h);
@@ -132,7 +135,7 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         draw->logical_height = wl_phys_h;
         draw->width = new_w;              /* Destination (rio window) */
         draw->height = new_h;
-        draw->scale = scale / 2.0f;       /* Matrix = 128/(scale/2) = 2/scale */
+        draw->scale = scale / (float)k;   /* Matrix = 128/(scale/k) = 128k/scale */
         draw->input_scale = scale;        /* Mouse conversion */
         draw->scene_width = scene_w;
         draw->scene_height = scene_h;
@@ -398,23 +401,25 @@ void new_output(struct wl_listener *l, void *d) {
      *    - wlroots uses output scale to report logical size to clients
      *    - Higher bandwidth, may look sharper
      *
-     * 3. Fractional Wayland scaling (-W with 1 < scale <= 2):
-     *    - Wayland output scale = 2.0
-     *    - Compositor renders at (2/scale) * physical resolution
-     *    - Scene/logical = physical / scale (what apps see)
-     *    - 9front 'a' command downscales by 2/scale to fit window
-     *    - Good balance of quality and bandwidth for fractional scales
+     * 3. Fractional Wayland scaling (-W with scale > 1):
+     *    - For scale x where k-1 < x <= k (k = ceil(x)):
+     *    - Wayland output scale = k (integer)
+     *    - Compositor renders at (k/x) * physical resolution
+     *    - Scene/logical = physical / x (what apps see)
+     *    - 9front 'a' command downscales by k/x to fit window
+     *    - Good balance of quality and bandwidth for any fractional scale
      */
     
-    /* Check for fractional Wayland mode: -W with 1 < scale <= 2 */
-    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f && scale <= 2.001f);
+    /* Fractional Wayland mode: -W with scale > 1 */
+    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f);
+    int k = (int)ceilf(scale);  /* Integer output scale (ceiling of user scale) */
     
     if (fractional_wl_mode) {
         /* Fractional Wayland scaling mode */
-        wlr_log(WLR_INFO, "Using fractional Wayland scaling (scale=%.2f, output_scale=2.0)", scale);
+        wlr_log(WLR_INFO, "Using fractional Wayland scaling (scale=%.2f, output_scale=%d)", scale, k);
         
-        /* Wayland buffer dimensions = (2/scale) * physical */
-        float buffer_factor = 2.0f / scale;
+        /* Wayland buffer dimensions = (k/scale) * physical */
+        float buffer_factor = (float)k / scale;
         int wl_phys_w = (int)(phys_w * buffer_factor + 0.5f);
         int wl_phys_h = (int)(phys_h * buffer_factor + 0.5f);
         
@@ -424,15 +429,15 @@ void new_output(struct wl_listener *l, void *d) {
         if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
         if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
         
-        /* Scene/logical dims = wl_phys / 2 = phys / scale (what apps see) */
-        int scene_w = wl_phys_w / 2;
-        int scene_h = wl_phys_h / 2;
+        /* Scene/logical dims = wl_phys / k = phys / scale (what apps see) */
+        int scene_w = wl_phys_w / k;
+        int scene_h = wl_phys_h / k;
         
         struct wlr_output_state state;
         wlr_output_state_init(&state);
         wlr_output_state_set_enabled(&state, true);
         wlr_output_state_set_custom_mode(&state, wl_phys_w, wl_phys_h, 60000);
-        wlr_output_state_set_scale(&state, 2.0f);
+        wlr_output_state_set_scale(&state, (float)k);
         wlr_output_commit_state(out, &state);
         wlr_output_state_finish(&state);
         
@@ -544,9 +549,9 @@ void new_output(struct wl_listener *l, void *d) {
         s->draw.width = phys_w;
         s->draw.height = phys_h;
         
-        /* draw->scale = scale/2 so that matrix = 128/(scale/2) = 256/scale = 2/scale
+        /* draw->scale = scale/k so that matrix = 128/(scale/k) = 128k/scale
          * This downscales from Wayland physical to rio physical */
-        s->draw.scale = scale / 2.0f;
+        s->draw.scale = scale / (float)k;
         
         /* input_scale = user's scale for mouse coordinate conversion
          * Mouse physical (rio) -> cursor position (scene logical = rio/scale) */
@@ -562,9 +567,9 @@ void new_output(struct wl_listener *l, void *d) {
         }
         
         wlr_log(WLR_INFO, "Fractional Wayland mode ready: rio %dx%d, wl_buf %dx%d, scene %dx%d, "
-                "draw_scale=%.3f, input_scale=%.2f",
+                "output_scale=%d, draw_scale=%.3f, input_scale=%.2f",
                 phys_w, phys_h, wl_phys_w, wl_phys_h, scene_w, scene_h,
-                s->draw.scale, s->draw.input_scale);
+                k, s->draw.scale, s->draw.input_scale);
         
         /* Trigger first frame */
         s->force_full_frame = 1;
@@ -573,16 +578,14 @@ void new_output(struct wl_listener *l, void *d) {
     }
     
     if (s->wl_scaling || scale <= 1.001f) {
-        /* Wayland scaling mode OR no scaling needed */
+        /* Wayland scaling mode (no -S) or no scaling needed (scale <= 1) */
         wlr_log(WLR_INFO, "Using Wayland-side scaling (scale=%.2f)", scale);
         
         struct wlr_output_state state;
         wlr_output_state_init(&state);
         wlr_output_state_set_enabled(&state, true);
         wlr_output_state_set_custom_mode(&state, phys_w, phys_h, 60000);
-        if (scale > 1.001f) {
-            wlr_output_state_set_scale(&state, scale);
-        }
+        /* No output scale needed - fractional scaling handles scale > 1 */
         wlr_output_commit_state(out, &state);
         wlr_output_state_finish(&state);
         
@@ -595,30 +598,15 @@ void new_output(struct wl_listener *l, void *d) {
         s->output_destroy.notify = output_destroy;
         wl_signal_add(&out->events.destroy, &s->output_destroy);
         
-        /* For Wayland scaling, dimensions stay physical, scale=1 for 9front */
+        /* No 9front scaling needed */
         s->draw.logical_width = phys_w;
         s->draw.logical_height = phys_h;
-        s->draw.scale = 1.0f;  /* No 9front scaling */
-        s->draw.input_scale = 1.0f;  /* No mouse conversion needed */
+        s->draw.scale = 1.0f;
+        s->draw.input_scale = 1.0f;
+        s->draw.scene_width = phys_w;
+        s->draw.scene_height = phys_h;
         
-        /* When Wayland scaling is active, scene graph uses logical coordinates.
-         * Resize background to logical dimensions (physical / output_scale).
-         */
-        if (scale > 1.001f) {
-            int scene_w = (int)(phys_w / scale);
-            int scene_h = (int)(phys_h / scale);
-            s->draw.scene_width = scene_w;
-            s->draw.scene_height = scene_h;
-            if (s->background) {
-                wlr_scene_rect_set_size(s->background, scene_w, scene_h);
-            }
-            wlr_log(WLR_INFO, "Output ready: %dx%d physical, Wayland scale=%.2f, scene %dx%d", 
-                    phys_w, phys_h, scale, scene_w, scene_h);
-        } else {
-            s->draw.scene_width = phys_w;
-            s->draw.scene_height = phys_h;
-            wlr_log(WLR_INFO, "Output ready: %dx%d", phys_w, phys_h);
-        }
+        wlr_log(WLR_INFO, "Output ready: %dx%d", phys_w, phys_h);
         
         /* Now that everything is set up correctly, trigger first frame */
         s->force_full_frame = 1;
