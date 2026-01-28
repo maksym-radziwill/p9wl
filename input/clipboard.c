@@ -38,8 +38,8 @@ static void snarf_to_wayland_register(struct server *s);
  * ───────────────────────────────────────────────────────────────────────────── */
 
 static const char *text_mime_types[] = {
-    "text/plain",
     "text/plain;charset=utf-8",
+    "text/plain",
     "UTF8_STRING",
     "STRING",
     "TEXT",
@@ -49,7 +49,15 @@ static const char *text_mime_types[] = {
 
 /* Check if mime type is a text type we handle */
 static bool is_text_mime_type(const char *mime) {
-    for (size_t i = 0; i < NUM_TEXT_MIME_TYPES; i++) {
+    if (!mime) return false;
+    
+    /* Handle text/plain with any charset variant */
+    if (strncmp(mime, "text/plain", 10) == 0) {
+        return true;
+    }
+    
+    /* Check exact matches for X11-style types */
+    for (size_t i = 2; i < NUM_TEXT_MIME_TYPES; i++) {
         if (strcmp(mime, text_mime_types[i]) == 0) {
             return true;
         }
@@ -259,19 +267,23 @@ static void snarf_to_wayland_send(struct wlr_data_source *source,
                                   const char *mime_type, int fd) {
     struct snarf_to_wayland_source *sts = wl_container_of(source, sts, base);
     
+    wlr_log(WLR_INFO, "snarf_to_wayland_send: mime='%s' fd=%d", mime_type, fd);
+    
     if (is_text_mime_type(mime_type)) {
         char *buf = malloc(SNARF_MAX_SIZE);
         if (buf) {
             int len = p9_read_file(&sts->server->p9_snarf, "snarf", buf, SNARF_MAX_SIZE);
+            wlr_log(WLR_INFO, "snarf_to_wayland_send: p9_read_file returned %d", len);
             if (len > 0) {
                 ssize_t ret = write(fd, buf, len);
-                (void)ret;
-                wlr_log(WLR_DEBUG, "snarf_to_wayland_send: sent %d bytes", len);
+                wlr_log(WLR_INFO, "snarf_to_wayland_send: wrote %zd/%d bytes", ret, len);
             }
             free(buf);
         } else {
             wlr_log(WLR_ERROR, "snarf_to_wayland_send: failed to allocate buffer");
         }
+    } else {
+        wlr_log(WLR_INFO, "snarf_to_wayland_send: unsupported mime '%s'", mime_type);
     }
     close(fd);
 }
@@ -305,7 +317,7 @@ static void snarf_to_wayland_register(struct server *s) {
     }
     
     wlr_seat_set_selection(s->seat, &source->base, wl_display_next_serial(s->display));
-    wlr_log(WLR_DEBUG, "snarf_to_wayland_register: registered as selection owner");
+    wlr_log(WLR_INFO, "snarf_to_wayland_register: registered as selection owner");
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
