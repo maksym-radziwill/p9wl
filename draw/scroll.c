@@ -385,6 +385,8 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     int margin = TILE_SIZE;
     int dim = 256; 
     int cols = s->width / dim > 0 ? s->width / dim : 1, rows = s->height / dim > 0 ? s->height / dim : 1;
+    rows = 4; 
+    cols = 4;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
