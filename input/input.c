@@ -701,6 +701,7 @@ void *wctl_thread_func(void *arg) {
     struct p9conn *p9 = &s->p9_wctl;
     char buf[128];
     int last_x0 = -1, last_y0 = -1, last_x1 = -1, last_y1 = -1;
+    int was_hidden = 0;
     
     wlr_log(WLR_INFO, "Wctl thread started - polling /dev/wctl for window changes");
     
@@ -737,6 +738,28 @@ void *wctl_thread_func(void *arg) {
         }
         
         buf[n] = '\0';
+        
+        /* Check for hidden/visible state */
+        int is_hidden = (strstr(buf, "hidden") != NULL);
+        int is_visible = (strstr(buf, "visible") != NULL);
+        
+        /* Detect unhide: was hidden, now visible */
+        if (was_hidden && is_visible) {
+            wlr_log(WLR_INFO, "Wctl: window unhidden, triggering full redraw");
+            
+            /* Invalidate prev_framebuf so next frame is seen as different */
+            if (s->prev_framebuf && s->width > 0 && s->height > 0) {
+                memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+            }
+            s->force_full_frame = 1;
+            s->window_changed = 1;
+            
+            /* Wake up send thread */
+            pthread_mutex_lock(&s->send_lock);
+            pthread_cond_signal(&s->send_cond);
+            pthread_mutex_unlock(&s->send_lock);
+        }
+        was_hidden = is_hidden;
         
         /* Parse the wctl data: "x0 y0 x1 y1 ..." */
         int x0, y0, x1, y1;
