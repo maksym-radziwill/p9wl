@@ -287,15 +287,18 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         return;
     }
     
-    /* Test scroll candidates: base value and ±1 pixel variations
-     * Offsets to test: (0,0), (-1,0), (+1,0), (0,-1), (0,+1)
-     * This catches off-by-one errors in FFT phase correlation */
+    /* Test scroll candidates: base value and ±4 pixel variations
+     * With 4× downsampled FFT, results are quantized to 4 pixels.
+     * Test axis-aligned variations to find exact optimal offset.
+     * This catches quantization errors in FFT phase correlation */
     static const int offsets[][2] = {
         {0, 0},    /* Original detected scroll */
-        {-1, 0},   /* dx-1 */
-        {+1, 0},   /* dx+1 */
-        {0, -1},   /* dy-1 */
-        {0, +1},   /* dy+1 */
+        /* dx variations */
+        {-4, 0}, {-3, 0}, {-2, 0}, {-1, 0},
+        {+1, 0}, {+2, 0}, {+3, 0}, {+4, 0},
+        /* dy variations */
+        {0, -4}, {0, -3}, {0, -2}, {0, -1},
+        {0, +1}, {0, +2}, {0, +3}, {0, +4},
     };
     const int num_candidates = sizeof(offsets) / sizeof(offsets[0]);
     
@@ -385,8 +388,7 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     int margin = TILE_SIZE;
     int dim = 256; 
     int cols = s->width / dim > 0 ? s->width / dim : 1, rows = s->height / dim > 0 ? s->height / dim : 1;
-    rows = 4; 
-    cols = 4;
+    cols = 4; rows = 4;
     int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
     int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
     
