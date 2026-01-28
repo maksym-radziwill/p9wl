@@ -1,5 +1,7 @@
 /*
  * types.h - Shared type definitions for p9wl
+ *
+ * Updated for SHARP scaling: added render_width, render_height to draw_state
  */
 
 #ifndef P9WL_TYPES_H
@@ -57,7 +59,38 @@ struct input_queue {
 
 /* NOTE: struct p9conn is defined in p9.h with TLS support */
 
-/* Draw state */
+/* Draw state
+ *
+ * Dimension semantics for SHARP 9front scaling:
+ *
+ *   width, height:
+ *     PHYSICAL window size - the actual rio window dimensions.
+ *     This is the DESTINATION rectangle for the warp 'a' command.
+ *
+ *   logical_width, logical_height:
+ *     What Wayland clients see (physical / scale).
+ *     Used for toplevel sizing, scene graph coordinates, etc.
+ *
+ *   render_width, render_height:
+ *     HIGH resolution we render at (physical × scale).
+ *     This is the size of:
+ *       - Compositor buffers (s->framebuf, s->send_buf, etc.)
+ *       - 9P images (image_id, delta_id)
+ *       - s->width, s->height in struct server
+ *     This is the SOURCE for the warp 'a' command.
+ *
+ *   scale:
+ *     The scale factor (e.g., 1.5).
+ *     For warp: matrix_diagonal = scale × 128 (25.7 fixed-point).
+ *
+ * Example for scale=1.5 on 1920×1080 physical window:
+ *   width = 1920, height = 1080           (physical, warp dest)
+ *   logical_width = 1280, logical_height = 720   (clients see this)
+ *   render_width = 2880, render_height = 1620    (high res, warp source)
+ *   scale = 1.5
+ *
+ * The warp 'a' command DOWNSCALES from render to physical = SHARP.
+ */
 struct draw_state {
     struct p9conn *p9;
     uint32_t draw_fid;
@@ -71,8 +104,9 @@ struct draw_state {
     int opaque_id; /* 1x1 white replicated image for mask */
     int delta_id;  /* temp image for receiving XOR deltas */
     int border_id; /* 1x1 border color replicated image */
-    int width, height;
-    int win_minx, win_miny;  /* window origin for coordinate translation */
+    
+    int width, height;        /* PHYSICAL window size (warp dest rect) */
+    int win_minx, win_miny;   /* window origin for coordinate translation */
     
     /* Actual window bounds (for border drawing with equal margins).
      * When dimensions are aligned to TILE_SIZE, there's excess space.
@@ -86,9 +120,10 @@ struct draw_state {
     int xor_enabled;   /* whether XOR delta mode is active (after first frame) */
     uint32_t iounit;
 
-
-    int logical_width;
+    int logical_width;        /* What Wayland clients see (phys/scale) */
     int logical_height;
+    int render_width;         /* High res we render at (phys×scale) */
+    int render_height;        /* Size of 9P images & compositor buffers */
     float scale;
 };
 
@@ -165,7 +200,13 @@ struct server {
     volatile int pending_minx, pending_miny;  /* New window position */
     char pending_winname[64];  /* New window name for resize */
     
-    int width, height;
+    /* Actual window bounds for border drawing during resize.
+     * These are set by relookup_window() and consumed by output_frame().
+     * Without these, border calculations use stale actual_* values. */
+    volatile int pending_actual_minx, pending_actual_miny;
+    volatile int pending_actual_maxx, pending_actual_maxy;
+    
+    int width, height;       /* RENDER resolution (compositor buffer size) */
     uint32_t *framebuf;
     uint32_t *prev_framebuf;
     
@@ -221,8 +262,7 @@ struct server {
     float scale;                       /* Output scale factor for HiDPI (default: 1.0) */
     enum wlr_log_importance log_level; /* Log level */
 
-    float wl_scaling;
-
+    int wl_scaling;                    /* 0 = 9front scaling, 1 = Wayland scaling */
 };
 
 /* Utility functions */

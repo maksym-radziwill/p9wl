@@ -148,31 +148,52 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     struct focus_manager *fm = &s->focus;
     
     /* Mouse coordinates from 9front are in PHYSICAL screen coordinates.
-     * Compositor operates at LOGICAL resolution (s->width, s->height).
-     * Convert physical mouse coords to logical using draw->scale.
+     * We need to convert to LOGICAL coordinates for Wayland.
      *
-     * In 9front scaling mode: draw->scale = user's scale (e.g., 1.5)
-     * In Wayland scaling mode: draw->scale = 1.0 (no conversion needed)
+     * For 1.5× overall scaling:
+     * - Physical: what 9front window actually is (e.g., 1440×1008)
+     * - Logical: what Wayland clients see (e.g., 960×672)
+     * - physical_to_logical = logical / physical = 2/3 = 0.667
+     *
+     * draw.width/height = physical dimensions
+     * draw.logical_width/height = logical dimensions
      */
-    float scale = s->draw.scale;
-    if (scale <= 0.0f) scale = 1.0f;
+    struct draw_state *draw = &s->draw;
     
-    /* Convert to window-relative physical, then to logical */
-    int phys_local_x = mx - s->draw.win_minx;
-    int phys_local_y = my - s->draw.win_miny;
+    /* Calculate physical-to-logical conversion factor */
+    float phys_to_logical = 1.0f;
+    if (draw->width > 0 && draw->logical_width > 0) {
+        phys_to_logical = (float)draw->logical_width / (float)draw->width;
+    }
     
-    int local_x = (int)(phys_local_x / scale + 0.5f);
-    int local_y = (int)(phys_local_y / scale + 0.5f);
+    /* Convert to window-relative physical coords */
+    int phys_local_x = mx - draw->win_minx;
+    int phys_local_y = my - draw->win_miny;
     
-    /* s->width, s->height are the compositor's dimensions (logical in 9front mode) */
-    int logical_w = s->width;
-    int logical_h = s->height;
+    /* Convert to logical coords */
+    int local_x = (int)(phys_local_x * phys_to_logical + 0.5f);
+    int local_y = (int)(phys_local_y * phys_to_logical + 0.5f);
+    
+    /* Use LOGICAL dimensions for cursor bounds */
+    int logical_w = draw->logical_width;
+    int logical_h = draw->logical_height;
+    if (logical_w <= 0) logical_w = draw->width;
+    if (logical_h <= 0) logical_h = draw->height;
     
     /* Clamp to logical bounds */
     if (local_x < 0) local_x = 0;
     if (local_y < 0) local_y = 0;
     if (local_x >= logical_w) local_x = logical_w - 1;
     if (local_y >= logical_h) local_y = logical_h - 1;
+    
+    /* Debug logging for first few events */
+    static int mouse_debug_count = 0;
+    if (mouse_debug_count < 10) {
+        wlr_log(WLR_INFO, "Mouse: phys(%d,%d) → local(%d,%d) factor=%.3f bounds=%dx%d",
+                phys_local_x, phys_local_y, local_x, local_y, 
+                phys_to_logical, logical_w, logical_h);
+        mouse_debug_count++;
+    }
     
     /* Update cursor position (using logical coordinates) */
     wlr_cursor_warp_absolute(s->cursor, NULL,

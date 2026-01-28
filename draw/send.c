@@ -1,11 +1,14 @@
 /*
- * send.c - Frame sending and send thread
+ * send.c - Frame sending and send thread (SHARP SCALING VERSION)
  *
  * Handles queuing frames, the send thread main loop,
  * tile compression selection, and pipelined writes.
  *
  * Uses iounit from 9P Ropen to limit batch sizes for atomic writes.
  * Uses a separate drain thread for async response handling.
+ *
+ * SHARP SCALING: The 'a' (affine warp) command now DOWNSCALES from
+ * high-resolution render buffer to physical window, producing sharp results.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -283,17 +286,17 @@ int tile_changed_send(struct server *s, uint32_t *send_buf, int tx, int ty) {
 /*
  * Check if scroll optimization should be disabled.
  * 
- * With the new fractional scaling architecture, scroll detection works
- * because everything operates at logical resolution:
- * - Compositor renders at logical resolution
- * - Scroll detection compares logical pixels
- * - Scroll command operates on logical source image
+ * With the new sharp scaling architecture, scroll detection works
+ * because everything operates at render resolution:
+ * - Compositor renders at render resolution
+ * - Scroll detection compares render pixels
+ * - Scroll command operates on render source image
  * 
  * Only disable scroll for other reasons (e.g., debugging).
  */
 static int scroll_disabled(struct server *s) {
     (void)s;
-    return 0;  /* Scroll works with fractional scaling now */
+    return 0;  /* Scroll works with sharp scaling now */
 }
 
 void *send_thread_func(void *arg) {
@@ -704,56 +707,90 @@ void *send_thread_func(void *arg) {
                 
             }
             
-            /* Copy buffer to window using 'a' (affine warp) command with scaling.
+            /* Copy buffer to window using 'a' (affine warp) command with DOWNSCALING.
              *
              * Matrix uses 25.7 fixed-point (1.0 = 0x80 = 128).
              *
-             * For upscaling by factor S (e.g., 1.5x):
-             * - Source image is at logical resolution (physical / S)
-             * - Window is at physical resolution
-             * - Matrix diagonal = 1/S (each dest pixel step = 1/S src pixel step)
+             * For 1.5× overall HiDPI scaling:
+             * - Logical size: L (what clients see, e.g., 960×672)
+             * - Render buffer: R = L × 2 (2× Wayland, e.g., 1920×1344)
+             * - Physical window: P = L × 1.5 (e.g., 1440×1008)
+             * - 9front downscale: R → P by factor 4/3
              *
-             * For scale=1.0, this is just an identity transform (1:1 copy).
+             * Matrix = render / physical = 4/3 ≈ 1.333
+             * In fixed-point: 4/3 × 128 ≈ 171
+             *
+             * The 'a' command formula: src_p = M * (dest_p - R.min) + sp0
+             * With matrix=4/3:
+             * - dest pixel 0 → src pixel 0
+             * - dest pixel 3 → src pixel 4
+             * - etc.
              */
             
-            /* Get scale from draw state (set at runtime from -S flag) */
+            /* Get scale from draw state (4/3 for 1.5× mode = render/physical) */
             float scale = draw->scale;
             if (scale <= 0.0f) scale = 1.0f;
             
-            /* Matrix diagonal in 25.7 fixed-point: 1/scale * 128 */
-            int matrix_scale = (int)(128.0f / scale + 0.5f);
-            
-            /* smooth=1 enables bilinear interpolation.
-             * Only enable for actual upscaling (scale > 1.0).
-             * At scale=1.0, bilinear causes unnecessary blurring.
+            /* Matrix diagonal in 25.7 fixed-point: scale * 128
+             * For 4/3 downscaling: matrix ≈ 171
              */
+            int matrix_scale;
+            if (scale > 1.001f) {
+                matrix_scale = (int)(128.0f * scale + 0.5f);
+            } else {
+                /* No scaling: identity */
+                matrix_scale = 128;
+            }
+            
+            /* smooth=1 enables bilinear interpolation for quality downscale */
             int smooth = (scale > 1.001f) ? 1 : 0;
             
-            /* sp0 must be in SOURCE (logical) coordinates.
-             * p2 = M * local, sp = sp0 + p2
-             * After matrix: p2 = (win_minx/scale, win_miny/scale)
-             * We want sp = (0,0), so sp0 = (-win_minx/scale, -win_miny/scale)
-             */
-            int sp_x = -(int)(draw->win_minx / scale + 0.5f);
-            int sp_y = -(int)(draw->win_miny / scale + 0.5f);
+            /* sp0 = (0, 0) to start reading from source origin */
+            int sp_x = 0;
+            int sp_y = 0;
+            
+            /* Debug logging for first few frames and periodically */
+            static int a_cmd_count = 0;
+            a_cmd_count++;
+            if (a_cmd_count <= 5 || a_cmd_count % 100 == 0) {
+                wlr_log(WLR_INFO, "'a' cmd #%d: 4/3 downscale (1.5× HiDPI), matrix=%d "
+                        "src=0,0-%d,%d → dst=(%d,%d)-(%d,%d) smooth=%d",
+                        a_cmd_count, matrix_scale, 
+                        draw->render_width, draw->render_height,  /* source (render res) */
+                        draw->win_minx, draw->win_miny,
+                        draw->win_minx + draw->width,             /* dest (physical) */
+                        draw->win_miny + draw->height,
+                        smooth);
+            }
             
             batch[off++] = 'a';
             PUT32(batch + off, draw->screen_id); off += 4;
-            /* R = dest rect in physical window coordinates */
+            
+            /* R = dest rect in PHYSICAL window coordinates.
+             * This is where the scaled image will be drawn.
+             * draw->width/height is now PHYSICAL size (not eff_physical).
+             */
             PUT32(batch + off, draw->win_minx); off += 4;
             PUT32(batch + off, draw->win_miny); off += 4;
             PUT32(batch + off, draw->win_minx + draw->width); off += 4;
             PUT32(batch + off, draw->win_miny + draw->height); off += 4;
+            
+            /* Source image ID (contains render_width × render_height pixels) */
             PUT32(batch + off, draw->image_id); off += 4;
-            /* sp0 in logical (source) coordinates */
+            
+            /* sp0 = (0, 0) to start reading from source origin */
             PUT32(batch + off, sp_x); off += 4;
             PUT32(batch + off, sp_y); off += 4;
-            /* Scaling matrix in 25.7 fixed-point */
-            PUT32(batch + off, matrix_scale); off += 4;  /* m[0][0] = 1/scale */
+            
+            /* Scaling matrix in 25.7 fixed-point
+             * For DOWNSCALING: matrix = scale (> 1.0 = > 128)
+             * src_coord = dest_coord × (matrix_scale / 128)
+             */
+            PUT32(batch + off, matrix_scale); off += 4;  /* m[0][0] = scale */
             PUT32(batch + off, 0); off += 4;              /* m[0][1] = 0 */
             PUT32(batch + off, 0); off += 4;              /* m[0][2] = 0 */
             PUT32(batch + off, 0); off += 4;              /* m[1][0] = 0 */
-            PUT32(batch + off, matrix_scale); off += 4;  /* m[1][1] = 1/scale */
+            PUT32(batch + off, matrix_scale); off += 4;   /* m[1][1] = scale */
             PUT32(batch + off, 0); off += 4;              /* m[1][2] = 0 */
             PUT32(batch + off, 0); off += 4;              /* m[2][0] = 0 */
             PUT32(batch + off, 0); off += 4;              /* m[2][1] = 0 */
