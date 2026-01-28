@@ -27,10 +27,24 @@
 #include "../draw/send.h"
 #include "../p9/p9.h"
 
+/* From send.c - pause/resume for resize synchronization */
+extern void send_system_pause(void);
+extern void send_system_resume(void);
+
 /* Handle resize to new physical dimensions */
 void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new_miny) {
     wlr_log(WLR_INFO, "handle_resize: %dx%d -> %dx%d at (%d,%d)", 
             s->draw.width, s->draw.height, new_w, new_h, new_minx, new_miny);
+    
+    /* CRITICAL: Pause send system to wait for all in-flight 9P writes.
+     * This prevents "bad writeimage call" errors from stale scroll commands.
+     */
+    send_system_pause();
+    
+    /* Take lock to synchronize with send thread.
+     * This ensures no frames are being processed while we resize.
+     */
+    pthread_mutex_lock(&s->send_lock);
     
     float scale = s->scale;
     if (scale <= 0.0f) scale = 1.0f;
@@ -90,18 +104,18 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
         free(new_prev_framebuf);
         free(new_send_buf0);
         free(new_send_buf1);
+        pthread_mutex_unlock(&s->send_lock);
+        send_system_resume();  /* Resume on failure */
         return;
     }
     
     uint32_t *old_framebuf = s->framebuf;
     uint32_t *old_prev_framebuf = s->prev_framebuf;
-    uint32_t *old_send_buf0, *old_send_buf1;
+    uint32_t *old_send_buf0 = s->send_buf[0];
+    uint32_t *old_send_buf1 = s->send_buf[1];
     struct draw_state *draw = &s->draw;
     
-    pthread_mutex_lock(&s->send_lock);
-    old_send_buf0 = s->send_buf[0];
-    old_send_buf1 = s->send_buf[1];
-    
+    /* We already hold send_lock from the start of this function */
     s->framebuf = new_framebuf;
     s->prev_framebuf = new_prev_framebuf;
     s->send_buf[0] = new_send_buf0;
@@ -114,6 +128,11 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     s->height = render_h;
     s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
     s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
+    
+    /* Check if 9P images need reallocation BEFORE updating draw dimensions */
+    int old_render_w = draw->render_width;
+    int old_render_h = draw->render_height;
+    int need_realloc = (old_render_w != render_w || old_render_h != render_h);
     
     if (s->wl_scaling || scale <= 1.001f) {
         /* Wayland scaling mode: no 9front scaling */
@@ -141,58 +160,69 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     }
     draw->win_minx = new_minx;
     draw->win_miny = new_miny;
+    
+    /* Reallocate Plan 9 images at RENDER resolution.
+     * This ensures no frame can be sent to mismatched image dimensions.
+     */
+    struct p9conn *p9 = draw->p9;
+    
+    if (need_realloc) {
+        wlr_log(WLR_INFO, "handle_resize: Reallocating 9P images: %dx%d -> %dx%d",
+                old_render_w, old_render_h, render_w, render_h);
+        
+        uint8_t freecmd[5];
+        freecmd[0] = 'f';
+        PUT32(freecmd + 1, draw->image_id);
+        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+        PUT32(freecmd + 1, draw->delta_id);
+        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+        
+        uint8_t bcmd[64];
+        int off = 0;
+        bcmd[off++] = 'b';
+        PUT32(bcmd + off, draw->image_id); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0x68081828); off += 4;
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, render_w); off += 4;
+        PUT32(bcmd + off, render_h); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, render_w); off += 4;
+        PUT32(bcmd + off, render_h); off += 4;
+        PUT32(bcmd + off, 0x00000000); off += 4;
+        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+        
+        off = 0;
+        bcmd[off++] = 'b';
+        PUT32(bcmd + off, draw->delta_id); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0x48081828); off += 4;
+        bcmd[off++] = 0;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, render_w); off += 4;
+        PUT32(bcmd + off, render_h); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, 0); off += 4;
+        PUT32(bcmd + off, render_w); off += 4;
+        PUT32(bcmd + off, render_h); off += 4;
+        PUT32(bcmd + off, 0x00000000); off += 4;
+        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+    }
+    
+    /* Now safe to release lock - 9P images match buffer dimensions */
     pthread_mutex_unlock(&s->send_lock);
     
+    /* Free old buffers AFTER releasing lock (they're no longer referenced) */
     free(old_framebuf);
     free(old_prev_framebuf);
     free(old_send_buf0);
     free(old_send_buf1);
-    
-    /* Reallocate Plan 9 images at RENDER resolution */
-    struct p9conn *p9 = draw->p9;
-    uint8_t freecmd[5];
-    freecmd[0] = 'f';
-    PUT32(freecmd + 1, draw->image_id);
-    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-    PUT32(freecmd + 1, draw->delta_id);
-    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-    
-    uint8_t bcmd[64];
-    int off = 0;
-    bcmd[off++] = 'b';
-    PUT32(bcmd + off, draw->image_id); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0x68081828); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_w); off += 4;
-    PUT32(bcmd + off, render_h); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_w); off += 4;
-    PUT32(bcmd + off, render_h); off += 4;
-    PUT32(bcmd + off, 0x00000000); off += 4;
-    p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-    
-    off = 0;
-    bcmd[off++] = 'b';
-    PUT32(bcmd + off, draw->delta_id); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0x48081828); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_w); off += 4;
-    PUT32(bcmd + off, render_h); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, render_w); off += 4;
-    PUT32(bcmd + off, render_h); off += 4;
-    PUT32(bcmd + off, 0x00000000); off += 4;
-    p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
     
     /* Resize wlroots output to RENDER dimensions */
     struct wlr_output_state state;
@@ -226,6 +256,9 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     
     draw->xor_enabled = 0;
     s->force_full_frame = 1;
+    
+    /* Resume send system now that 9P images are ready */
+    send_system_resume();
     
     wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical, %dx%d render at (%d,%d)", 
             phys_w, phys_h, logical_w, logical_h, render_w, render_h, new_minx, new_miny);
@@ -456,25 +489,19 @@ void new_output(struct wl_listener *l, void *d) {
      */
     wlr_log(WLR_INFO, "Using 9front-side SHARP 1.5× scaling (2× Wayland, 4/3 downscale)");
     
-    /* Physical dimensions aligned to tile size */
-    int aligned_phys_w = (phys_w / TILE_SIZE) * TILE_SIZE;
-    int aligned_phys_h = (phys_h / TILE_SIZE) * TILE_SIZE;
-    if (aligned_phys_w < TILE_SIZE * 4) aligned_phys_w = TILE_SIZE * 4;
-    if (aligned_phys_h < TILE_SIZE * 4) aligned_phys_h = TILE_SIZE * 4;
+    /* Use dimensions already computed by draw_init() */
+    int aligned_phys_w = s->draw.width;
+    int aligned_phys_h = s->draw.height;
+    int logical_w = s->draw.logical_width;
+    int logical_h = s->draw.logical_height;
+    int render_w = s->draw.render_width;
+    int render_h = s->draw.render_height;
     
-    /* Logical = physical / 1.5 (what clients see) */
-    int logical_w = (aligned_phys_w * 2) / 3;
-    int logical_h = (aligned_phys_h * 2) / 3;
-    /* Align logical to even numbers for clean 2× */
-    logical_w = (logical_w / 2) * 2;
-    logical_h = (logical_h / 2) * 2;
-    
-    /* Render = logical × 2 = physical × 4/3 */
-    int render_w = logical_w * 2;
-    int render_h = logical_h * 2;
+    wlr_log(WLR_INFO, "Using draw_init dimensions: physical=%dx%d, logical=%dx%d, render=%dx%d",
+            aligned_phys_w, aligned_phys_h, logical_w, logical_h, render_w, render_h);
     
     /* Set wlroots output to RENDER dimensions with scale=2.
-     * Clients will see logical = render/2 = physical dimensions.
+     * Clients will see logical = render/2.
      */
     struct wlr_output_state state;
     wlr_output_state_init(&state);
@@ -501,7 +528,9 @@ void new_output(struct wl_listener *l, void *d) {
     s->output_destroy.notify = output_destroy;
     wl_signal_add(&out->events.destroy, &s->output_destroy);
     
-    /* Reallocate buffers at RENDER resolution (high res) */
+    /* Allocate compositor buffers at RENDER resolution.
+     * 9P images were already allocated by init_draw() at render resolution.
+     */
     size_t fb_size = render_w * render_h * sizeof(uint32_t);
     uint32_t *new_framebuf = calloc(1, fb_size);
     uint32_t *new_prev_framebuf = calloc(1, fb_size);
@@ -520,91 +549,29 @@ void new_output(struct wl_listener *l, void *d) {
         s->send_buf[1] = new_send_buf1;
         s->pending_buf = -1;
         s->active_buf = -1;
+        
+        /* Update dimensions - 9P images already correct size from init_draw() */
+        s->width = render_w;
+        s->height = render_h;
+        s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
+        s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
+        
+        /* draw state already set by init_draw(), just verify */
+        wlr_log(WLR_INFO, "Compositor buffers: %dx%d render, 9P images: %dx%d",
+                render_w, render_h, s->draw.render_width, s->draw.render_height);
+        
         pthread_mutex_unlock(&s->send_lock);
-        
-        wlr_log(WLR_INFO, "Allocated buffers: %dx%d render resolution",
-                render_w, render_h);
-        
-        /* Reallocate 9front source image at RENDER resolution */
-        struct draw_state *draw = &s->draw;
-        struct p9conn *p9 = draw->p9;
-        
-        /* Free old images */
-        uint8_t freecmd[5];
-        freecmd[0] = 'f';
-        PUT32(freecmd + 1, draw->image_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        PUT32(freecmd + 1, draw->delta_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        
-        /* Allocate new image at RENDER resolution */
-        uint8_t bcmd[64];
-        int off = 0;
-        bcmd[off++] = 'b';
-        PUT32(bcmd + off, draw->image_id); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0x68081828); off += 4;  /* XRGB32 */
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0x00000000); off += 4;
-        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-        
-        /* Allocate delta image at RENDER resolution */
-        off = 0;
-        bcmd[off++] = 'b';
-        PUT32(bcmd + off, draw->delta_id); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0x48081828); off += 4;  /* ARGB32 */
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, render_w); off += 4;
-        PUT32(bcmd + off, render_h); off += 4;
-        PUT32(bcmd + off, 0x00000000); off += 4;
-        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-        
-        wlr_log(WLR_INFO, "Reallocated 9front images at %dx%d render res", 
-                render_w, render_h);
     } else {
-        wlr_log(WLR_ERROR, "Failed to reallocate buffers for render resolution");
+        wlr_log(WLR_ERROR, "Failed to allocate compositor buffers");
         free(new_framebuf);
         free(new_prev_framebuf);
         free(new_send_buf0);
         free(new_send_buf1);
+        s->width = render_w;
+        s->height = render_h;
+        s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
+        s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
     }
-    
-    /* Update s->width/height to RENDER resolution (compositor operates at high res) */
-    s->width = render_w;
-    s->height = render_h;
-    s->tiles_x = (render_w + TILE_SIZE - 1) / TILE_SIZE;
-    s->tiles_y = (render_h + TILE_SIZE - 1) / TILE_SIZE;
-    
-    /* Update draw state for SHARP 1.5× scaling:
-     * - width/height = PHYSICAL (what we downscale TO, for 'a' command dest rect)
-     * - render_width/height = render res (physical × 4/3)
-     * - logical_width/height = physical / 1.5 (what clients see)
-     * - scale = 4/3 = 1.333... (9front downscale factor: render/physical)
-     */
-    s->draw.width = aligned_phys_w;
-    s->draw.height = aligned_phys_h;
-    s->draw.logical_width = logical_w;
-    s->draw.logical_height = logical_h;
-    s->draw.render_width = render_w;
-    s->draw.render_height = render_h;
-    s->draw.scale = (float)render_w / (float)aligned_phys_w;  /* 4/3 ≈ 1.333 */
     
     /* Background at LOGICAL dimensions (scene uses logical coords with output scale=2) */
     if (s->background) {

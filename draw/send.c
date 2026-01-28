@@ -203,6 +203,27 @@ static void drain_resume(void) {
     pthread_mutex_unlock(&drain.lock);
 }
 
+/*
+ * Exported function to pause send system for resize operations.
+ * Waits for all pending 9P writes to complete.
+ * Call this BEFORE modifying 9P images.
+ */
+void send_system_pause(void) {
+    if (atomic_load(&drain.running)) {
+        drain_pause();
+    }
+}
+
+/*
+ * Exported function to resume send system after resize operations.
+ * Call this AFTER modifying 9P images.
+ */
+void send_system_resume(void) {
+    if (atomic_load(&drain.running)) {
+        drain_resume();
+    }
+}
+
 static void drain_notify(void) {
     atomic_fetch_add(&drain.pending, 1);
     pthread_mutex_lock(&drain.lock);
@@ -444,6 +465,9 @@ void *send_thread_func(void *arg) {
         
         if (s->resize_pending) {
             wlr_log(WLR_DEBUG, "Send thread: skipping frame, resize pending");
+            pthread_mutex_lock(&s->send_lock);
+            s->active_buf = -1;
+            pthread_mutex_unlock(&s->send_lock);
             continue;
         }
         
