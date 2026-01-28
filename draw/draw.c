@@ -204,9 +204,11 @@ int relookup_window(struct server *s) {
         wlr_log(WLR_INFO, "relookup_window: resize pending %dx%d -> %dx%d, main thread will handle",
                 draw->width, draw->height, new_width, new_height);
     } else {
-        /* Just position change, update now */
+        /* Just position change, update now and force full redraw */
         wlr_log(WLR_INFO, "Window position updated: '%s' at (%d,%d) %dx%d",
                 draw->winname, draw->win_minx, draw->win_miny, draw->width, draw->height);
+        s->force_full_frame = 1;
+        s->frame_dirty = 1;
     }
     
     return 0;

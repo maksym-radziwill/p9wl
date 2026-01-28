@@ -52,7 +52,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
             struct draw_state *draw = &s->draw;
             draw->win_minx = new_minx;
             draw->win_miny = new_miny;
-            wlr_log(WLR_DEBUG, "Position update only: (%d,%d)", new_minx, new_miny);
+            s->force_full_frame = 1;
+            wlr_log(WLR_DEBUG, "Position update only: (%d,%d), forcing full frame", new_minx, new_miny);
         } else {
             wlr_log(WLR_INFO, "Main thread handling resize: %dx%d -> %dx%d (physical)", 
                     s->draw.width, s->draw.height, new_w, new_h);
