@@ -307,8 +307,8 @@ static int init_wayland(struct server *s) {
     wlr_scene_attach_output_layout(s->scene, s->output_layout);
 
     /* Gray background (uses logical dimensions for scene graph) */
-    int logical_w = (int)(s->width / s->scale + 0.5f);
-    int logical_h = (int)(s->height / s->scale + 0.5f);
+    int logical_w = (int)(s->width + 0.5f); // Divided by s->scale before
+    int logical_h = (int)(s->height + 0.5f); // ditto
     float gray[4] = { 0.3f, 0.3f, 0.3f, 1.0f };
     s->background = wlr_scene_rect_create(&s->scene->tree, logical_w, logical_h, gray);
     if (s->background) {
@@ -488,32 +488,19 @@ int main(int argc, char *argv[]) {
     }
 
     /* Set dimensions from draw device.
-     * For 9front scaling mode, use logical dimensions (compositor runs at logical).
-     * For Wayland scaling or no scaling, use physical dimensions.
-     * PATCHED: Was always using physical, now uses logical for 9front scaling.
+     * Use physical dimensions initially - new_output() will reconfigure
+     * to logical resolution for 9front scaling mode.
      */
-    if (!s.wl_scaling && s.scale > 1.001f) {
-        /* 9front scaling: compositor at logical resolution */
-        s.width = s.draw.width * s.scale; 
-        s.height = s.draw.height * s.scale; 
-        wlr_log(WLR_INFO, "9front scaling: using logical %dx%d (physical %dx%d, scale %.2f)",
-                s.width, s.height, s.draw.width, s.draw.height, s.scale);
-    } else {
-        /* Wayland scaling or no scaling: compositor at physical resolution */
-        s.width = s.draw.width;
-        s.height = s.draw.height;
-    }
+    s.width = s.draw.width;
+    s.height = s.draw.height;
     s.tiles_x = (s.width + TILE_SIZE - 1) / TILE_SIZE;
     s.tiles_y = (s.height + TILE_SIZE - 1) / TILE_SIZE;
 
-    /* draw.scale is already set by init_draw() using s.scale.
-     * Verify logical dimensions are consistent.
-     */
+    /* Log scaling info */
     if (s.scale > 1.001f) {
-        wlr_log(WLR_INFO, "Scale mode: %s, Physical: %dx%d, Logical: %dx%d, Scale: %.2f",
+        wlr_log(WLR_INFO, "Scale mode: %s, Physical: %dx%d, Scale: %.2f (new_output will reconfigure)",
                 s.wl_scaling ? "Wayland" : "9front",
-                s.draw.width, s.draw.height, 
-                s.draw.logical_width, s.draw.logical_height, s.scale);
+                s.draw.width, s.draw.height, s.scale);
     }
 
     /* Allocate framebuffers */
