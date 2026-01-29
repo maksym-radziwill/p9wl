@@ -77,7 +77,10 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "     %s 192.168.1.100:%d\n", prog, P9_PORT);
     fprintf(stderr, "     %s 192.168.1.100:%d foot\n", prog, P9_PORT);
     fprintf(stderr, "     %s -S 1.5 192.168.1.100:%d firefox\n", prog, P9_PORT);
-    fprintf(stderr, "     %s -B -S 2 192.168.1.100:%d          # 9front backend scaling\n", prog, P9_PORT);
+    fprintf(stderr, "     %s -B -S 2 192.168.1.100:%d          # scale on 9front\n", prog, P9_PORT);
+    fprintf(stderr, "\n"); 
+    fprintf(stderr, "    If you didn't specify a program and p9wl socket is wayland-0:\n");
+    fprintf(stderr, "      WAYLAND_DISPLAY=wayland-0 foot\n");  
     fprintf(stderr, "\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
     fprintf(stderr, "EXAMPLES - WITH TLS AUTHENTICATION\n");
@@ -88,18 +91,23 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "     auth/rsa2x509 -e 3650 'CN=myhost' /sys/lib/tls/key | \\\n");
     fprintf(stderr, "         auth/pemencode CERTIFICATE > /sys/lib/tls/cert\n");
     fprintf(stderr, "     cat /sys/lib/tls/key > /mnt/factotum/ctl\n");
-    fprintf(stderr, "\n  2. Start TLS listener on 9front:\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "    2. Copy certificate to linux\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "     # If using drawterm with user directory in /home/user on linux\n");
+    fprintf(stderr, "     cp /sys/lib/tls/cert /mnt/term/home/user/9front.pem\n");
+    fprintf(stderr, "\n  3. Start TLS listener on 9front:\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "     aux/listen1 -t tcp!*!%d tlssrv -c /sys/lib/tls/cert /bin/exportfs -r /dev\n", P9_TLS_PORT);
-    fprintf(stderr, "\n  3. Connect from client:\n");
+    fprintf(stderr, "\n  4. Connect from client:\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "     # Using certificate file:\n");
-    fprintf(stderr, "     %s -c 9front.pem 192.168.1.100:%d\n", prog, P9_TLS_PORT);
+    fprintf(stderr, "     %s -c ~/9front.pem 192.168.1.100:%d\n", prog, P9_TLS_PORT);
     fprintf(stderr, "\n     # Using SHA256 fingerprint:\n");
     fprintf(stderr, "     %s -f aa11bb22cc33... 192.168.1.100:%d\n", prog, P9_TLS_PORT);
     fprintf(stderr, "\n     # First connection (get fingerprint, insecure):\n");
     fprintf(stderr, "     %s -k 192.168.1.100:%d\n", prog, P9_TLS_PORT);
-    fprintf(stderr, "\n  4. Get fingerprint from certificate:\n");
+    fprintf(stderr, "\n  5. Get SHA256 fingerprint from certificate (optional):\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "     openssl x509 -in 9front.pem -noout -fingerprint -sha256\n");
     fprintf(stderr, "\n");
@@ -177,7 +185,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
         if (tls_cfg->cert_file || tls_cfg->cert_fingerprint || tls_cfg->insecure) {
             *port = P9_TLS_PORT;  /* Default TLS port: 10001 */
         } else {
-            *port = P9_PORT;      /* Default plaintext port: 564 */
+            *port = P9_PORT;      /* Default plaintext port: 10000 */
         }
     }
 
@@ -295,8 +303,8 @@ static int init_wayland(struct server *s) {
     wlr_scene_attach_output_layout(s->scene, s->output_layout);
 
     /* Gray background (uses logical dimensions for scene graph) */
-    int logical_w = (int)(s->width + 0.5f); // Divided by s->scale before
-    int logical_h = (int)(s->height + 0.5f); // ditto
+    int logical_w = (int)(s->width + 0.5f);  
+    int logical_h = (int)(s->height + 0.5f);  
     float gray[4] = { 0.3f, 0.3f, 0.3f, 1.0f };
     s->background = wlr_scene_rect_create(&s->scene->tree, logical_w, logical_h, gray);
     if (s->background) {
@@ -365,6 +373,7 @@ static int setup_socket(struct server *s) {
         return -1;
     }
 
+    fprintf(stdout, "WAYLAND_DISPLAY=%s (%dx%d)\n", sock, s->width, s->height);
     wlr_log(WLR_INFO, "WAYLAND_DISPLAY=%s (%dx%d)", sock, s->width, s->height);
     setenv("WAYLAND_DISPLAY", sock, 1);
 
@@ -451,7 +460,7 @@ int main(int argc, char *argv[]) {
         s.tls_fingerprint = strdup(tls_cfg.cert_fingerprint);
     }
     s.tls_insecure = tls_cfg.insecure;
-    s.scale = (scale > 0.0f) ? scale : 1.0f;  /* HiDPI scale factor, default 1.0 */
+    s.scale = scale;  /* HiDPI scale factor, default 1.0 */
     s.wl_scaling = wl_scaling;  /* 1 = Wayland scaling (default), 0 = 9front backend (-B) */
     s.log_level = log_level;
 

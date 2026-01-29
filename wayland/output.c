@@ -30,12 +30,12 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     float scale = s->scale;
     if (scale <= 0.0f) scale = 1.0f;
     
-    /* Fractional Wayland mode: -W with scale > 1
+    /* Fractional Wayland mode with scale > 1
      * For scale x where k-1 < x <= k (k = ceil(x)):
      *   - Wayland output scale = k
      *   - Buffer = (k/x) * rio_window
-     *   - Scene = buffer/k = rio_window/x
-     *   - 'a' command downscales by k/x
+     *   - Scene = buffer/k = rio_window / x
+     *   - 'a' command downscales buffer by k/x
      */
     int fractional_wl_mode = (s->wl_scaling && scale > 1.001f);
     int k = (int)ceilf(scale);  /* Integer output scale */
@@ -46,14 +46,15 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     if (fractional_wl_mode) {
         /* Fractional Wayland mode: buffer = (k/scale) * physical */
         float buffer_factor = (float)k / scale;
-        wl_phys_w = (int)(new_w * buffer_factor + 0.5f);
-        wl_phys_h = (int)(new_h * buffer_factor + 0.5f);
+        wl_phys_w = (int) ((new_w * buffer_factor + 0.5f) / k) * k;
+        wl_phys_h = (int) ((new_h * buffer_factor + 0.5f) / k) * k;
         
-        /* Align to tile size */
-        wl_phys_w = (wl_phys_w / TILE_SIZE) * TILE_SIZE;
-        wl_phys_h = (wl_phys_h / TILE_SIZE) * TILE_SIZE;
-        if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
-        if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
+
+        /* Align to tile size and is a multiple of k */
+        wl_phys_w = (wl_phys_w / (k * TILE_SIZE)) * k * TILE_SIZE;
+        wl_phys_h = (wl_phys_h / (k * TILE_SIZE)) * k * TILE_SIZE;
+        if (wl_phys_w < k * TILE_SIZE * 4) wl_phys_w = k * TILE_SIZE * 4;
+        if (wl_phys_h < k * TILE_SIZE * 4) wl_phys_h = k * TILE_SIZE * 4;
         
         /* Scene dims = wl_phys / k = rio / scale */
         scene_w = wl_phys_w / k;
@@ -392,7 +393,7 @@ void new_output(struct wl_listener *l, void *d) {
      * 1. 9front scaling (default, s->wl_scaling == 0):
      *    - Compositor renders at LOGICAL resolution (physical / scale)
      *    - 9front 'a' command scales to physical window
-     *    - Lower bandwidth, quality depends on 9front bilinear
+     *    - Lower bandwidth, quality depends on 9front bilinear interpolation
      *
      * 2. Wayland scaling (s->wl_scaling == 1, or -W flag):
      *    - Compositor renders at PHYSICAL resolution
