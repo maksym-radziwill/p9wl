@@ -357,7 +357,7 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9) {
 
 const struct kbmap_entry *kbmap_lookup(struct kbmap *km, int rune) {
     if (!km || !km->loaded) return NULL;
-
+    
     for (int i = 0; i < km->count; i++) {
         if (km->entries[i].rune == rune) {
             return &km->entries[i];
