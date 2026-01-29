@@ -150,9 +150,9 @@ static int count_identical_tiles(
 /*
  * Process a single scroll region (called from thread pool workers).
  *
- * With integer output scaling k = ceil(scale), scroll offsets are
- * multiples of k. The FFT with k-based downsampling directly returns
- * the correct k-aligned offset - just validate it saves bytes.
+ * FFT with k-based downsampling returns offset rounded to nearest k.
+ * True scroll could be off by up to k-1 pixels, so we test offsets
+ * from -(k-1) to +(k-1) around the FFT result to find exact match.
  */
 static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     struct scroll_work *work = user_data;
@@ -186,18 +186,18 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     
     if (result.dx == 0 && result.dy == 0) return;
     
-    int dx = result.dx;
-    int dy = result.dy;
+    int base_dx = result.dx;
+    int base_dy = result.dy;
     
     /* Reject scroll at boundaries - likely aliasing artifact */
-    int abs_dx = dx < 0 ? -dx : dx;
-    int abs_dy = dy < 0 ? -dy : dy;
+    int abs_dx = base_dx < 0 ? -base_dx : base_dx;
+    int abs_dy = base_dy < 0 ? -base_dy : base_dy;
     if (abs_dx >= max_scroll_x || abs_dy >= max_scroll_y) {
         return;
     }
     
     wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d (k=%d)", 
-            reg_idx, dx, dy, k);
+            reg_idx, base_dx, base_dy, k);
     
     /* Count identical tiles without scroll (baseline) */
     int tiles_identical_no = 0;
@@ -226,23 +226,62 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         }
     }
     
-    /* Count identical tiles with scroll */
-    int tiles_identical_with = count_identical_tiles(
-        s, send_buf, prev_buf, rx1, ry1, rx2, ry2, dx, dy);
+    /*
+     * Refinement: FFT gives result rounded to k pixels.
+     * Test offsets from -(k-1) to +(k-1) to find exact match.
+     * For k=1: just test 0 (no refinement)
+     * For k=2: test -1, 0, +1
+     * For k=3: test -2, -1, 0, +1, +2
+     * etc.
+     */
+    int best_dx = base_dx;
+    int best_dy = base_dy;
+    int best_identical = 0;
+    
+    int refine = k - 1;  /* Range: -refine to +refine */
+    
+    for (int off_dy = -refine; off_dy <= refine; off_dy++) {
+        int test_dy = base_dy + off_dy;
+        int test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
+        if (test_abs_dy >= max_scroll_y) continue;
+        
+        for (int off_dx = -refine; off_dx <= refine; off_dx++) {
+            int test_dx = base_dx + off_dx;
+            int test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
+            if (test_abs_dx >= max_scroll_x) continue;
+            
+            /* Skip if both are zero */
+            if (test_dx == 0 && test_dy == 0) continue;
+            
+            int identical = count_identical_tiles(
+                s, send_buf, prev_buf, rx1, ry1, rx2, ry2, test_dx, test_dy);
+            
+            if (identical > best_identical) {
+                best_identical = identical;
+                best_dx = test_dx;
+                best_dy = test_dy;
+            }
+        }
+    }
     
     /* Reject if scroll doesn't improve tile matching */
-    if (tiles_identical_with <= tiles_identical_no) {
+    if (best_identical <= tiles_identical_no) {
         wlr_log(WLR_DEBUG, "Region %d: REJECTED dx=%d dy=%d - no improvement (%d vs %d identical tiles)",
-                reg_idx, dx, dy, tiles_identical_with, tiles_identical_no);
+                reg_idx, base_dx, base_dy, best_identical, tiles_identical_no);
         return;
     }
     
     s->scroll_regions[reg_idx].detected = 1;
-    s->scroll_regions[reg_idx].dx = dx;
-    s->scroll_regions[reg_idx].dy = dy;
+    s->scroll_regions[reg_idx].dx = best_dx;
+    s->scroll_regions[reg_idx].dy = best_dy;
     
-    wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d - identical tiles %d->%d",
-            reg_idx, dx, dy, tiles_identical_no, tiles_identical_with);
+    if (best_dx != base_dx || best_dy != base_dy) {
+        wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d (refined from %d,%d) - identical tiles %d->%d",
+                reg_idx, best_dx, best_dy, base_dx, base_dy, tiles_identical_no, best_identical);
+    } else {
+        wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d - identical tiles %d->%d",
+                reg_idx, best_dx, best_dy, tiles_identical_no, best_identical);
+    }
 }
 
 void scroll_init(void) {
