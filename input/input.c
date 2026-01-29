@@ -702,24 +702,21 @@ void *wctl_thread_func(void *arg) {
     char buf[128];
     int last_x0 = -1, last_y0 = -1, last_x1 = -1, last_y1 = -1;
     int was_hidden = 0;
+    uint32_t wctl_fid = p9->next_fid++;  /* Use single fid, reuse it */
     
     wlr_log(WLR_INFO, "Wctl thread started - polling /dev/wctl for window changes");
     
     while (s->running) {
-        /* Open wctl fresh each time to allow other programs to access it */
-        uint32_t wctl_fid = p9->next_fid++;
         const char *wnames[] = { "wctl" };
         
         if (p9_walk(p9, p9->root_fid, wctl_fid, 1, wnames) < 0) {
-            wlr_log(WLR_DEBUG, "Wctl thread: walk failed, retrying...");
-            usleep(100000);
+            usleep(500000);
             continue;
         }
         
         if (p9_open(p9, wctl_fid, OREAD, NULL) < 0) {
             p9_clunk(p9, wctl_fid);
-            wlr_log(WLR_DEBUG, "Wctl thread: open failed, retrying...");
-            usleep(100000);
+            usleep(500000);
             continue;
         }
         
@@ -730,10 +727,7 @@ void *wctl_thread_func(void *arg) {
         p9_clunk(p9, wctl_fid);
         
         if (n <= 0) {
-            if (s->running) {
-                wlr_log(WLR_DEBUG, "Wctl thread: read failed, retrying...");
-            }
-            usleep(100000);
+            usleep(500000);
             continue;
         }
         
@@ -759,7 +753,11 @@ void *wctl_thread_func(void *arg) {
             pthread_cond_signal(&s->send_cond);
             pthread_mutex_unlock(&s->send_lock);
         }
-        was_hidden = is_hidden;
+        
+        if (is_hidden)
+            was_hidden = 1;
+        else if (is_visible)
+            was_hidden = 0;
         
         /* Parse the wctl data: "x0 y0 x1 y1 ..." */
         int x0, y0, x1, y1;
@@ -787,8 +785,8 @@ void *wctl_thread_func(void *arg) {
             }
         }
         
-        /* Poll interval - 50ms gives responsive resize detection */
-        usleep(50000);
+        /* Poll interval - 500ms to minimize interference with riow */
+        usleep(500000);
     }
     
     wlr_log(WLR_INFO, "Wctl thread exiting");
