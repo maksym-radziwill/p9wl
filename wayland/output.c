@@ -26,7 +26,6 @@
 
 enum scaling_mode {
     SCALE_MODE_NONE,           /* No scaling (scale <= 1) */
-    SCALE_MODE_WAYLAND,        /* Wayland-side scaling */
     SCALE_MODE_FRACTIONAL_WL,  /* Fractional Wayland (scale > 1, wl_scaling) */
     SCALE_MODE_9FRONT,         /* 9front-side scaling */
 };
@@ -83,8 +82,8 @@ static struct output_dims compute_dimensions(int phys_w, int phys_h,
         dims.input_scale = scale;
         
     } else if (wl_scaling || scale <= 1.001f) {
-        /* Wayland scaling or no scaling */
-        dims.mode = (scale <= 1.001f) ? SCALE_MODE_NONE : SCALE_MODE_WAYLAND;
+        /* no scaling */
+        dims.mode = SCALE_MODE_NONE;
         
         dims.wl_phys_w = (phys_w / TILE_SIZE) * TILE_SIZE;
         dims.wl_phys_h = (phys_h / TILE_SIZE) * TILE_SIZE;
@@ -465,7 +464,7 @@ void new_output(struct wl_listener *l, void *d) {
     
     struct output_dims dims = compute_dimensions(phys_w, phys_h, scale, s->wl_scaling);
     
-    const char *mode_names[] = {"none", "wayland", "fractional_wl", "9front"};
+    const char *mode_names[] = {"none", "fractional_wl", "9front"};
     wlr_log(WLR_INFO, "new_output: mode=%s scale=%.2f k=%d",
             mode_names[dims.mode], scale, dims.k);
     wlr_log(WLR_INFO, "  rio: %dx%d, wl_buf: %dx%d, scene: %dx%d",
