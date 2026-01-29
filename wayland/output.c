@@ -22,100 +22,133 @@
 #include "../draw/send.h"
 #include "../p9/p9.h"
 
-/* Handle resize to new physical dimensions */
-void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new_miny) {
-    wlr_log(WLR_INFO, "handle_resize: %dx%d -> %dx%d at (%d,%d)", 
-            s->draw.width, s->draw.height, new_w, new_h, new_minx, new_miny);
-    
-    float scale = s->scale;
-    if (scale <= 0.0f) scale = 1.0f;
-    
-    /* Fractional Wayland mode with scale > 1
-     * For scale x where k-1 < x <= k (k = ceil(x)):
-     *   - Wayland output scale = k
-     *   - Buffer = (k/x) * rio_window
-     *   - Scene = buffer/k = rio_window / x
-     *   - 'a' command downscales buffer by k/x
-     */
-    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f);
-    int k = (int)ceilf(scale);  /* Integer output scale */
-    
-    int wl_phys_w, wl_phys_h;  /* Wayland buffer dimensions */
-    int scene_w, scene_h;      /* Scene/logical dimensions */
-    
-    if (fractional_wl_mode) {
-        /* Fractional Wayland mode: buffer = (k/scale) * physical */
-        float buffer_factor = (float)k / scale;
-        wl_phys_w = (int) ((new_w * buffer_factor + 0.5f) / k) * k;
-        wl_phys_h = (int) ((new_h * buffer_factor + 0.5f) / k) * k;
-        
+/* ============== Scaling Mode ============== */
 
-        /* Align to tile size and is a multiple of k */
-        wl_phys_w = (wl_phys_w / (k * TILE_SIZE)) * k * TILE_SIZE;
-        wl_phys_h = (wl_phys_h / (k * TILE_SIZE)) * k * TILE_SIZE;
-        if (wl_phys_w < k * TILE_SIZE * 4) wl_phys_w = k * TILE_SIZE * 4;
-        if (wl_phys_h < k * TILE_SIZE * 4) wl_phys_h = k * TILE_SIZE * 4;
+enum scaling_mode {
+    SCALE_MODE_NONE,           /* No scaling (scale <= 1) */
+    SCALE_MODE_WAYLAND,        /* Wayland-side scaling */
+    SCALE_MODE_FRACTIONAL_WL,  /* Fractional Wayland (scale > 1, wl_scaling) */
+    SCALE_MODE_9FRONT,         /* 9front-side scaling */
+};
+
+/* Computed dimensions for a given scaling configuration */
+struct output_dims {
+    enum scaling_mode mode;
+    int k;                /* Integer output scale = ceil(scale) */
+    int wl_phys_w;        /* Wayland buffer dimensions */
+    int wl_phys_h;
+    int scene_w;          /* Scene/logical dimensions (what apps see) */
+    int scene_h;
+    int dest_w;           /* Destination (rio window) dimensions */
+    int dest_h;
+    float draw_scale;     /* Scale factor for 9front 'a' command */
+    float input_scale;    /* Scale factor for mouse coordinates */
+};
+
+/*
+ * Compute output dimensions based on scaling mode.
+ * 
+ * phys_w, phys_h: Physical window size (rio window or initial size)
+ * scale: User-requested scale factor
+ * wl_scaling: Whether Wayland-side scaling is enabled
+ */
+static struct output_dims compute_dimensions(int phys_w, int phys_h, 
+                                              float scale, int wl_scaling) {
+    struct output_dims dims = {0};
+    
+    if (scale <= 0.0f) scale = 1.0f;
+    dims.k = (int)ceilf(scale);
+    dims.dest_w = phys_w;
+    dims.dest_h = phys_h;
+    
+    if (wl_scaling && scale > 1.001f) {
+        /* Fractional Wayland mode */
+        dims.mode = SCALE_MODE_FRACTIONAL_WL;
         
-        /* Scene dims = wl_phys / k = rio / scale */
-        scene_w = wl_phys_w / k;
-        scene_h = wl_phys_h / k;
+        float buffer_factor = (float)dims.k / scale;
+        dims.wl_phys_w = (int)((phys_w * buffer_factor + 0.5f) / dims.k) * dims.k;
+        dims.wl_phys_h = (int)((phys_h * buffer_factor + 0.5f) / dims.k) * dims.k;
         
-        wlr_log(WLR_INFO, "Resize (fractional Wayland k=%d): rio %dx%d, wl_buf %dx%d, scene %dx%d",
-                k, new_w, new_h, wl_phys_w, wl_phys_h, scene_w, scene_h);
-    } else if (s->wl_scaling || scale <= 1.001f) {
-        /* Wayland scaling mode (no -S) or no scaling needed (scale <= 1) */
-        wl_phys_w = (new_w / TILE_SIZE) * TILE_SIZE;
-        wl_phys_h = (new_h / TILE_SIZE) * TILE_SIZE;
-        if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
-        if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
+        /* Align to k * TILE_SIZE */
+        dims.wl_phys_w = (dims.wl_phys_w / (dims.k * TILE_SIZE)) * dims.k * TILE_SIZE;
+        dims.wl_phys_h = (dims.wl_phys_h / (dims.k * TILE_SIZE)) * dims.k * TILE_SIZE;
+        if (dims.wl_phys_w < dims.k * TILE_SIZE * 4) 
+            dims.wl_phys_w = dims.k * TILE_SIZE * 4;
+        if (dims.wl_phys_h < dims.k * TILE_SIZE * 4) 
+            dims.wl_phys_h = dims.k * TILE_SIZE * 4;
         
-        scene_w = wl_phys_w;
-        scene_h = wl_phys_h;
+        dims.scene_w = dims.wl_phys_w / dims.k;
+        dims.scene_h = dims.wl_phys_h / dims.k;
+        dims.draw_scale = scale / (float)dims.k;
+        dims.input_scale = scale;
         
-        wlr_log(WLR_INFO, "Resize (Wayland scaling): physical %dx%d, scene %dx%d",
-                new_w, new_h, scene_w, scene_h);
+    } else if (wl_scaling || scale <= 1.001f) {
+        /* Wayland scaling or no scaling */
+        dims.mode = (scale <= 1.001f) ? SCALE_MODE_NONE : SCALE_MODE_WAYLAND;
+        
+        dims.wl_phys_w = (phys_w / TILE_SIZE) * TILE_SIZE;
+        dims.wl_phys_h = (phys_h / TILE_SIZE) * TILE_SIZE;
+        if (dims.wl_phys_w < TILE_SIZE * 4) dims.wl_phys_w = TILE_SIZE * 4;
+        if (dims.wl_phys_h < TILE_SIZE * 4) dims.wl_phys_h = TILE_SIZE * 4;
+        
+        dims.scene_w = dims.wl_phys_w;
+        dims.scene_h = dims.wl_phys_h;
+        dims.draw_scale = 1.0f;
+        dims.input_scale = 1.0f;
+        
     } else {
-        /* 9front scaling mode: compositor at logical resolution */
-        wl_phys_w = (int)(new_w / scale);
-        wl_phys_h = (int)(new_h / scale);
+        /* 9front scaling mode */
+        dims.mode = SCALE_MODE_9FRONT;
         
-        /* Align logical dimensions to tile size */
-        wl_phys_w = (wl_phys_w / TILE_SIZE) * TILE_SIZE;
-        wl_phys_h = (wl_phys_h / TILE_SIZE) * TILE_SIZE;
-        if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
-        if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
+        dims.wl_phys_w = (int)(phys_w / scale);
+        dims.wl_phys_h = (int)(phys_h / scale);
         
-        scene_w = wl_phys_w;
-        scene_h = wl_phys_h;
+        /* Align to TILE_SIZE */
+        dims.wl_phys_w = (dims.wl_phys_w / TILE_SIZE) * TILE_SIZE;
+        dims.wl_phys_h = (dims.wl_phys_h / TILE_SIZE) * TILE_SIZE;
+        if (dims.wl_phys_w < TILE_SIZE * 4) dims.wl_phys_w = TILE_SIZE * 4;
+        if (dims.wl_phys_h < TILE_SIZE * 4) dims.wl_phys_h = TILE_SIZE * 4;
         
-        wlr_log(WLR_INFO, "Resize (9front scaling): physical %dx%d, scale %.2f, logical %dx%d",
-                new_w, new_h, scale, wl_phys_w, wl_phys_h);
+        dims.scene_w = dims.wl_phys_w;
+        dims.scene_h = dims.wl_phys_h;
+        dims.dest_w = (int)(dims.wl_phys_w * scale);
+        dims.dest_h = (int)(dims.wl_phys_h * scale);
+        dims.draw_scale = scale;
+        dims.input_scale = scale;
     }
     
-    /* Allocate compositor buffers at Wayland physical resolution */
-    size_t fb_size = wl_phys_w * wl_phys_h * sizeof(uint32_t);
+    return dims;
+}
+
+/* ============== Buffer Management ============== */
+
+/*
+ * Allocate compositor framebuffers.
+ * Returns 0 on success, -1 on failure.
+ */
+static int allocate_buffers(struct server *s, int width, int height) {
+    size_t fb_size = width * height * sizeof(uint32_t);
+    
     uint32_t *new_framebuf = calloc(1, fb_size);
     uint32_t *new_prev_framebuf = calloc(1, fb_size);
     uint32_t *new_send_buf0 = calloc(1, fb_size);
     uint32_t *new_send_buf1 = calloc(1, fb_size);
     
     if (!new_framebuf || !new_prev_framebuf || !new_send_buf0 || !new_send_buf1) {
-        wlr_log(WLR_ERROR, "Resize failed: could not allocate buffers");
+        wlr_log(WLR_ERROR, "Failed to allocate buffers for %dx%d", width, height);
         free(new_framebuf);
         free(new_prev_framebuf);
         free(new_send_buf0);
         free(new_send_buf1);
-        return;
+        return -1;
     }
     
-    uint32_t *old_framebuf = s->framebuf;
-    uint32_t *old_prev_framebuf = s->prev_framebuf;
-    uint32_t *old_send_buf0, *old_send_buf1;
-    struct draw_state *draw = &s->draw;
-    
     pthread_mutex_lock(&s->send_lock);
-    old_send_buf0 = s->send_buf[0];
-    old_send_buf1 = s->send_buf[1];
+    
+    free(s->framebuf);
+    free(s->prev_framebuf);
+    free(s->send_buf[0]);
+    free(s->send_buf[1]);
     
     s->framebuf = new_framebuf;
     s->prev_framebuf = new_prev_framebuf;
@@ -124,129 +157,171 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     s->pending_buf = -1;
     s->active_buf = -1;
     
-    /* s->width, s->height = Wayland buffer dimensions */
-    s->width = wl_phys_w;
-    s->height = wl_phys_h;
-    s->tiles_x = (wl_phys_w + TILE_SIZE - 1) / TILE_SIZE;
-    s->tiles_y = (wl_phys_h + TILE_SIZE - 1) / TILE_SIZE;
-    
-    if (fractional_wl_mode) {
-        /* Fractional Wayland mode */
-        draw->logical_width = wl_phys_w;  /* Source image size */
-        draw->logical_height = wl_phys_h;
-        draw->width = new_w;              /* Destination (rio window) */
-        draw->height = new_h;
-        draw->scale = scale / (float)k;   /* Matrix = 128/(scale/k) = 128k/scale */
-        draw->input_scale = scale;        /* Mouse conversion */
-        draw->scene_width = scene_w;
-        draw->scene_height = scene_h;
-    } else if (s->wl_scaling || scale <= 1.001f) {
-        /* Regular Wayland scaling mode: no 9front scaling */
-        draw->width = wl_phys_w;
-        draw->height = wl_phys_h;
-        draw->logical_width = wl_phys_w;
-        draw->logical_height = wl_phys_h;
-        draw->scale = 1.0f;
-        draw->input_scale = 1.0f;
-        draw->scene_width = scene_w;
-        draw->scene_height = scene_h;
-    } else {
-        /* 9front scaling mode: draw->width/height = effective physical */
-        int eff_phys_w = (int)(wl_phys_w * scale);
-        int eff_phys_h = (int)(wl_phys_h * scale);
-        draw->width = eff_phys_w;
-        draw->height = eff_phys_h;
-        draw->logical_width = wl_phys_w;
-        draw->logical_height = wl_phys_h;
-        draw->scale = scale;
-        draw->input_scale = scale;
-        draw->scene_width = scene_w;
-        draw->scene_height = scene_h;
-    }
-    draw->win_minx = new_minx;
-    draw->win_miny = new_miny;
     pthread_mutex_unlock(&s->send_lock);
     
-    free(old_framebuf);
-    free(old_prev_framebuf);
-    free(old_send_buf0);
-    free(old_send_buf1);
-    
-    /* Reallocate Plan 9 images at source (Wayland buffer) resolution */
-    struct p9conn *p9 = draw->p9;
-    uint8_t freecmd[5];
-    freecmd[0] = 'f';
-    PUT32(freecmd + 1, draw->image_id);
-    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-    PUT32(freecmd + 1, draw->delta_id);
-    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-    
-    uint8_t bcmd[64];
+    wlr_log(WLR_INFO, "Allocated buffers: %dx%d", width, height);
+    return 0;
+}
+
+/* ============== Plan 9 Image Management ============== */
+
+/*
+ * Allocate a Plan 9 draw image.
+ * format: 0x68081828 for XRGB32, 0x48081828 for ARGB32
+ */
+static void p9_alloc_image(struct p9conn *p9, uint32_t fid, uint32_t image_id,
+                           int width, int height, uint32_t format) {
+    uint8_t cmd[64];
     int off = 0;
-    bcmd[off++] = 'b';
-    PUT32(bcmd + off, draw->image_id); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0x68081828); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, wl_phys_w); off += 4;
-    PUT32(bcmd + off, wl_phys_h); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, wl_phys_w); off += 4;
-    PUT32(bcmd + off, wl_phys_h); off += 4;
-    PUT32(bcmd + off, 0x00000000); off += 4;
-    p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
     
-    off = 0;
-    bcmd[off++] = 'b';
-    PUT32(bcmd + off, draw->delta_id); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0x48081828); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, wl_phys_w); off += 4;
-    PUT32(bcmd + off, wl_phys_h); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, wl_phys_w); off += 4;
-    PUT32(bcmd + off, wl_phys_h); off += 4;
-    PUT32(bcmd + off, 0x00000000); off += 4;
-    p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+    cmd[off++] = 'b';
+    PUT32(cmd + off, image_id); off += 4;
+    PUT32(cmd + off, 0); off += 4;           /* screen id */
+    cmd[off++] = 0;                          /* refresh */
+    PUT32(cmd + off, format); off += 4;      /* channel format */
+    cmd[off++] = 0;                          /* repl */
+    PUT32(cmd + off, 0); off += 4;           /* r.min.x */
+    PUT32(cmd + off, 0); off += 4;           /* r.min.y */
+    PUT32(cmd + off, width); off += 4;       /* r.max.x */
+    PUT32(cmd + off, height); off += 4;      /* r.max.y */
+    PUT32(cmd + off, 0); off += 4;           /* clipr.min.x */
+    PUT32(cmd + off, 0); off += 4;           /* clipr.min.y */
+    PUT32(cmd + off, width); off += 4;       /* clipr.max.x */
+    PUT32(cmd + off, height); off += 4;      /* clipr.max.y */
+    PUT32(cmd + off, 0x00000000); off += 4;  /* value (background) */
     
-    /* Resize wlroots output */
+    p9_write(p9, fid, 0, cmd, off);
+}
+
+/*
+ * Free a Plan 9 draw image.
+ */
+static void p9_free_image(struct p9conn *p9, uint32_t fid, uint32_t image_id) {
+    uint8_t cmd[5];
+    cmd[0] = 'f';
+    PUT32(cmd + 1, image_id);
+    p9_write(p9, fid, 0, cmd, 5);
+}
+
+/*
+ * Reallocate Plan 9 images at new dimensions.
+ */
+static void reallocate_p9_images(struct draw_state *draw, int width, int height) {
+    struct p9conn *p9 = draw->p9;
+    uint32_t fid = draw->drawdata_fid;
+    
+    /* Free old images */
+    p9_free_image(p9, fid, draw->image_id);
+    p9_free_image(p9, fid, draw->delta_id);
+    
+    /* Allocate new images */
+    p9_alloc_image(p9, fid, draw->image_id, width, height, 0x68081828);  /* XRGB32 */
+    p9_alloc_image(p9, fid, draw->delta_id, width, height, 0x48081828);  /* ARGB32 */
+    
+    wlr_log(WLR_INFO, "Reallocated 9front images: %dx%d", width, height);
+}
+
+/* ============== Draw State Update ============== */
+
+/*
+ * Update draw_state and server dimensions from computed output dims.
+ */
+static void update_state(struct server *s, const struct output_dims *dims,
+                         int win_minx, int win_miny) {
+    struct draw_state *draw = &s->draw;
+    
+    s->width = dims->wl_phys_w;
+    s->height = dims->wl_phys_h;
+    s->tiles_x = (dims->wl_phys_w + TILE_SIZE - 1) / TILE_SIZE;
+    s->tiles_y = (dims->wl_phys_h + TILE_SIZE - 1) / TILE_SIZE;
+    
+    draw->logical_width = dims->wl_phys_w;
+    draw->logical_height = dims->wl_phys_h;
+    draw->width = dims->dest_w;
+    draw->height = dims->dest_h;
+    draw->scale = dims->draw_scale;
+    draw->input_scale = dims->input_scale;
+    draw->scene_width = dims->scene_w;
+    draw->scene_height = dims->scene_h;
+    draw->win_minx = win_minx;
+    draw->win_miny = win_miny;
+}
+
+/* ============== Output State Helpers ============== */
+
+/*
+ * Configure wlroots output state for given dimensions.
+ */
+static void configure_output_state(struct wlr_output_state *state,
+                                   const struct output_dims *dims,
+                                   int set_enabled) {
+    wlr_output_state_init(state);
+    
+    if (set_enabled) {
+        wlr_output_state_set_enabled(state, true);
+    }
+    
+    wlr_output_state_set_custom_mode(state, dims->wl_phys_w, dims->wl_phys_h,
+                                     set_enabled ? 60000 : 0);
+    
+    if (dims->mode == SCALE_MODE_FRACTIONAL_WL) {
+        wlr_output_state_set_scale(state, (float)dims->k);
+    }
+}
+
+/* ============== Resize Handler ============== */
+
+void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new_miny) {
+    wlr_log(WLR_INFO, "handle_resize: %dx%d -> %dx%d at (%d,%d)", 
+            s->draw.width, s->draw.height, new_w, new_h, new_minx, new_miny);
+    
+    struct output_dims dims = compute_dimensions(new_w, new_h, s->scale, s->wl_scaling);
+    
+    wlr_log(WLR_INFO, "Resize mode=%d: rio %dx%d, wl_buf %dx%d, scene %dx%d",
+            dims.mode, new_w, new_h, dims.wl_phys_w, dims.wl_phys_h, 
+            dims.scene_w, dims.scene_h);
+    
+    /* Allocate compositor buffers */
+    if (allocate_buffers(s, dims.wl_phys_w, dims.wl_phys_h) < 0) {
+        return;
+    }
+    
+    /* Update state */
+    pthread_mutex_lock(&s->send_lock);
+    update_state(s, &dims, new_minx, new_miny);
+    pthread_mutex_unlock(&s->send_lock);
+    
+    /* Reallocate Plan 9 images */
+    reallocate_p9_images(&s->draw, dims.wl_phys_w, dims.wl_phys_h);
+    
+    /* Configure wlroots output */
     struct wlr_output_state state;
-    wlr_output_state_init(&state);
-    wlr_output_state_set_custom_mode(&state, wl_phys_w, wl_phys_h, 0);
-    if (fractional_wl_mode) {
-        wlr_output_state_set_scale(&state, k);
-    } 
+    configure_output_state(&state, &dims, 0);
     wlr_output_commit_state(s->output, &state);
     wlr_output_state_finish(&state);
     
-    /* Send configure to all toplevels */
+    /* Reconfigure toplevels */
     struct toplevel *tl;
     wl_list_for_each(tl, &s->toplevels, link) {
         if (tl->xdg && tl->xdg->base && tl->xdg->base->initialized) {
-            wlr_xdg_toplevel_set_size(tl->xdg, scene_w, scene_h);
+            wlr_xdg_toplevel_set_size(tl->xdg, dims.scene_w, dims.scene_h);
         }
     }
     
-    /* Resize background (scene uses logical coordinates) */
+    /* Resize background */
     if (s->background) {
-        wlr_scene_rect_set_size(s->background, scene_w, scene_h);
+        wlr_scene_rect_set_size(s->background, dims.scene_w, dims.scene_h);
     }
     
-    draw->xor_enabled = 0;
+    s->draw.xor_enabled = 0;
     s->force_full_frame = 1;
     
-    wlr_log(WLR_INFO, "Resize complete: rio %dx%d, wl_buf %dx%d, scene %dx%d at (%d,%d)", 
-            new_w, new_h, wl_phys_w, wl_phys_h, scene_w, scene_h, new_minx, new_miny);
+    wlr_log(WLR_INFO, "Resize complete: wl_buf %dx%d, scene %dx%d at (%d,%d)", 
+            dims.wl_phys_w, dims.wl_phys_h, dims.scene_w, dims.scene_h, 
+            new_minx, new_miny);
 }
+
+/* ============== Frame Handler ============== */
 
 static void output_destroy(struct wl_listener *listener, void *data) {
     struct server *s = wl_container_of(listener, s, output_destroy);
@@ -262,7 +337,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
     static uint32_t last_first_pixel = 0;
     (void)data;
     
-    /* Check if window was resized - read atomically under lock */
+    /* Check for pending resize */
     pthread_mutex_lock(&s->send_lock);
     int resize_pending = s->resize_pending;
     int new_w = s->pending_width;
@@ -276,11 +351,10 @@ static void output_frame(struct wl_listener *listener, void *data) {
     
     if (resize_pending) {
         if (new_w == s->draw.width && new_h == s->draw.height) {
-            struct draw_state *draw = &s->draw;
-            draw->win_minx = new_minx;
-            draw->win_miny = new_miny;
+            s->draw.win_minx = new_minx;
+            s->draw.win_miny = new_miny;
             s->force_full_frame = 1;
-            wlr_log(WLR_DEBUG, "Position update only: (%d,%d), forcing full frame", new_minx, new_miny);
+            wlr_log(WLR_DEBUG, "Position update only: (%d,%d)", new_minx, new_miny);
         } else {
             handle_resize(s, new_w, new_h, new_minx, new_miny);
         }
@@ -375,6 +449,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
     send_frame(s);
 }
 
+/* ============== New Output Handler ============== */
+
 void new_output(struct wl_listener *l, void *d) {
     struct server *s = wl_container_of(l, s, new_output);
     struct wlr_output *out = d;
@@ -387,377 +463,60 @@ void new_output(struct wl_listener *l, void *d) {
     int phys_w = s->width;
     int phys_h = s->height;
     
-    /*
-     * Three scaling modes:
-     * 
-     * 1. 9front scaling (s->wl_scaling == 0):
-     *    - Compositor renders at LOGICAL resolution (physical / scale)
-     *    - 9front 'a' command scales to physical window
-     *    - Lower bandwidth, quality depends on 9front bilinear interpolation
-     *
-     * 2. Fractional Wayland scaling (s->wl_scaling == 1 with scale > 1):
-     *    - For scale x where k-1 < x <= k (k = ceil(x)):
-     *    - Wayland output scale = k (integer)
-     *    - Compositor renders at (k/x) * physical resolution
-     *    - Scene/logical = physical / x (what apps see)
-     *    - 9front 'a' command downscales by k/x to fit window
-     *    - Good balance of quality and bandwidth for any fractional scale
-     */
+    struct output_dims dims = compute_dimensions(phys_w, phys_h, scale, s->wl_scaling);
     
-    /* Fractional Wayland mode with scale > 1 */
-    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f); 
-    int k = (int)ceilf(scale);  /* Integer output scale (ceiling of user scale) */
+    const char *mode_names[] = {"none", "wayland", "fractional_wl", "9front"};
+    wlr_log(WLR_INFO, "new_output: mode=%s scale=%.2f k=%d",
+            mode_names[dims.mode], scale, dims.k);
+    wlr_log(WLR_INFO, "  rio: %dx%d, wl_buf: %dx%d, scene: %dx%d",
+            phys_w, phys_h, dims.wl_phys_w, dims.wl_phys_h, 
+            dims.scene_w, dims.scene_h);
     
-    if (fractional_wl_mode) {
-        /* Fractional Wayland scaling mode */
-        wlr_log(WLR_INFO, "Using fractional Wayland scaling (scale=%.2f, output_scale=%d)", scale, k);
-        
-        /* Wayland buffer dimensions = (k/scale) * physical */
-        float buffer_factor = (float)k / scale;
-        int wl_phys_w = (int)(phys_w * buffer_factor + 0.5f);
-        int wl_phys_h = (int)(phys_h * buffer_factor + 0.5f);
-        
-        /* Align to tile size */
-        wl_phys_w = (wl_phys_w / (k * TILE_SIZE)) * (k * TILE_SIZE);
-        wl_phys_h = (wl_phys_h / (k * TILE_SIZE)) * (k * TILE_SIZE);
-        if (wl_phys_w < k * TILE_SIZE * 4) wl_phys_w = k * TILE_SIZE * 4;
-        if (wl_phys_h < k * TILE_SIZE * 4) wl_phys_h = k * TILE_SIZE * 4;
-        
-        /* Scene/logical dims = wl_phys / k = phys / scale (what apps see) */
-        int scene_w = wl_phys_w / k;
-        int scene_h = wl_phys_h / k;
-        
-        struct wlr_output_state state;
-        wlr_output_state_init(&state);
-        wlr_output_state_set_enabled(&state, true);
-        wlr_output_state_set_custom_mode(&state, wl_phys_w, wl_phys_h, 60000);
-        wlr_output_state_set_scale(&state, (float)k);
-        wlr_output_commit_state(out, &state);
-        wlr_output_state_finish(&state);
-        
-        wlr_output_layout_add_auto(s->output_layout, out);
-        s->output = out;
-        s->scene_output = wlr_scene_output_create(s->scene, out);
-        
-        s->output_frame.notify = output_frame;
-        wl_signal_add(&out->events.frame, &s->output_frame);
-        s->output_destroy.notify = output_destroy;
-        wl_signal_add(&out->events.destroy, &s->output_destroy);
-        
-        /* Reallocate buffers at Wayland physical resolution */
-        size_t fb_size = wl_phys_w * wl_phys_h * sizeof(uint32_t);
-        uint32_t *new_framebuf = calloc(1, fb_size);
-        uint32_t *new_prev_framebuf = calloc(1, fb_size);
-        uint32_t *new_send_buf0 = calloc(1, fb_size);
-        uint32_t *new_send_buf1 = calloc(1, fb_size);
-        
-        if (new_framebuf && new_prev_framebuf && new_send_buf0 && new_send_buf1) {
-            pthread_mutex_lock(&s->send_lock);
-            free(s->framebuf);
-            free(s->prev_framebuf);
-            free(s->send_buf[0]);
-            free(s->send_buf[1]);
-            s->framebuf = new_framebuf;
-            s->prev_framebuf = new_prev_framebuf;
-            s->send_buf[0] = new_send_buf0;
-            s->send_buf[1] = new_send_buf1;
-            s->pending_buf = -1;
-            s->active_buf = -1;
-            pthread_mutex_unlock(&s->send_lock);
-            
-            wlr_log(WLR_INFO, "Reallocated buffers: %dx%d rio -> %dx%d Wayland",
-                    phys_w, phys_h, wl_phys_w, wl_phys_h);
-            
-            /* Reallocate 9front source image at Wayland physical resolution */
-            struct draw_state *draw = &s->draw;
-            struct p9conn *p9 = draw->p9;
-            
-            /* Free old images */
-            uint8_t freecmd[5];
-            freecmd[0] = 'f';
-            PUT32(freecmd + 1, draw->image_id);
-            p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-            PUT32(freecmd + 1, draw->delta_id);
-            p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-            
-            /* Allocate new source image at Wayland physical resolution */
-            uint8_t bcmd[64];
-            int off = 0;
-            bcmd[off++] = 'b';
-            PUT32(bcmd + off, draw->image_id); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            bcmd[off++] = 0;
-            PUT32(bcmd + off, 0x68081828); off += 4;  /* XRGB32 */
-            bcmd[off++] = 0;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, wl_phys_w); off += 4;
-            PUT32(bcmd + off, wl_phys_h); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, wl_phys_w); off += 4;
-            PUT32(bcmd + off, wl_phys_h); off += 4;
-            PUT32(bcmd + off, 0x00000000); off += 4;
-            p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-            
-            /* Allocate delta image */
-            off = 0;
-            bcmd[off++] = 'b';
-            PUT32(bcmd + off, draw->delta_id); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            bcmd[off++] = 0;
-            PUT32(bcmd + off, 0x48081828); off += 4;  /* ARGB32 */
-            bcmd[off++] = 0;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, wl_phys_w); off += 4;
-            PUT32(bcmd + off, wl_phys_h); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, 0); off += 4;
-            PUT32(bcmd + off, wl_phys_w); off += 4;
-            PUT32(bcmd + off, wl_phys_h); off += 4;
-            PUT32(bcmd + off, 0x00000000); off += 4;
-            p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-            
-            wlr_log(WLR_INFO, "Reallocated 9front images at %dx%d (Wayland physical)", 
-                    wl_phys_w, wl_phys_h);
-        } else {
-            wlr_log(WLR_ERROR, "Failed to reallocate buffers for fractional Wayland mode");
-            free(new_framebuf);
-            free(new_prev_framebuf);
-            free(new_send_buf0);
-            free(new_send_buf1);
-        }
-        
-        /* s->width/height = Wayland physical (compositor buffer size) */
-        s->width = wl_phys_w;
-        s->height = wl_phys_h;
-        s->tiles_x = (wl_phys_w + TILE_SIZE - 1) / TILE_SIZE;
-        s->tiles_y = (wl_phys_h + TILE_SIZE - 1) / TILE_SIZE;
-        
-        /* draw->logical_width/height = source image size (Wayland physical) */
-        s->draw.logical_width = wl_phys_w;
-        s->draw.logical_height = wl_phys_h;
-        
-        /* draw->width/height = destination size (rio window physical) */
-        s->draw.width = phys_w;
-        s->draw.height = phys_h;
-        
-        /* draw->scale = scale/k so that matrix = 128/(scale/k) = 128k/scale
-         * This downscales from Wayland physical to rio physical */
-        s->draw.scale = scale / (float)k;
-        
-        /* input_scale = user's scale for mouse coordinate conversion
-         * Mouse physical (rio) -> cursor position (scene logical = rio/scale) */
-        s->draw.input_scale = scale;
-        
-        /* Scene dimensions = what Wayland apps see */
-        s->draw.scene_width = scene_w;
-        s->draw.scene_height = scene_h;
-        
-        /* Resize background to scene dimensions */
-        if (s->background) {
-            wlr_scene_rect_set_size(s->background, scene_w, scene_h);
-        }
-        
-        wlr_log(WLR_INFO, "Fractional Wayland mode ready: rio %dx%d, wl_buf %dx%d, scene %dx%d, "
-                "output_scale=%d, draw_scale=%.3f, input_scale=%.2f",
-                phys_w, phys_h, wl_phys_w, wl_phys_h, scene_w, scene_h,
-                k, s->draw.scale, s->draw.input_scale);
-        
-        /* Trigger first frame */
-        s->force_full_frame = 1;
-        s->frame_dirty = 1;
-        return;
-    }
-    
-    if (s->wl_scaling || scale <= 1.001f) {
-        /* Wayland scaling mode (no -S) or no scaling needed (scale <= 1) */
-        wlr_log(WLR_INFO, "Using Wayland-side scaling (scale=%.2f)", scale);
-        
-        struct wlr_output_state state;
-        wlr_output_state_init(&state);
-        wlr_output_state_set_enabled(&state, true);
-        wlr_output_state_set_custom_mode(&state, phys_w, phys_h, 60000);
-        /* No output scale needed - fractional scaling handles scale > 1 */
-        wlr_output_commit_state(out, &state);
-        wlr_output_state_finish(&state);
-        
-        wlr_output_layout_add_auto(s->output_layout, out);
-        s->output = out;
-        s->scene_output = wlr_scene_output_create(s->scene, out);
-        
-        s->output_frame.notify = output_frame;
-        wl_signal_add(&out->events.frame, &s->output_frame);
-        s->output_destroy.notify = output_destroy;
-        wl_signal_add(&out->events.destroy, &s->output_destroy);
-        
-        /* No 9front scaling needed */
-        s->draw.logical_width = phys_w;
-        s->draw.logical_height = phys_h;
-        s->draw.scale = 1.0f;
-        s->draw.input_scale = 1.0f;
-        s->draw.scene_width = phys_w;
-        s->draw.scene_height = phys_h;
-        
-        wlr_log(WLR_INFO, "Output ready: %dx%d", phys_w, phys_h);
-        
-        /* Now that everything is set up correctly, trigger first frame */
-        s->force_full_frame = 1;
-        s->frame_dirty = 1;
-        return;
-    }
-    
-    /* 9front scaling mode */
-    wlr_log(WLR_INFO, "Using 9front-side scaling (scale=%.2f)", scale);
-    
-    int logical_w = (int)(phys_w / scale);
-    int logical_h = (int)(phys_h / scale);
-    
-    /* Align to tile size */
-    logical_w = (logical_w / TILE_SIZE) * TILE_SIZE;
-    logical_h = (logical_h / TILE_SIZE) * TILE_SIZE;
-    if (logical_w < TILE_SIZE * 4) logical_w = TILE_SIZE * 4;
-    if (logical_h < TILE_SIZE * 4) logical_h = TILE_SIZE * 4;
-    
-    /* Set wlroots output to LOGICAL dimensions.
-     * Do NOT use wlr_output_state_set_scale() - we handle scaling in 9front.
-     */
+    /* Configure and commit output */
     struct wlr_output_state state;
-    wlr_output_state_init(&state);
-    wlr_output_state_set_enabled(&state, true);
-    wlr_output_state_set_custom_mode(&state, logical_w, logical_h, 60000);
+    configure_output_state(&state, &dims, 1);
     wlr_output_commit_state(out, &state);
     wlr_output_state_finish(&state);
     
+    /* Setup output in layout */
     wlr_output_layout_add_auto(s->output_layout, out);
     s->output = out;
     s->scene_output = wlr_scene_output_create(s->scene, out);
     
+    /* Setup listeners */
     s->output_frame.notify = output_frame;
     wl_signal_add(&out->events.frame, &s->output_frame);
     s->output_destroy.notify = output_destroy;
     wl_signal_add(&out->events.destroy, &s->output_destroy);
     
-    /* Reallocate buffers at logical resolution */
-    size_t fb_size = logical_w * logical_h * sizeof(uint32_t);
-    uint32_t *new_framebuf = calloc(1, fb_size);
-    uint32_t *new_prev_framebuf = calloc(1, fb_size);
-    uint32_t *new_send_buf0 = calloc(1, fb_size);
-    uint32_t *new_send_buf1 = calloc(1, fb_size);
-    
-    if (new_framebuf && new_prev_framebuf && new_send_buf0 && new_send_buf1) {
-        pthread_mutex_lock(&s->send_lock);
-        free(s->framebuf);
-        free(s->prev_framebuf);
-        free(s->send_buf[0]);
-        free(s->send_buf[1]);
-        s->framebuf = new_framebuf;
-        s->prev_framebuf = new_prev_framebuf;
-        s->send_buf[0] = new_send_buf0;
-        s->send_buf[1] = new_send_buf1;
-        s->pending_buf = -1;
-        s->active_buf = -1;
-        pthread_mutex_unlock(&s->send_lock);
-        
-        wlr_log(WLR_INFO, "Reallocated buffers: %dx%d -> %dx%d for logical resolution",
-                phys_w, phys_h, logical_w, logical_h);
-        
-        /* Reallocate 9front source image at logical resolution */
-        struct draw_state *draw = &s->draw;
-        struct p9conn *p9 = draw->p9;
-        
-        /* Free old images */
-        uint8_t freecmd[5];
-        freecmd[0] = 'f';
-        PUT32(freecmd + 1, draw->image_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        PUT32(freecmd + 1, draw->delta_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        
-        /* Allocate new image at logical resolution */
-        uint8_t bcmd[64];
-        int off = 0;
-        bcmd[off++] = 'b';
-        PUT32(bcmd + off, draw->image_id); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0x68081828); off += 4;  /* XRGB32 */
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, logical_w); off += 4;
-        PUT32(bcmd + off, logical_h); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, logical_w); off += 4;
-        PUT32(bcmd + off, logical_h); off += 4;
-        PUT32(bcmd + off, 0x00000000); off += 4;
-        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-        
-        /* Allocate delta image at logical resolution */
-        off = 0;
-        bcmd[off++] = 'b';
-        PUT32(bcmd + off, draw->delta_id); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0x48081828); off += 4;  /* ARGB32 */
-        bcmd[off++] = 0;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, logical_w); off += 4;
-        PUT32(bcmd + off, logical_h); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, 0); off += 4;
-        PUT32(bcmd + off, logical_w); off += 4;
-        PUT32(bcmd + off, logical_h); off += 4;
-        PUT32(bcmd + off, 0x00000000); off += 4;
-        p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-        
-        wlr_log(WLR_INFO, "Reallocated 9front images at %dx%d logical", 
-                logical_w, logical_h);
-    } else {
-        wlr_log(WLR_ERROR, "Failed to reallocate buffers for logical resolution");
-        free(new_framebuf);
-        free(new_prev_framebuf);
-        free(new_send_buf0);
-        free(new_send_buf1);
+    /* Allocate buffers */
+    if (allocate_buffers(s, dims.wl_phys_w, dims.wl_phys_h) < 0) {
+        wlr_log(WLR_ERROR, "Failed to allocate buffers for new output");
+        return;
     }
     
-    /* Update s->width/height to logical (compositor operates at logical resolution) */
-    s->width = logical_w;
-    s->height = logical_h;
-    s->tiles_x = (logical_w + TILE_SIZE - 1) / TILE_SIZE;
-    s->tiles_y = (logical_h + TILE_SIZE - 1) / TILE_SIZE;
+    /* Reallocate Plan 9 images */
+    reallocate_p9_images(&s->draw, dims.wl_phys_w, dims.wl_phys_h);
     
-    /* Update draw state.
-     * draw->width/height must be the "effective physical" = logical * scale.
-     * This ensures the 'a' command's dest rect R exactly matches the scaled source.
-     * The gap between effective physical and actual window is filled by borders.
-     */
-    int eff_phys_w = (int)(logical_w * scale);
-    int eff_phys_h = (int)(logical_h * scale);
-    s->draw.width = eff_phys_w;
-    s->draw.height = eff_phys_h;
-    s->draw.logical_width = logical_w;
-    s->draw.logical_height = logical_h;
-    s->draw.scale = scale;
-    s->draw.input_scale = scale;  /* Mouse coord conversion uses same scale */
-    s->draw.scene_width = logical_w;   /* Scene = logical in 9front mode */
-    s->draw.scene_height = logical_h;
+    /* Update state */
+    update_state(s, &dims, s->draw.win_minx, s->draw.win_miny);
     
-    /* Resize background to logical dimensions */
+    /* Resize background */
     if (s->background) {
-        wlr_scene_rect_set_size(s->background, logical_w, logical_h);
+        wlr_scene_rect_set_size(s->background, dims.scene_w, dims.scene_h);
     }
     
-    wlr_log(WLR_INFO, "Output ready: %dx%d actual, %dx%d effective physical, scale=%.2f, %dx%d logical (9front scales)",
-            phys_w, phys_h, eff_phys_w, eff_phys_h, scale, logical_w, logical_h);
+    wlr_log(WLR_INFO, "Output ready: wl_buf %dx%d, scene %dx%d, "
+            "draw_scale=%.3f, input_scale=%.2f",
+            dims.wl_phys_w, dims.wl_phys_h, dims.scene_w, dims.scene_h,
+            dims.draw_scale, dims.input_scale);
     
-    /* Now that everything is set up correctly, trigger first frame */
+    /* Trigger first frame */
     s->force_full_frame = 1;
     s->frame_dirty = 1;
 }
+
+/* ============== Input Handler ============== */
 
 void new_input(struct wl_listener *l, void *d) {
     struct server *s = wl_container_of(l, s, new_input);
