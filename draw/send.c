@@ -543,7 +543,8 @@ void *send_thread_func(void *arg) {
         }
         
         /* Throttle if too many writes pending */
-        drain_throttle(2);
+        /* Prevents being overwhelmed e.g during videos */
+        drain_throttle(32); 
         
         /* Second pass: build batches from results */
         for (int i = 0; i < work_count; i++) {
@@ -721,7 +722,7 @@ void *send_thread_func(void *arg) {
             if (scale <= 0.0f) scale = 1.0f;
             
             /* Matrix diagonal in 25.7 fixed-point: 1/scale * 128 */
-            int matrix_scale = (int)(128.0f / scale + 0.5f);
+            int matrix_scale = (int)(128.0f / scale);
             
             /* smooth=1 enables bilinear interpolation.
              * Enable for fractional scaling (scale != 1.0) to prevent aliasing.

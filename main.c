@@ -49,6 +49,7 @@
 #include "draw/draw.h"
 #include "draw/send.h"
 #include "wayland/wayland.h"
+#include "input/kbmap.h"
 
 static void print_usage(const char *prog) {
     fprintf(stderr, "Usage: %s [options] <host>[:<port>] [command [args...]]\n", prog);
@@ -483,6 +484,21 @@ int main(int argc, char *argv[]) {
         if (using_tls) tls_cleanup();
         return 1;
     }
+
+    /*
+     * Load dynamic keyboard map from /dev/kbmap.
+     *
+     * This reads the 9front keyboard layout and builds a rune→keycode
+     * mapping. Without this, keymap_lookup_dynamic() always falls back
+     * to the static US-layout keymap table.
+     *
+     * We use p9_draw since it's already connected to /dev. If this fails,
+     * we fall back gracefully to the static keymap - non-fatal.
+     */
+    if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {
+        wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
+    }
+
 
     /* Set dimensions from draw device.
      * Use physical dimensions initially - new_output() will reconfigure
