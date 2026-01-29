@@ -6,8 +6,8 @@
  * Uses FFT-based phase correlation for motion detection.
  *
  * With integer output scaling (k = ceil(scale)), scroll offsets are
- * guaranteed to be multiples of k, so we only need to test offsets
- * of 0, +k, -k around the FFT-detected position.
+ * guaranteed to be multiples of k. The FFT with k-based downsampling
+ * directly returns the correct k-aligned offset - no refinement needed.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -49,17 +49,11 @@ static inline double get_time_us(void) {
     return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
 }
 
-/* Result of computing scroll cost for a given dx/dy */
-struct scroll_cost_result {
-    int bytes_with_scroll;
-    int tiles_identical_with;
-};
-
 /*
- * Quick count of identical tiles for a scroll offset (no compression).
- * Used for fast pre-filtering before expensive full compression.
+ * Count identical tiles for a scroll offset.
+ * Used to quickly verify if scroll provides benefit.
  */
-static int quick_count_identical(
+static int count_identical_tiles(
     struct server *s,
     uint32_t *send_buf,
     uint32_t *prev_buf,
@@ -154,156 +148,11 @@ static int quick_count_identical(
 }
 
 /*
- * Compute compression cost for a given scroll offset (dx, dy).
- * Returns the total bytes needed if this scroll is applied.
- */
-static struct scroll_cost_result compute_scroll_cost(
-    struct server *s,
-    uint32_t *send_buf,
-    uint32_t *prev_buf,
-    int rx1, int ry1, int rx2, int ry2,
-    int dx, int dy)
-{
-    struct scroll_cost_result result = {0, 0};
-    int width = s->width;
-    int abs_dx = dx < 0 ? -dx : dx;
-    int abs_dy = dy < 0 ? -dy : dy;
-    uint8_t comp_buf[TILE_SIZE * TILE_SIZE * 4 + 256];
-    
-    int tx1 = rx1 / TILE_SIZE;
-    int ty1 = ry1 / TILE_SIZE;
-    int tx2 = rx2 / TILE_SIZE;
-    int ty2 = ry2 / TILE_SIZE;
-    
-    /* Compute src/dst exactly as send_scroll_commands does */
-    int dst_x1 = rx1, dst_x2 = rx2;
-    int dst_y1, dst_y2;
-    
-    if (dy < 0) {
-        dst_y1 = ry1;
-        dst_y2 = ry2 - abs_dy;
-    } else if (dy > 0) {
-        dst_y1 = ry1 + abs_dy;
-        dst_y2 = ry2;
-    } else {
-        dst_y1 = ry1;
-        dst_y2 = ry2;
-    }
-    
-    if (dx < 0) {
-        dst_x1 = rx1;
-        dst_x2 = rx2 - abs_dx;
-    } else if (dx > 0) {
-        dst_x1 = rx1 + abs_dx;
-        dst_x2 = rx2;
-    }
-    
-    /* Compute tile-aligned exposed boundaries EXACTLY as send_scroll_commands does */
-    int exposed_x1 = 0, exposed_x2 = 0;
-    int exposed_y1 = 0, exposed_y2 = 0;
-    
-    if (dy < 0) {
-        exposed_y1 = (dst_y2 / TILE_SIZE) * TILE_SIZE;
-        exposed_y2 = ry2;
-    } else if (dy > 0) {
-        exposed_y1 = ry1;
-        exposed_y2 = ((dst_y1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    }
-    
-    if (dx < 0) {
-        exposed_x1 = (dst_x2 / TILE_SIZE) * TILE_SIZE;
-        exposed_x2 = rx2;
-    } else if (dx > 0) {
-        exposed_x1 = rx1;
-        exposed_x2 = ((dst_x1 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-    }
-    
-    for (int ty = ty1; ty < ty2; ty++) {
-        for (int tx = tx1; tx < tx2; tx++) {
-            int x1 = tx * TILE_SIZE;
-            int y1 = ty * TILE_SIZE;
-            
-            /* Skip tiles that extend past frame boundaries */
-            if (x1 + TILE_SIZE > s->width || y1 + TILE_SIZE > s->height) continue;
-            
-            /* Check with scroll */
-            int src_x1 = x1 - dx;
-            int src_y1 = y1 - dy;
-            
-            /* Check if tile falls in exposed region after blit */
-            int in_exposed = 0;
-            if (dy != 0 && y1 >= exposed_y1 && y1 < exposed_y2) in_exposed = 1;
-            if (dx != 0 && x1 >= exposed_x1 && x1 < exposed_x2) in_exposed = 1;
-            
-            if (!in_exposed && src_x1 >= 0 && src_y1 >= 0 && 
-                src_x1 + TILE_SIZE <= s->width && src_y1 + TILE_SIZE <= s->height) {
-                
-                /* Check if tile is identical with scroll */
-                int identical_with = 1;
-                for (int row = 0; row < TILE_SIZE && identical_with; row++) {
-                    if (memcmp(&send_buf[(y1 + row) * width + x1],
-                               &prev_buf[(src_y1 + row) * width + src_x1],
-                               TILE_SIZE * sizeof(uint32_t)) != 0) {
-                        identical_with = 0;
-                    }
-                }
-                
-                if (!identical_with) {
-                    /* Copy current tile too, since compress uses x1,y1 offsets */
-                    uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
-                    uint32_t shifted[TILE_SIZE * TILE_SIZE];
-                    for (int row = 0; row < TILE_SIZE; row++) {
-                        memcpy(&curr_tile[row * TILE_SIZE],
-                               &send_buf[(y1 + row) * width + x1],
-                               TILE_SIZE * sizeof(uint32_t));
-                        memcpy(&shifted[row * TILE_SIZE],
-                               &prev_buf[(src_y1 + row) * width + src_x1],
-                               TILE_SIZE * sizeof(uint32_t));
-                    }
-                    int size_with = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
-                                                           curr_tile, TILE_SIZE,
-                                                           shifted, TILE_SIZE,
-                                                           0, 0, TILE_SIZE, TILE_SIZE);
-                    if (size_with < 0) size_with = -size_with;
-                    if (size_with == 0) size_with = TILE_SIZE * TILE_SIZE * 4;
-                    result.bytes_with_scroll += size_with;
-                } else {
-                    result.tiles_identical_with++;
-                }
-            } else {
-                /* Exposed area - compress against original prev_buf for fair delta estimate */
-                uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
-                uint32_t prev_tile[TILE_SIZE * TILE_SIZE];
-                for (int row = 0; row < TILE_SIZE; row++) {
-                    memcpy(&curr_tile[row * TILE_SIZE],
-                           &send_buf[(y1 + row) * width + x1],
-                           TILE_SIZE * sizeof(uint32_t));
-                    memcpy(&prev_tile[row * TILE_SIZE],
-                           &prev_buf[(y1 + row) * width + x1],
-                           TILE_SIZE * sizeof(uint32_t));
-                }
-                int size_exp = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
-                                                       curr_tile, TILE_SIZE,
-                                                       prev_tile, TILE_SIZE,
-                                                       0, 0, TILE_SIZE, TILE_SIZE);
-                if (size_exp < 0) size_exp = -size_exp;
-                if (size_exp == 0) size_exp = TILE_SIZE * TILE_SIZE * 4;
-                result.bytes_with_scroll += size_exp;
-            }
-        }
-    }
-    
-    return result;
-}
-
-/*
  * Process a single scroll region (called from thread pool workers).
- * Uses compression comparison to verify scroll benefit.
  *
  * With integer output scaling k = ceil(scale), scroll offsets are
- * guaranteed to be multiples of k. We only test:
- *   - The FFT-detected offset (already k-aligned from phase correlation)
- *   - ±k from the detected offset (to handle FFT quantization)
+ * multiples of k. The FFT with k-based downsampling directly returns
+ * the correct k-aligned offset - just validate it saves bytes.
  */
 static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     struct scroll_work *work = user_data;
@@ -337,23 +186,21 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     
     if (result.dx == 0 && result.dy == 0) return;
     
-    int base_dx = result.dx;
-    int base_dy = result.dy;
+    int dx = result.dx;
+    int dy = result.dy;
     
     /* Reject scroll at boundaries - likely aliasing artifact */
-    int abs_dx = base_dx < 0 ? -base_dx : base_dx;
-    int abs_dy = base_dy < 0 ? -base_dy : base_dy;
+    int abs_dx = dx < 0 ? -dx : dx;
+    int abs_dy = dy < 0 ? -dy : dy;
     if (abs_dx >= max_scroll_x || abs_dy >= max_scroll_y) {
         return;
     }
     
     wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d (k=%d)", 
-            reg_idx, base_dx, base_dy, k);
+            reg_idx, dx, dy, k);
     
-    /* Compute bytes without scroll (baseline) */
-    int bytes_no_scroll = 0;
+    /* Count identical tiles without scroll (baseline) */
     int tiles_identical_no = 0;
-    uint8_t comp_buf[TILE_SIZE * TILE_SIZE * 4 + 256];
     
     int tx1 = rx1 / TILE_SIZE;
     int ty1 = ry1 / TILE_SIZE;
@@ -365,165 +212,37 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
             int x1 = tx * TILE_SIZE;
             int y1 = ty * TILE_SIZE;
             
-            /* Skip tiles that extend past frame boundaries */
             if (x1 + TILE_SIZE > s->width || y1 + TILE_SIZE > s->height) continue;
             
-            /* Check if tile is identical without scroll */
-            int identical_no = 1;
-            for (int row = 0; row < TILE_SIZE && identical_no; row++) {
+            int identical = 1;
+            for (int row = 0; row < TILE_SIZE && identical; row++) {
                 if (memcmp(&send_buf[(y1 + row) * width + x1],
                            &prev_buf[(y1 + row) * width + x1],
                            TILE_SIZE * sizeof(uint32_t)) != 0) {
-                    identical_no = 0;
+                    identical = 0;
                 }
             }
-            
-            if (!identical_no) {
-                int size_no = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
-                                                     send_buf, width,
-                                                     prev_buf, width,
-                                                     x1, y1, TILE_SIZE, TILE_SIZE);
-                if (size_no < 0) size_no = -size_no;
-                if (size_no == 0) size_no = TILE_SIZE * TILE_SIZE * 4;  /* compression failed */
-                bytes_no_scroll += size_no;
-            } else {
-                tiles_identical_no++;
-            }
+            if (identical) tiles_identical_no++;
         }
     }
     
-    /* If nothing changed, scroll can't help */
-    if (bytes_no_scroll == 0) {
-        return;
-    }
+    /* Count identical tiles with scroll */
+    int tiles_identical_with = count_identical_tiles(
+        s, send_buf, prev_buf, rx1, ry1, rx2, ry2, dx, dy);
     
-    /*
-     * K-aligned refinement: With integer output scaling, scroll offsets must
-     * be multiples of k. The FFT result is already k-aligned (from k-based
-     * downsampling). We only need to test 0, +k, -k offsets.
-     *
-     * This replaces the previous logic that tested ±1, ±2, ±3 pixel offsets.
-     */
-    
-    /* Build list of k-aligned candidates to test */
-    struct { int dx, dy; } candidates[9];
-    int num_candidates = 0;
-    
-    /* Always include base FFT result */
-    if (base_dx != 0 || base_dy != 0) {
-        candidates[num_candidates].dx = base_dx;
-        candidates[num_candidates].dy = base_dy;
-        num_candidates++;
-    }
-    
-    /* Add dy variations: +k and -k (only if dy != 0) */
-    if (base_dy != 0) {
-        /* Test base_dy + k */
-        int test_dy = base_dy + k;
-        int test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
-        if (test_abs_dy < max_scroll_y && test_abs_dy > 0) {
-            candidates[num_candidates].dx = base_dx;
-            candidates[num_candidates].dy = test_dy;
-            num_candidates++;
-        }
-        
-        /* Test base_dy - k */
-        test_dy = base_dy - k;
-        test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
-        if (test_abs_dy < max_scroll_y && test_abs_dy > 0) {
-            candidates[num_candidates].dx = base_dx;
-            candidates[num_candidates].dy = test_dy;
-            num_candidates++;
-        }
-    }
-    
-    /* Add dx variations: +k and -k (only if dx != 0) */
-    if (base_dx != 0) {
-        /* Test base_dx + k */
-        int test_dx = base_dx + k;
-        int test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
-        if (test_abs_dx < max_scroll_x && test_abs_dx > 0) {
-            candidates[num_candidates].dx = test_dx;
-            candidates[num_candidates].dy = base_dy;
-            num_candidates++;
-        }
-        
-        /* Test base_dx - k */
-        test_dx = base_dx - k;
-        test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
-        if (test_abs_dx < max_scroll_x && test_abs_dx > 0) {
-            candidates[num_candidates].dx = test_dx;
-            candidates[num_candidates].dy = base_dy;
-            num_candidates++;
-        }
-    }
-    
-    /* Pass 1: Quick identical tile count for all candidates */
-    int best_quick_idx = -1;
-    int best_quick_identical = 0;
-    
-    for (int c = 0; c < num_candidates; c++) {
-        int identical = quick_count_identical(
-            s, send_buf, prev_buf, rx1, ry1, rx2, ry2,
-            candidates[c].dx, candidates[c].dy);
-        
-        if (identical > best_quick_identical) {
-            best_quick_identical = identical;
-            best_quick_idx = c;
-        }
-    }
-    
-    /* If no candidate has more identical tiles than baseline, reject */
-    if (best_quick_idx < 0 || best_quick_identical <= tiles_identical_no) {
-        wlr_log(WLR_DEBUG, "Region %d: REJECTED dx=%d dy=%d - quick check shows no improvement (%d vs %d identical)",
-                reg_idx, base_dx, base_dy, best_quick_identical, tiles_identical_no);
-        return;
-    }
-    
-    /* Pass 2: Full compression only for the best candidate */
-    int best_dx = candidates[best_quick_idx].dx;
-    int best_dy = candidates[best_quick_idx].dy;
-    
-    struct scroll_cost_result cost = compute_scroll_cost(
-        s, send_buf, prev_buf, rx1, ry1, rx2, ry2, best_dx, best_dy);
-    
-    wlr_log(WLR_DEBUG, "Region %d: best candidate dx=%d dy=%d -> %d bytes (identical=%d)",
-            reg_idx, best_dx, best_dy, cost.bytes_with_scroll, cost.tiles_identical_with);
-    
-    int best_bytes = cost.bytes_with_scroll;
-    int best_tiles_identical = cost.tiles_identical_with;
-    
-    /* Check if any scroll variant was better than no scroll */
-    if (best_dx == 0 && best_dy == 0) {
-        wlr_log(WLR_INFO, "Region %d: REJECTED dx=%d dy=%d and variants - no scroll saves bytes",
-                reg_idx, base_dx, base_dy);
-        return;
-    }
-    
-    /* Verify the best scroll actually saves bytes vs no scroll */
-    if (best_bytes >= bytes_no_scroll) {
-        int extra = best_bytes - bytes_no_scroll;
-        wlr_log(WLR_INFO, "Region %d: REJECTED best dx=%d dy=%d - scroll costs %d more bytes (%d vs %d)",
-                reg_idx, best_dx, best_dy, extra, best_bytes, bytes_no_scroll);
+    /* Reject if scroll doesn't improve tile matching */
+    if (tiles_identical_with <= tiles_identical_no) {
+        wlr_log(WLR_DEBUG, "Region %d: REJECTED dx=%d dy=%d - no improvement (%d vs %d identical tiles)",
+                reg_idx, dx, dy, tiles_identical_with, tiles_identical_no);
         return;
     }
     
     s->scroll_regions[reg_idx].detected = 1;
-    s->scroll_regions[reg_idx].dx = best_dx;
-    s->scroll_regions[reg_idx].dy = best_dy;
+    s->scroll_regions[reg_idx].dx = dx;
+    s->scroll_regions[reg_idx].dy = dy;
     
-    int saved = bytes_no_scroll - best_bytes;
-    int pct = bytes_no_scroll > 0 ? (saved * 100 / bytes_no_scroll) : 0;
-    
-    if (best_dx != base_dx || best_dy != base_dy) {
-        wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d (adjusted from %d,%d) - saves %d bytes (%d%%), %d vs %d bytes, identical %d->%d tiles",
-                reg_idx, best_dx, best_dy, base_dx, base_dy, saved, pct, best_bytes, bytes_no_scroll,
-                tiles_identical_no, best_tiles_identical);
-    } else {
-        wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d - saves %d bytes (%d%%), %d vs %d bytes, identical %d->%d tiles",
-                reg_idx, best_dx, best_dy, saved, pct, best_bytes, bytes_no_scroll,
-                tiles_identical_no, best_tiles_identical);
-    }
+    wlr_log(WLR_INFO, "Region %d: ACCEPTED dx=%d dy=%d - identical tiles %d->%d",
+            reg_idx, dx, dy, tiles_identical_no, tiles_identical_with);
 }
 
 void scroll_init(void) {
