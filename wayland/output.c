@@ -222,10 +222,8 @@ void handle_resize(struct server *s, int new_w, int new_h, int new_minx, int new
     wlr_output_state_init(&state);
     wlr_output_state_set_custom_mode(&state, wl_phys_w, wl_phys_h, 0);
     if (fractional_wl_mode) {
-        wlr_output_state_set_scale(&state, 2.0f);
-    } else if (s->wl_scaling && scale > 1.001f) {
-        wlr_output_state_set_scale(&state, scale);
-    }
+        wlr_output_state_set_scale(&state, k);
+    } 
     wlr_output_commit_state(s->output, &state);
     wlr_output_state_finish(&state);
     
