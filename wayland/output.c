@@ -390,17 +390,12 @@ void new_output(struct wl_listener *l, void *d) {
     /*
      * Three scaling modes:
      * 
-     * 1. 9front scaling (default, s->wl_scaling == 0):
+     * 1. 9front scaling (s->wl_scaling == 0):
      *    - Compositor renders at LOGICAL resolution (physical / scale)
      *    - 9front 'a' command scales to physical window
      *    - Lower bandwidth, quality depends on 9front bilinear interpolation
      *
-     * 2. Wayland scaling (s->wl_scaling == 1, or -W flag):
-     *    - Compositor renders at PHYSICAL resolution
-     *    - wlroots uses output scale to report logical size to clients
-     *    - Higher bandwidth, may look sharper
-     *
-     * 3. Fractional Wayland scaling (-W with scale > 1):
+     * 2. Fractional Wayland scaling (s->wl_scaling == 1 with scale > 1):
      *    - For scale x where k-1 < x <= k (k = ceil(x)):
      *    - Wayland output scale = k (integer)
      *    - Compositor renders at (k/x) * physical resolution
@@ -409,8 +404,8 @@ void new_output(struct wl_listener *l, void *d) {
      *    - Good balance of quality and bandwidth for any fractional scale
      */
     
-    /* Fractional Wayland mode: -W with scale > 1 */
-    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f);
+    /* Fractional Wayland mode with scale > 1 */
+    int fractional_wl_mode = (s->wl_scaling && scale > 1.001f); 
     int k = (int)ceilf(scale);  /* Integer output scale (ceiling of user scale) */
     
     if (fractional_wl_mode) {
@@ -423,10 +418,10 @@ void new_output(struct wl_listener *l, void *d) {
         int wl_phys_h = (int)(phys_h * buffer_factor + 0.5f);
         
         /* Align to tile size */
-        wl_phys_w = (wl_phys_w / TILE_SIZE) * TILE_SIZE;
-        wl_phys_h = (wl_phys_h / TILE_SIZE) * TILE_SIZE;
-        if (wl_phys_w < TILE_SIZE * 4) wl_phys_w = TILE_SIZE * 4;
-        if (wl_phys_h < TILE_SIZE * 4) wl_phys_h = TILE_SIZE * 4;
+        wl_phys_w = (wl_phys_w / (k * TILE_SIZE)) * (k * TILE_SIZE);
+        wl_phys_h = (wl_phys_h / (k * TILE_SIZE)) * (k * TILE_SIZE);
+        if (wl_phys_w < k * TILE_SIZE * 4) wl_phys_w = k * TILE_SIZE * 4;
+        if (wl_phys_h < k * TILE_SIZE * 4) wl_phys_h = k * TILE_SIZE * 4;
         
         /* Scene/logical dims = wl_phys / k = phys / scale (what apps see) */
         int scene_w = wl_phys_w / k;
