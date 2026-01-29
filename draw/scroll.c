@@ -4,12 +4,17 @@
  * Detects scrolling regions and sends efficient blit commands.
  * Uses thread pool for parallel region processing.
  * Uses FFT-based phase correlation for motion detection.
+ *
+ * With integer output scaling (k = ceil(scale)), scroll offsets are
+ * guaranteed to be multiples of k, so we only need to test offsets
+ * of 0, +k, -k around the FFT-detected position.
  */
 
 #define _POSIX_C_SOURCE 200809L
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
+#include <math.h>
 #include <wlr/util/log.h>
 
 #include "scroll.h"
@@ -33,6 +38,7 @@ static struct scroll_timing timing;
 struct scroll_work {
     struct server *s;
     uint32_t *send_buf;
+    int k;  /* Integer output scale = ceil(scale) */
 };
 
 static struct scroll_work current_work;
@@ -293,7 +299,11 @@ static struct scroll_cost_result compute_scroll_cost(
 /*
  * Process a single scroll region (called from thread pool workers).
  * Uses compression comparison to verify scroll benefit.
- * Tests detected scroll and ±1 pixel variations to find optimal offset.
+ *
+ * With integer output scaling k = ceil(scale), scroll offsets are
+ * guaranteed to be multiples of k. We only test:
+ *   - The FFT-detected offset (already k-aligned from phase correlation)
+ *   - ±k from the detected offset (to handle FFT quantization)
  */
 static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     struct scroll_work *work = user_data;
@@ -301,8 +311,9 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     uint32_t *send_buf = work->send_buf;
     uint32_t *prev_buf = s->prev_framebuf;
     int width = s->width;
+    int k = work->k;
     
-    /* Region bounds are already tile-aligned from detect_scroll */
+    /* Region bounds are already k*TILE_SIZE-aligned from detect_scroll */
     int rx1 = s->scroll_regions[reg_idx].x1;
     int ry1 = s->scroll_regions[reg_idx].y1;
     int rx2 = s->scroll_regions[reg_idx].x2;
@@ -317,11 +328,11 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     int max_scroll_y = (ry2 - ry1) / 2;
     int max_scroll = max_scroll_x < max_scroll_y ? max_scroll_x : max_scroll_y;
     
-    /* Detect scroll using phase correlation */
+    /* Detect scroll using phase correlation with k-based downsampling */
     struct phase_result result = phase_correlate_detect(
         send_buf, prev_buf, width,
         rx1, ry1, rx2, ry2,
-        max_scroll
+        max_scroll, k
     );
     
     if (result.dx == 0 && result.dy == 0) return;
@@ -336,7 +347,8 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         return;
     }
     
-    wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d", reg_idx, base_dx, base_dy);
+    wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d (k=%d)", 
+            reg_idx, base_dx, base_dy, k);
     
     /* Compute bytes without scroll (baseline) */
     int bytes_no_scroll = 0;
@@ -385,13 +397,16 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         return;
     }
     
-    /* Smart refinement: only test variations in the relevant direction(s).
-     * With 4× downsampled FFT, results are quantized to 4 pixels.
-     * If dx=0, only test dy variations (and vice versa).
-     * Two-pass approach: quick identical count, then full compression only for best. */
+    /*
+     * K-aligned refinement: With integer output scaling, scroll offsets must
+     * be multiples of k. The FFT result is already k-aligned (from k-based
+     * downsampling). We only need to test 0, +k, -k offsets.
+     *
+     * This replaces the previous logic that tested ±1, ±2, ±3 pixel offsets.
+     */
     
-    /* Build list of candidates to test */
-    struct { int dx, dy; } candidates[16];
+    /* Build list of k-aligned candidates to test */
+    struct { int dx, dy; } candidates[9];
     int num_candidates = 0;
     
     /* Always include base FFT result */
@@ -401,31 +416,45 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         num_candidates++;
     }
     
-    /* Add dy variations if dy != 0 */
+    /* Add dy variations: +k and -k (only if dy != 0) */
     if (base_dy != 0) {
-        static const int dy_offsets[] = {-3, -2, -1, +1, +2, +3};
-        for (int i = 0; i < 6 && num_candidates < 15; i++) {
-            int test_dy = base_dy + dy_offsets[i];
-            int test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
-            if (test_abs_dy < max_scroll_y) {
-                candidates[num_candidates].dx = base_dx;
-                candidates[num_candidates].dy = test_dy;
-                num_candidates++;
-            }
+        /* Test base_dy + k */
+        int test_dy = base_dy + k;
+        int test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
+        if (test_abs_dy < max_scroll_y && test_abs_dy > 0) {
+            candidates[num_candidates].dx = base_dx;
+            candidates[num_candidates].dy = test_dy;
+            num_candidates++;
+        }
+        
+        /* Test base_dy - k */
+        test_dy = base_dy - k;
+        test_abs_dy = test_dy < 0 ? -test_dy : test_dy;
+        if (test_abs_dy < max_scroll_y && test_abs_dy > 0) {
+            candidates[num_candidates].dx = base_dx;
+            candidates[num_candidates].dy = test_dy;
+            num_candidates++;
         }
     }
     
-    /* Add dx variations if dx != 0 */
+    /* Add dx variations: +k and -k (only if dx != 0) */
     if (base_dx != 0) {
-        static const int dx_offsets[] = {-3, -2, -1, +1, +2, +3};
-        for (int i = 0; i < 6 && num_candidates < 15; i++) {
-            int test_dx = base_dx + dx_offsets[i];
-            int test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
-            if (test_abs_dx < max_scroll_x) {
-                candidates[num_candidates].dx = test_dx;
-                candidates[num_candidates].dy = base_dy;
-                num_candidates++;
-            }
+        /* Test base_dx + k */
+        int test_dx = base_dx + k;
+        int test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
+        if (test_abs_dx < max_scroll_x && test_abs_dx > 0) {
+            candidates[num_candidates].dx = test_dx;
+            candidates[num_candidates].dy = base_dy;
+            num_candidates++;
+        }
+        
+        /* Test base_dx - k */
+        test_dx = base_dx - k;
+        test_abs_dx = test_dx < 0 ? -test_dx : test_dx;
+        if (test_abs_dx < max_scroll_x && test_abs_dx > 0) {
+            candidates[num_candidates].dx = test_dx;
+            candidates[num_candidates].dy = base_dy;
+            num_candidates++;
         }
     }
     
@@ -513,48 +542,57 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     double t_start = get_time_us();
     memset(&timing, 0, sizeof(timing));
     
-    /* Divide frame into 16x4 grid (64 regions) with tile-aligned boundaries.
-     * Leave TILE_SIZE margin at edges for exposed region handling. */
-    int margin = TILE_SIZE;
-    int dim = 256; 
-    int cols = s->width / dim > 0 ? s->width / dim : 1, rows = s->height / dim > 0 ? s->height / dim : 1;
-    cols = 4; rows = 4; 
-    int cell_w = ((s->width - 2 * margin) / cols / TILE_SIZE) * TILE_SIZE;
-    int cell_h = ((s->height - 2 * margin) / rows / TILE_SIZE) * TILE_SIZE;
+    /* Compute k = ceil(scale) for integer output scaling alignment */
+    float scale = s->scale;
+    if (scale < 1.0f) scale = 1.0f;
+    int k = (int)ceilf(scale);
+    if (k < 1) k = 1;
+    if (k > 4) k = 4;  /* Clamp to reasonable range */
+    
+    /* Alignment unit: regions aligned to k * TILE_SIZE ensures scroll
+     * offsets (which are multiples of k) align with tile boundaries */
+    int align = k * TILE_SIZE;
+    
+    /* Divide frame into grid with k*TILE_SIZE-aligned boundaries.
+     * Leave margin at edges for exposed region handling. */
+    int margin = align;
+    int cols = 4, rows = 4;
+    int cell_w = ((s->width - 2 * margin) / cols / align) * align;
+    int cell_h = ((s->height - 2 * margin) / rows / align) * align;
     
     /* Ensure minimum cell size */
-    if (cell_w < TILE_SIZE) cell_w = TILE_SIZE;
-    if (cell_h < TILE_SIZE) cell_h = TILE_SIZE;
+    if (cell_w < align) cell_w = align;
+    if (cell_h < align) cell_h = align;
     
     s->scroll_regions_x = cols;
     s->scroll_regions_y = rows;
     s->num_scroll_regions = 0;
     
-    /* Maximum valid tile-aligned coordinates */
-    int max_x = (s->width / TILE_SIZE) * TILE_SIZE;
-    int max_y = (s->height / TILE_SIZE) * TILE_SIZE;
+    /* Maximum valid aligned coordinates */
+    int max_x = (s->width / align) * align;
+    int max_y = (s->height / align) * align;
     
     for (int ry = 0; ry < rows; ry++) {
         for (int rx = 0; rx < cols; rx++) {
             int x1 = margin + rx * cell_w;
             int y1 = margin + ry * cell_h;
             int x2 = (rx == cols - 1) ? 
-                ((s->width - margin) / TILE_SIZE) * TILE_SIZE : x1 + cell_w;
+                ((s->width - margin) / align) * align : x1 + cell_w;
             int y2 = (ry == rows - 1) ? 
-                ((s->height - margin) / TILE_SIZE) * TILE_SIZE : y1 + cell_h;
+                ((s->height - margin) / align) * align : y1 + cell_h;
             
-            /* Tile-align all boundaries */
-            x1 = (x1 / TILE_SIZE) * TILE_SIZE;
-            y1 = (y1 / TILE_SIZE) * TILE_SIZE;
-            x2 = ((x2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
-            y2 = ((y2 + TILE_SIZE - 1) / TILE_SIZE) * TILE_SIZE;
+            /* Align all boundaries to k*TILE_SIZE */
+            x1 = (x1 / align) * align;
+            y1 = (y1 / align) * align;
+            x2 = ((x2 + align - 1) / align) * align;
+            y2 = ((y2 + align - 1) / align) * align;
             
-            /* Clamp to frame bounds (tile-aligned) */
+            /* Clamp to frame bounds (aligned) */
             if (x2 > max_x) x2 = max_x;
             if (y2 > max_y) y2 = max_y;
             
             /* Skip if region too small */
-            if (x2 - x1 < 64 || y2 - y1 < 64) continue;
+            if (x2 - x1 < align * 2 || y2 - y1 < align * 2) continue;
             
             int idx = s->num_scroll_regions++;
             s->scroll_regions[idx].x1 = x1;
@@ -571,6 +609,7 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     if (s->num_scroll_regions > 0 && scroll_pool.initialized) {
         current_work.s = s;
         current_work.send_buf = send_buf;
+        current_work.k = k;
         pool_process(&scroll_pool, detect_region_scroll_worker, 
                      &current_work, s->num_scroll_regions);
     }
@@ -592,8 +631,8 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
     timing.regions_processed = s->num_scroll_regions;
     
     if (detected_count > 0) {
-        wlr_log(WLR_INFO, "Scroll detected in %d/%d regions (%.1fus)",
-                detected_count, s->num_scroll_regions, timing.total_us);
+        wlr_log(WLR_INFO, "Scroll detected in %d/%d regions (%.1fus, k=%d)",
+                detected_count, s->num_scroll_regions, timing.total_us, k);
     }
 }
 
