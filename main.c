@@ -49,73 +49,74 @@
 #include "draw/draw.h"
 #include "draw/send.h"
 #include "wayland/wayland.h"
-#include "input/kbmap.h"
 
 static void print_usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [options] <host>[:<port>] [command [args...]]\n", prog);
+    fprintf(stderr, "Usage: %s [options] <plan9-ip>[:<port>] [command [args...]]\n", prog);
     fprintf(stderr, "\nConnection options:\n");
-    fprintf(stderr, "  <host>         9front server IP or hostname\n");
-    fprintf(stderr, "  <port>         Port number (default: %d plaintext, %d TLS)\n", P9_PORT, P9_TLS_PORT);
-    fprintf(stderr, "  -u <user>      9P username (default: $P9USER, $USER, or 'glenda')\n");
-    fprintf(stderr, "\nTLS options:\n");
     fprintf(stderr, "  -c <cert>      Path to server certificate (PEM format)\n");
     fprintf(stderr, "  -f <fp>        SHA256 fingerprint of server certificate (hex)\n");
     fprintf(stderr, "  -k             Insecure mode: skip certificate verification (DANGEROUS)\n");
+    fprintf(stderr, "  -u <user>      9P username (default: $P9USER, $USER, or 'glenda')\n");
     fprintf(stderr, "\nDisplay options:\n");
-    fprintf(stderr, "  -S <scale>     Scale factor for HiDPI (1.0-4.0, default: 1.0)\n");
-    fprintf(stderr, "  -B             Use 9front backend scaling (lower bandwidth)\n");
+    fprintf(stderr, "  -S <scale>     Output scale factor for HiDPI displays (1.0-4.0, default: 1.0)\n");
+    fprintf(stderr, "                 Supports fractional values like 1.5, 1.25, 2.0, etc.\n");
+    fprintf(stderr, "                 Use -S 2 if fonts appear too small\n");
     fprintf(stderr, "\nLogging options:\n");
     fprintf(stderr, "  -q             Quiet mode (errors only, default)\n");
     fprintf(stderr, "  -v             Verbose mode (info + errors)\n");
     fprintf(stderr, "  -d             Debug mode (all messages)\n");
+    fprintf(stderr, "\nCommand execution:\n");
+    fprintf(stderr, "  [command]      Command to execute after Wayland socket is ready\n");
+    fprintf(stderr, "                 WAYLAND_DISPLAY will be set to the socket path\n");
+    fprintf(stderr, "\nTLS modes:\n");
+    fprintf(stderr, "  No TLS flags   Plaintext connection (default port %d)\n", P9_PORT);
+    fprintf(stderr, "  -c or -f       TLS with certificate pinning (default port %d)\n", P9_TLS_PORT);
+    fprintf(stderr, "  -k             TLS without verification (default port %d)\n", P9_TLS_PORT);
     fprintf(stderr, "\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "EXAMPLES - NO AUTHENTICATION (trusted network only!)\n");
+    fprintf(stderr, "EXAMPLES\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "\n  9front server:\n");
-    fprintf(stderr, "     aux/listen1 -t tcp!*!%d /bin/exportfs -r /dev\n", P9_PORT);
-    fprintf(stderr, "\n  Client:\n");
-    fprintf(stderr, "     %s 192.168.1.100:%d\n", prog, P9_PORT);
-    fprintf(stderr, "     %s 192.168.1.100:%d foot\n", prog, P9_PORT);
-    fprintf(stderr, "     %s -S 1.5 192.168.1.100:%d firefox\n", prog, P9_PORT);
-    fprintf(stderr, "     %s -B -S 2 192.168.1.100:%d          # scale on 9front\n", prog, P9_PORT);
-    fprintf(stderr, "\n"); 
-    fprintf(stderr, "    If you didn't specify a program and p9wl socket is wayland-0:\n");
-    fprintf(stderr, "      WAYLAND_DISPLAY=wayland-0 foot\n");  
+    fprintf(stderr, "\n  Plaintext (trusted network only!):\n");
+    fprintf(stderr, "    %s 192.168.1.100\n", prog);
+    fprintf(stderr, "\n  With 2x scaling for HiDPI:\n");
+    fprintf(stderr, "    %s -S 2 192.168.1.100\n", prog);
+    fprintf(stderr, "\n  TLS with certificate file:\n");
+    fprintf(stderr, "    %s -c 9front.pem 192.168.1.100\n", prog);
+    fprintf(stderr, "\n  TLS with SHA256 fingerprint:\n");
+    fprintf(stderr, "    %s -f aa11bb22cc33... 192.168.1.100\n", prog);
+    fprintf(stderr, "\n  TLS insecure mode (logs fingerprint for later pinning):\n");
+    fprintf(stderr, "    %s -k 192.168.1.100\n", prog);
+    fprintf(stderr, "\n  Launch a Wayland application:\n");
+    fprintf(stderr, "    %s 192.168.1.100 foot\n", prog);
+    fprintf(stderr, "    %s -S 2 192.168.1.100 firefox --no-remote\n", prog);
     fprintf(stderr, "\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "EXAMPLES - WITH TLS AUTHENTICATION\n");
+    fprintf(stderr, "9FRONT SERVER SETUP\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "\n  1. Generate certificate on 9front:\n");
+    fprintf(stderr, "\n  1. Generate TLS certificate (PEM format required by tlssrv):\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "     auth/rsagen -t 'service=tls owner=*' > /sys/lib/tls/key\n");
     fprintf(stderr, "     auth/rsa2x509 -e 3650 'CN=myhost' /sys/lib/tls/key | \\\n");
     fprintf(stderr, "         auth/pemencode CERTIFICATE > /sys/lib/tls/cert\n");
     fprintf(stderr, "     cat /sys/lib/tls/key > /mnt/factotum/ctl\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "    2. Copy certificate to linux\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "     # If using drawterm with user directory in /home/user on linux\n");
-    fprintf(stderr, "     cp /sys/lib/tls/cert /mnt/term/home/user/9front.pem\n");
-    fprintf(stderr, "\n  3. Start TLS listener on 9front:\n");
+    fprintf(stderr, "\n  2. Start TLS listener (port %d):\n", P9_TLS_PORT);
     fprintf(stderr, "\n");
     fprintf(stderr, "     aux/listen1 -t tcp!*!%d tlssrv -c /sys/lib/tls/cert /bin/exportfs -r /dev\n", P9_TLS_PORT);
-    fprintf(stderr, "\n  4. Connect from client:\n");
+    fprintf(stderr, "\n  Or plaintext listener (port %d, trusted networks only!):\n", P9_PORT);
     fprintf(stderr, "\n");
-    fprintf(stderr, "     # Using certificate file:\n");
-    fprintf(stderr, "     %s -c ~/9front.pem 192.168.1.100:%d\n", prog, P9_TLS_PORT);
-    fprintf(stderr, "\n     # Using SHA256 fingerprint:\n");
-    fprintf(stderr, "     %s -f aa11bb22cc33... 192.168.1.100:%d\n", prog, P9_TLS_PORT);
-    fprintf(stderr, "\n     # First connection (get fingerprint, insecure):\n");
-    fprintf(stderr, "     %s -k 192.168.1.100:%d\n", prog, P9_TLS_PORT);
-    fprintf(stderr, "\n  5. Get SHA256 fingerprint from certificate (optional):\n");
+    fprintf(stderr, "     aux/listen1 -t tcp!*!%d /bin/exportfs -r /dev\n", P9_PORT);
+    fprintf(stderr, "\n  3. Copy cert to Linux (it's already PEM format):\n");
+    fprintf(stderr, "\n");
+    fprintf(stderr, "     cp /sys/lib/tls/cert /tmp/9front.pem\n");
+    fprintf(stderr, "     # Then copy via drawterm, 9pfuse, or other method\n");
+    fprintf(stderr, "\n  4. Get fingerprint (alternative to copying cert):\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "     openssl x509 -in 9front.pem -noout -fingerprint -sha256\n");
     fprintf(stderr, "\n");
 }
 
 static int parse_args(int argc, char *argv[], const char **host, int *port,
-                      const char **uname, float *scale, int *wl_scaling,
+                      const char **uname, float *scale,
                       enum wlr_log_importance *log_level,
                       struct tls_config *tls_cfg,
                       char ***exec_argv, int *exec_argc) {
@@ -125,7 +126,6 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     *port = -1;  /* Will set default based on TLS config */
     *uname = NULL;
     *scale = 1.0f;  /* Default scale factor */
-    *wl_scaling = 1; /* Default: use Wayland scaling */
     *log_level = WLR_ERROR;  /* Default: errors only */
     memset(tls_cfg, 0, sizeof(*tls_cfg));
     *exec_argv = NULL;
@@ -144,8 +144,6 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
             *scale = strtof(argv[++i], NULL);
             if (*scale < 1.0f) *scale = 1.0f;
             if (*scale > 4.0f) *scale = 4.0f;
-        } else if (strcmp(argv[i], "-B") == 0) {
-            *wl_scaling = 0;  /* Use 9front backend scaling */
         } else if (strcmp(argv[i], "-q") == 0 || strcmp(argv[i], "--quiet") == 0) {
             *log_level = WLR_ERROR;
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
@@ -186,7 +184,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
         if (tls_cfg->cert_file || tls_cfg->cert_fingerprint || tls_cfg->insecure) {
             *port = P9_TLS_PORT;  /* Default TLS port: 10001 */
         } else {
-            *port = P9_PORT;      /* Default plaintext port: 10000 */
+            *port = P9_PORT;      /* Default plaintext port: 564 */
         }
     }
 
@@ -304,8 +302,8 @@ static int init_wayland(struct server *s) {
     wlr_scene_attach_output_layout(s->scene, s->output_layout);
 
     /* Gray background (uses logical dimensions for scene graph) */
-    int logical_w = (int)(s->width + 0.5f);  
-    int logical_h = (int)(s->height + 0.5f);  
+    int logical_w = (int)(s->width / s->scale + 0.5f);
+    int logical_h = (int)(s->height / s->scale + 0.5f);
     float gray[4] = { 0.3f, 0.3f, 0.3f, 1.0f };
     s->background = wlr_scene_rect_create(&s->scene->tree, logical_w, logical_h, gray);
     if (s->background) {
@@ -374,7 +372,6 @@ static int setup_socket(struct server *s) {
         return -1;
     }
 
-    fprintf(stdout, "WAYLAND_DISPLAY=%s (%dx%d)\n", sock, s->width, s->height);
     wlr_log(WLR_INFO, "WAYLAND_DISPLAY=%s (%dx%d)", sock, s->width, s->height);
     setenv("WAYLAND_DISPLAY", sock, 1);
 
@@ -386,15 +383,14 @@ int main(int argc, char *argv[]) {
     const char *host = NULL;
     int port = P9_PORT;
     float scale = 1.0f;
-    int wl_scaling = 1;  /* 1 = Wayland scaling (default), 0 = 9front backend scaling (-B) */
     enum wlr_log_importance log_level = WLR_ERROR;
     struct tls_config tls_cfg = {0};
     char **exec_argv = NULL;
     int exec_argc = 0;
 
     /* Parse arguments */
-    if (parse_args(argc, argv, &host, &port, &uname, &scale, &wl_scaling,
-                   &log_level, &tls_cfg, &exec_argv, &exec_argc) < 0) {
+    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg,
+                   &exec_argv, &exec_argc) < 0) {
         print_usage(argv[0]);
         return 1;
     }
@@ -461,8 +457,7 @@ int main(int argc, char *argv[]) {
         s.tls_fingerprint = strdup(tls_cfg.cert_fingerprint);
     }
     s.tls_insecure = tls_cfg.insecure;
-    s.scale = scale;  /* HiDPI scale factor, default 1.0 */
-    s.wl_scaling = wl_scaling;  /* 1 = Wayland scaling (default), 0 = 9front backend (-B) */
+    s.scale = (scale > 0.0f) ? scale : 1.0f;  /* HiDPI scale factor, default 1.0 */
     s.log_level = log_level;
 
     wlr_log(WLR_INFO, "Connecting to %s:%d", s.host, s.port);
@@ -485,35 +480,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /*
-     * Load dynamic keyboard map from /dev/kbmap.
-     *
-     * This reads the 9front keyboard layout and builds a rune→keycode
-     * mapping. Without this, keymap_lookup_dynamic() always falls back
-     * to the static US-layout keymap table.
-     *
-     * We use p9_draw since it's already connected to /dev. If this fails,
-     * we fall back gracefully to the static keymap - non-fatal.
-     */
-    if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {
-        wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
-    }
-
-
-    /* Set dimensions from draw device.
-     * Use physical dimensions initially - new_output() will reconfigure
-     * to logical resolution for 9front scaling mode.
-     */
+    /* Set dimensions from draw device */
     s.width = s.draw.width;
     s.height = s.draw.height;
     s.tiles_x = (s.width + TILE_SIZE - 1) / TILE_SIZE;
     s.tiles_y = (s.height + TILE_SIZE - 1) / TILE_SIZE;
 
-    /* Log scaling info */
-    if (s.scale > 1.001f) {
-        wlr_log(WLR_INFO, "Scale mode: %s, Physical: %dx%d, Scale: %.2f (new_output will reconfigure)",
-                s.wl_scaling ? "Wayland" : "9front",
-                s.draw.width, s.draw.height, s.scale);
+    if (s.scale > 1.0f) {
+        int logical_w = (int)(s.width / s.scale + 0.5f);
+        int logical_h = (int)(s.height / s.scale + 0.5f);
+        wlr_log(WLR_INFO, "Physical: %dx%d, Scale: %.2f, Logical: %dx%d",
+                s.width, s.height, s.scale, logical_w, logical_h);
     }
 
     /* Allocate framebuffers */
@@ -529,11 +506,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Don't set force_full_frame yet - wait until Wayland is initialized
-     * so new_output() can reallocate buffers at logical resolution first.
-     */
-    s.force_full_frame = 0;
-    s.frame_dirty = 0;
+    s.force_full_frame = 1;
+    s.frame_dirty = 1;
     s.last_frame_ms = 0;
 
     /* Initialize send thread synchronization */

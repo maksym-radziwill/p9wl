@@ -282,18 +282,13 @@ int tile_changed_send(struct server *s, uint32_t *send_buf, int tx, int ty) {
 
 /*
  * Check if scroll optimization should be disabled.
- * 
- * With the new fractional scaling architecture, scroll detection works
- * because everything operates at logical resolution:
- * - Compositor renders at logical resolution
- * - Scroll detection compares logical pixels
- * - Scroll command operates on logical source image
- * 
- * Only disable scroll for other reasons (e.g., debugging).
+ * Fractional scaling causes sub-pixel alignment issues that break
+ * FFT-based phase correlation scroll detection.
  */
 static int scroll_disabled(struct server *s) {
-    (void)s;
-    return 0;  /* Scroll works with fractional scaling now */
+    double floor;
+    /* Disable scroll if scaling is fractional */
+    return (modf(s->scale, &floor) != 0.0f); 
 }
 
 void *send_thread_func(void *arg) {
@@ -543,8 +538,7 @@ void *send_thread_func(void *arg) {
         }
         
         /* Throttle if too many writes pending */
-        /* Prevents being overwhelmed e.g during videos */
-        drain_throttle(32); 
+        drain_throttle(2);
         
         /* Second pass: build batches from results */
         for (int i = 0; i < work_count; i++) {
@@ -705,62 +699,19 @@ void *send_thread_func(void *arg) {
                 
             }
             
-            /* Copy buffer to window using 'a' (affine warp) command with scaling.
-             *
-             * Matrix uses 25.7 fixed-point (1.0 = 0x80 = 128).
-             *
-             * For upscaling by factor S (e.g., 1.5x):
-             * - Source image is at logical resolution (physical / S)
-             * - Window is at physical resolution
-             * - Matrix diagonal = 1/S (each dest pixel step = 1/S src pixel step)
-             *
-             * For scale=1.0, this is just an identity transform (1:1 copy).
-             */
-            
-            /* Get scale from draw state (set at runtime from -S flag) */
-            float scale = draw->scale;
-            if (scale <= 0.0f) scale = 1.0f;
-            
-            /* Matrix diagonal in 25.7 fixed-point: 1/scale * 128 */
-            int matrix_scale = (int)(128.0f / scale);
-            
-            /* smooth=1 enables bilinear interpolation.
-             * Enable for fractional scaling (scale != 1.0) to prevent aliasing.
-             * Disable for identity transform (scale ≈ 1.0) to avoid blurring.
-             */
-            float scale_diff = (scale > 1.0f) ? (scale - 1.0f) : (1.0f - scale);
-            int smooth = (scale_diff > 0.001f) ? 1 : 0;
-            
-            /* sp0 must be in SOURCE (logical) coordinates.
-             * p2 = M * local, sp = sp0 + p2
-             * After matrix: p2 = (win_minx/scale, win_miny/scale)
-             * We want sp = (0,0), so sp0 = (-win_minx/scale, -win_miny/scale)
-             */
-            int sp_x = -(int)(draw->win_minx / scale + 0.5f);
-            int sp_y = -(int)(draw->win_miny / scale + 0.5f);
-            
-            batch[off++] = 'a';
+            /* Copy buffer to window */
+            batch[off++] = 'd';
             PUT32(batch + off, draw->screen_id); off += 4;
-            /* R = dest rect in physical window coordinates */
+            PUT32(batch + off, draw->image_id); off += 4;
+            PUT32(batch + off, draw->opaque_id); off += 4;
             PUT32(batch + off, draw->win_minx); off += 4;
             PUT32(batch + off, draw->win_miny); off += 4;
             PUT32(batch + off, draw->win_minx + draw->width); off += 4;
             PUT32(batch + off, draw->win_miny + draw->height); off += 4;
-            PUT32(batch + off, draw->image_id); off += 4;
-            /* sp0 in logical (source) coordinates */
-            PUT32(batch + off, sp_x); off += 4;
-            PUT32(batch + off, sp_y); off += 4;
-            /* Scaling matrix in 25.7 fixed-point */
-            PUT32(batch + off, matrix_scale); off += 4;  /* m[0][0] = 1/scale */
-            PUT32(batch + off, 0); off += 4;              /* m[0][1] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[0][2] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[1][0] = 0 */
-            PUT32(batch + off, matrix_scale); off += 4;  /* m[1][1] = 1/scale */
-            PUT32(batch + off, 0); off += 4;              /* m[1][2] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[2][0] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[2][1] = 0 */
-            PUT32(batch + off, 0x80); off += 4;           /* m[2][2] = 1.0 */
-            batch[off++] = smooth;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
             
             /* 
              * Draw borders using actual window bounds.

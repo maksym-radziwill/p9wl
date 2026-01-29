@@ -85,14 +85,6 @@ struct draw_state {
     int winimage_id;   /* the image ID assigned to the window */
     int xor_enabled;   /* whether XOR delta mode is active (after first frame) */
     uint32_t iounit;
-
-
-    int logical_width;
-    int logical_height;
-    float scale;        /* Scale factor for 'a' command matrix: matrix = 128/scale */
-    float input_scale;  /* Scale factor for mouse coord conversion: logical = physical / input_scale */
-    int scene_width;    /* Scene/logical dimensions (what Wayland apps see) */
-    int scene_height;
 };
 
 /* Subsurface tracking */
@@ -223,9 +215,6 @@ struct server {
     int tls_insecure;                  /* Insecure mode (-k option) */
     float scale;                       /* Output scale factor for HiDPI (default: 1.0) */
     enum wlr_log_importance log_level; /* Log level */
-
-    float wl_scaling;
-
 };
 
 /* Utility functions */

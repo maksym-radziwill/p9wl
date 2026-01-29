@@ -37,22 +37,13 @@
 /* Maximum threads we track for cleanup */
 #define MAX_TRACKED_THREADS 64
 
-/*
- * Downsampling factor for faster FFT.
- * Since ±1 pixel refinement is done after FFT detection,
- * FFT only needs to get within DOWNSAMPLE pixels of correct answer.
- * 4× downsample: 256×256 region → 64×64 FFT (16× fewer operations)
- */
-#define DOWNSAMPLE 4
-#define FFT_SIZE_INTERNAL (FFT_SIZE / DOWNSAMPLE)
-
-/* Precomputed Hann window lookup table (at internal FFT size) */
-static float hann_lut[FFT_SIZE_INTERNAL];
+/* Precomputed Hann window lookup table */
+static float hann_lut[FFT_SIZE];
 static pthread_once_t hann_once = PTHREAD_ONCE_INIT;
 
 static void init_hann_lut_internal(void) {
-    for (int i = 0; i < FFT_SIZE_INTERNAL; i++) {
-        hann_lut[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (FFT_SIZE_INTERNAL - 1)));
+    for (int i = 0; i < FFT_SIZE; i++) {
+        hann_lut[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (FFT_SIZE - 1)));
     }
 }
 
@@ -117,13 +108,13 @@ int phase_correlate_init(void) {
     
     init_hann_lut();
     
-    res->fft_in1 = fftwf_alloc_real(FFT_SIZE_INTERNAL * FFT_SIZE_INTERNAL);
-    res->fft_in2 = fftwf_alloc_real(FFT_SIZE_INTERNAL * FFT_SIZE_INTERNAL);
-    res->fft_corr = fftwf_alloc_real(FFT_SIZE_INTERNAL * FFT_SIZE_INTERNAL);
-    res->smooth_tmp = fftwf_alloc_real(FFT_SIZE_INTERNAL * FFT_SIZE_INTERNAL);
-    res->fft_out1 = fftwf_alloc_complex((FFT_SIZE_INTERNAL/2 + 1) * FFT_SIZE_INTERNAL);
-    res->fft_out2 = fftwf_alloc_complex((FFT_SIZE_INTERNAL/2 + 1) * FFT_SIZE_INTERNAL);
-    res->fft_cross = fftwf_alloc_complex((FFT_SIZE_INTERNAL/2 + 1) * FFT_SIZE_INTERNAL);
+    res->fft_in1 = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    res->fft_in2 = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    res->fft_corr = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    res->smooth_tmp = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    res->fft_out1 = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
+    res->fft_out2 = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
+    res->fft_cross = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
     
     if (!res->fft_in1 || !res->fft_in2 || !res->fft_corr || !res->smooth_tmp ||
         !res->fft_out1 || !res->fft_out2 || !res->fft_cross) {
@@ -133,9 +124,9 @@ int phase_correlate_init(void) {
     }
     
     pthread_mutex_lock(&fftw_plan_lock);
-    res->plan_fwd1 = fftwf_plan_dft_r2c_2d(FFT_SIZE_INTERNAL, FFT_SIZE_INTERNAL, res->fft_in1, res->fft_out1, FFTW_MEASURE);
-    res->plan_fwd2 = fftwf_plan_dft_r2c_2d(FFT_SIZE_INTERNAL, FFT_SIZE_INTERNAL, res->fft_in2, res->fft_out2, FFTW_MEASURE);
-    res->plan_inv = fftwf_plan_dft_c2r_2d(FFT_SIZE_INTERNAL, FFT_SIZE_INTERNAL, res->fft_cross, res->fft_corr, FFTW_MEASURE);
+    res->plan_fwd1 = fftwf_plan_dft_r2c_2d(FFT_SIZE, FFT_SIZE, res->fft_in1, res->fft_out1, FFTW_MEASURE);
+    res->plan_fwd2 = fftwf_plan_dft_r2c_2d(FFT_SIZE, FFT_SIZE, res->fft_in2, res->fft_out2, FFTW_MEASURE);
+    res->plan_inv = fftwf_plan_dft_c2r_2d(FFT_SIZE, FFT_SIZE, res->fft_cross, res->fft_corr, FFTW_MEASURE);
     pthread_mutex_unlock(&fftw_plan_lock);
     
     if (!res->plan_fwd1 || !res->plan_fwd2 || !res->plan_inv) {
@@ -162,11 +153,11 @@ static inline float pixel_to_gray(uint32_t pixel) {
  * Each pixel becomes the average of its neighborhood within radius SMOOTH_RADIUS.
  * Uses separable filtering (horizontal then vertical) with running sums.
  * buf: input/output buffer
- * tmp: scratch buffer (must be FFT_SIZE_INTERNAL * FFT_SIZE_INTERNAL)
+ * tmp: scratch buffer (must be FFT_SIZE * FFT_SIZE)
  */
 static void smooth_buffer(float *buf, float *tmp) {
     const int r = SMOOTH_RADIUS;
-    const int w = FFT_SIZE_INTERNAL;
+    const int w = FFT_SIZE;
     
     /* Horizontal pass: buf -> tmp (sliding window) */
     for (int y = 0; y < w; y++) {
@@ -230,11 +221,6 @@ static void smooth_buffer(float *buf, float *tmp) {
     }
 }
 
-/*
- * Extract region with downsampling and Hann windowing.
- * Averages DOWNSAMPLE×DOWNSAMPLE pixel blocks for faster FFT.
- * The downsampling also provides natural smoothing.
- */
 static void extract_region_windowed(
     uint32_t *buf, int buf_width,
     int rx1, int ry1, int rx2, int ry2,
@@ -243,56 +229,28 @@ static void extract_region_windowed(
     int rw = rx2 - rx1;
     int rh = ry2 - ry1;
     
-    /* Downsampled dimensions */
-    int ds_w = rw / DOWNSAMPLE;
-    int ds_h = rh / DOWNSAMPLE;
+    memset(fft_buf, 0, FFT_SIZE * FFT_SIZE * sizeof(float));
     
-    memset(fft_buf, 0, FFT_SIZE_INTERNAL * FFT_SIZE_INTERNAL * sizeof(float));
-    
-    /* Center the downsampled region in FFT buffer */
-    int off_x = (FFT_SIZE_INTERNAL - ds_w) / 2;
-    int off_y = (FFT_SIZE_INTERNAL - ds_h) / 2;
+    int off_x = (FFT_SIZE - rw) / 2;
+    int off_y = (FFT_SIZE - rh) / 2;
     if (off_x < 0) off_x = 0;
     if (off_y < 0) off_y = 0;
     
-    int copy_w = (ds_w < FFT_SIZE_INTERNAL) ? ds_w : FFT_SIZE_INTERNAL;
-    int copy_h = (ds_h < FFT_SIZE_INTERNAL) ? ds_h : FFT_SIZE_INTERNAL;
+    int copy_w = (rw < FFT_SIZE) ? rw : FFT_SIZE;
+    int copy_h = (rh < FFT_SIZE) ? rh : FFT_SIZE;
     
-    /* Scale for Hann window lookup */
-    float scale_x = (copy_w > 1) ? (float)(FFT_SIZE_INTERNAL - 1) / (copy_w - 1) : 0;
-    float scale_y = (copy_h > 1) ? (float)(FFT_SIZE_INTERNAL - 1) / (copy_h - 1) : 0;
+    float scale_x = (float)(FFT_SIZE - 1) / (copy_w - 1);
+    float scale_y = (float)(FFT_SIZE - 1) / (copy_h - 1);
     
-    /* Precompute inverse of block size for averaging */
-    const float inv_block = 1.0f / (DOWNSAMPLE * DOWNSAMPLE);
-    
-    for (int dy = 0; dy < copy_h; dy++) {
-        int lut_y = (int)(dy * scale_y);
+    for (int y = 0; y < copy_h; y++) {
+        int lut_y = (int)(y * scale_y);
         float wy = hann_lut[lut_y];
-        float *dst_row = &fft_buf[(dy + off_y) * FFT_SIZE_INTERNAL + off_x];
+        float *row = &fft_buf[(y + off_y) * FFT_SIZE + off_x];
+        uint32_t *src_row = &buf[(ry1 + y) * buf_width + rx1];
         
-        /* Source Y range for this downsampled row */
-        int src_y0 = ry1 + dy * DOWNSAMPLE;
-        
-        for (int dx = 0; dx < copy_w; dx++) {
-            int lut_x = (int)(dx * scale_x);
-            float wx = hann_lut[lut_x];
-            
-            /* Source X for this downsampled column */
-            int src_x0 = rx1 + dx * DOWNSAMPLE;
-            
-            /* Average DOWNSAMPLE×DOWNSAMPLE block (grayscale) */
-            float sum = 0;
-            for (int by = 0; by < DOWNSAMPLE; by++) {
-                uint32_t *src_row = &buf[(src_y0 + by) * buf_width + src_x0];
-                for (int bx = 0; bx < DOWNSAMPLE; bx++) {
-                    uint32_t px = src_row[bx];
-                    /* Fast grayscale: approximate (r+g+b)/3 */
-                    sum += ((px >> 16) & 0xFF) + ((px >> 8) & 0xFF) + (px & 0xFF);
-                }
-            }
-            
-            /* Apply Hann window to averaged value */
-            dst_row[dx] = (sum * inv_block * (1.0f/3.0f)) * wy * wx;
+        for (int x = 0; x < copy_w; x++) {
+            int lut_x = (int)(x * scale_x);
+            row[x] = pixel_to_gray(src_row[x]) * wy * hann_lut[lut_x];
         }
     }
 }
@@ -332,10 +290,10 @@ static void find_correlation_peak(
     
     for (int dy = -max_shift; dy <= max_shift; dy++) {
         for (int dx = -max_shift; dx <= max_shift; dx++) {
-            int cy = (dy + FFT_SIZE_INTERNAL) % FFT_SIZE_INTERNAL;
-            int cx = (dx + FFT_SIZE_INTERNAL) % FFT_SIZE_INTERNAL;
+            int cy = (dy + FFT_SIZE) % FFT_SIZE;
+            int cx = (dx + FFT_SIZE) % FFT_SIZE;
             
-            float val = corr[cy * FFT_SIZE_INTERNAL + cx];
+            float val = corr[cy * FFT_SIZE + cx];
             
             if (val > peak_val) {
                 peak_val = val;
@@ -360,41 +318,35 @@ struct phase_result phase_correlate_detect(
     int rw = rx2 - rx1;
     int rh = ry2 - ry1;
     
-    /* Need at least DOWNSAMPLE×DOWNSAMPLE pixels per FFT cell */
-    if (rw < DOWNSAMPLE * 4 || rh < DOWNSAMPLE * 4) return result;
+    if (rw < 16 || rh < 16) return result;
     if (phase_correlate_init() < 0) return result;
     
-    /* Extract regions with downsampling and Hann windowing */
+    /* Extract regions with Hann windowing */
     extract_region_windowed(curr_buf, buf_width, rx1, ry1, rx2, ry2, res->fft_in1);
     extract_region_windowed(prev_buf, buf_width, rx1, ry1, rx2, ry2, res->fft_in2);
+    
+    /* Smoothing disabled - Hann window already reduces edge effects */
+    /* smooth_buffer(res->fft_in1, res->smooth_tmp); */
+    /* smooth_buffer(res->fft_in2, res->smooth_tmp); */
     
     /* Forward FFT */
     fftwf_execute(res->plan_fwd1);
     fftwf_execute(res->plan_fwd2);
     
     /* Cross-power spectrum */
-    int fft_complex_size = (FFT_SIZE_INTERNAL/2 + 1) * FFT_SIZE_INTERNAL;
+    int fft_complex_size = (FFT_SIZE/2 + 1) * FFT_SIZE;
     compute_phase_correlation(res->fft_out1, res->fft_out2, res->fft_cross, fft_complex_size);
     
     /* Inverse FFT to get correlation surface */
     fftwf_execute(res->plan_inv);
     
-    /* Convert max_shift to downsampled domain */
-    int ds_max_shift = max_shift / DOWNSAMPLE;
-    int ds_rw = rw / DOWNSAMPLE;
-    int ds_rh = rh / DOWNSAMPLE;
+    /* Limit search range */
+    if (max_shift > rw / 2) max_shift = rw / 2;
+    if (max_shift > rh / 2) max_shift = rh / 2;
+    if (max_shift < 1) max_shift = 1;
     
-    if (ds_max_shift > ds_rw / 2) ds_max_shift = ds_rw / 2;
-    if (ds_max_shift > ds_rh / 2) ds_max_shift = ds_rh / 2;
-    if (ds_max_shift < 1) ds_max_shift = 1;
-    
-    /* Find peak in downsampled correlation surface */
-    int ds_dx, ds_dy;
-    find_correlation_peak(res->fft_corr, &ds_dx, &ds_dy, ds_max_shift);
-    
-    /* Scale result back to full resolution */
-    result.dx = ds_dx * DOWNSAMPLE;
-    result.dy = ds_dy * DOWNSAMPLE;
+    /* Find peak */
+    find_correlation_peak(res->fft_corr, &result.dx, &result.dy, max_shift);
     result.valid = 1;
     
     return result;

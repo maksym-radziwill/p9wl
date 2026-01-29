@@ -5,7 +5,6 @@
  * tile compression selection, and pipelined writes.
  *
  * Uses iounit from 9P Ropen to limit batch sizes for atomic writes.
- * Uses a separate drain thread for async response handling.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -15,204 +14,27 @@
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
-#include <stdatomic.h>
-#include <unistd.h>
 
 #include <wlr/util/log.h>
 
 #include "send.h"
+#include "pipeline.h"
 #include "compress.h"
 #include "scroll.h"
 #include "draw/draw.h"
 #include "p9/p9.h"
 #include "types.h"
 
-/* Drain thread state */
-struct drain_ctx {
-    struct p9conn *p9;
-    atomic_int pending;
-    atomic_int errors;
-    atomic_int running;
-    atomic_int paused;      /* Pause flag for synchronous p9 ops */
-    pthread_t thread;
-    pthread_mutex_t lock;
-    pthread_cond_t cond;
-    uint8_t *recv_buf;  /* Separate buffer for drain thread */
-};
-
-static struct drain_ctx drain;
-
-/* Read one Rwrite response using drain thread's own buffer */
-static int drain_recv_one(void) {
-    uint8_t *buf = drain.recv_buf;
-    struct p9conn *p9 = drain.p9;
-    
-    /* Read length */
-    if (p9_read_full(p9, buf, 4) != 4) return -1;
-    uint32_t rxlen = GET32(buf);
-    if (rxlen < 7 || rxlen > p9->msize) return -1;
-    
-    /* Read rest of message */
-    if (p9_read_full(p9, buf + 4, rxlen - 4) != (int)(rxlen - 4)) return -1;
-    
-    int type = buf[4];
-    if (type == Rerror) {
-        uint16_t elen = GET16(buf + 7);
-        char errmsg[256];
-        int copylen = (elen < 255) ? elen : 255;
-        memcpy(errmsg, buf + 9, copylen);
-        errmsg[copylen] = '\0';
-        wlr_log(WLR_ERROR, "9P drain error: %s", errmsg);
-        
-        /* Set error flags */
-        if (strstr(errmsg, "unknown id") != NULL) p9->unknown_id_error = 1;
-        if (strstr(errmsg, "short") != NULL) p9->draw_error = 1;
-        return -1;
-    }
-    
-    if (type != Rwrite) {
-        wlr_log(WLR_ERROR, "9P drain: unexpected type %d, expected Rwrite", type);
-        return -1;
-    }
-    
-    return GET32(buf + 7);
+uint32_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* Drain thread - receives 9P responses in background */
-static void *drain_thread_func(void *arg) {
-    (void)arg;
-    
-    wlr_log(WLR_INFO, "Drain thread started");
-    
-    while (atomic_load(&drain.running)) {
-        /* Wait if no pending writes */
-        pthread_mutex_lock(&drain.lock);
-        while (atomic_load(&drain.pending) == 0 && atomic_load(&drain.running)) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 10000000;  /* 10ms timeout */
-            pthread_cond_timedwait(&drain.cond, &drain.lock, &ts);
-        }
-        pthread_mutex_unlock(&drain.lock);
-        
-        if (!atomic_load(&drain.running)) break;
-        
-        /* If paused but still have pending, keep draining until pending = 0 */
-        /* Then stop and wait for resume */
-        if (atomic_load(&drain.paused) && atomic_load(&drain.pending) == 0) {
-            continue;  /* Go back to wait loop */
-        }
-        
-        /* Drain one response using our own buffer */
-        if (atomic_load(&drain.pending) > 0) {
-            if (drain_recv_one() < 0) {
-                atomic_fetch_add(&drain.errors, 1);
-            }
-            atomic_fetch_sub(&drain.pending, 1);
-        }
-    }
-    
-    wlr_log(WLR_INFO, "Drain thread exiting");
-    return NULL;
-}
-
-static int drain_start(struct p9conn *p9) {
-    atomic_store(&drain.pending, 0);
-    atomic_store(&drain.errors, 0);
-    atomic_store(&drain.running, 1);
-    atomic_store(&drain.paused, 0);
-    drain.p9 = p9;
-    pthread_mutex_init(&drain.lock, NULL);
-    pthread_cond_init(&drain.cond, NULL);
-    
-    /* Allocate separate buffer for drain thread */
-    drain.recv_buf = malloc(p9->msize);
-    if (!drain.recv_buf) {
-        wlr_log(WLR_ERROR, "Failed to allocate drain recv buffer");
-        return -1;
-    }
-    
-    if (pthread_create(&drain.thread, NULL, drain_thread_func, NULL) != 0) {
-        wlr_log(WLR_ERROR, "Failed to create drain thread");
-        free(drain.recv_buf);
-        return -1;
-    }
-    return 0;
-}
-
-static void drain_stop(void) {
-    atomic_store(&drain.running, 0);
-    
-    pthread_mutex_lock(&drain.lock);
-    pthread_cond_signal(&drain.cond);
-    pthread_mutex_unlock(&drain.lock);
-    
-    pthread_join(drain.thread, NULL);
-    
-    /* Drain any remaining using our buffer */
-    while (atomic_load(&drain.pending) > 0) {
-        drain_recv_one();
-        atomic_fetch_sub(&drain.pending, 1);
-    }
-    
-    if (drain.recv_buf) {
-        free(drain.recv_buf);
-        drain.recv_buf = NULL;
-    }
-    
-    pthread_mutex_destroy(&drain.lock);
-    pthread_cond_destroy(&drain.cond);
-}
-
-/*
- * Pause drain thread and drain all pending responses.
- * Must be called before any synchronous p9 operations (relookup_window, etc.)
- * The drain thread will stop reading from the socket.
- */
-static void drain_pause(void) {
-    atomic_store(&drain.paused, 1);
-    
-    /* Wake up drain thread in case it's waiting on cond var */
-    pthread_mutex_lock(&drain.lock);
-    pthread_cond_signal(&drain.cond);
-    pthread_mutex_unlock(&drain.lock);
-    
-    /* Wait for drain thread to finish processing all pending responses */
-    while (atomic_load(&drain.pending) > 0) {
-            struct timespec req;
-
-	        req.tv_sec = 0;
-    	    req.tv_nsec = 1000000L; // Use 'L' for long integer
-
-    	    nanosleep(&req, NULL);
-    }
-}
-
-/*
- * Resume drain thread after synchronous p9 operations.
- */
-static void drain_resume(void) {
-    atomic_store(&drain.paused, 0);
-    
-    /* Wake up drain thread */
-    pthread_mutex_lock(&drain.lock);
-    pthread_cond_signal(&drain.cond);
-    pthread_mutex_unlock(&drain.lock);
-}
-
-static void drain_notify(void) {
-    atomic_fetch_add(&drain.pending, 1);
-    pthread_mutex_lock(&drain.lock);
-    pthread_cond_signal(&drain.cond);
-    pthread_mutex_unlock(&drain.lock);
-}
-
-/* Wait until pending drops below threshold */
-static void drain_throttle(int max_pending) {
-    while (atomic_load(&drain.pending) > max_pending) {
-        struct timespec ts = {0, 1000000};  /* 1ms */
-        nanosleep(&ts, NULL);
-    }
+uint64_t now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 void send_frame(struct server *s) {
@@ -223,8 +45,7 @@ void send_frame(struct server *s) {
         pthread_mutex_unlock(&s->send_lock);
         return;
     }
-
-
+    
     /* Find a free buffer */
     int buf = -1;
     for (int i = 0; i < 2; i++) {
@@ -252,15 +73,40 @@ void send_frame(struct server *s) {
 }
 
 int send_timer_callback(void *data) {
-    struct server *s = data; 
-
+    struct server *s = data;
+    
+    /* Skip if resize pending */
+    if (s->resize_pending) {
+        return 0;
+    }
+    
     /* Only send if we have new content */
     if (!s->frame_dirty) {
         return 0;
     }
     s->frame_dirty = 0;
- 
-    send_frame(s);
+    
+    pthread_mutex_lock(&s->send_lock);
+    
+    /* Find a free buffer */
+    int buf = -1;
+    for (int i = 0; i < 2; i++) {
+        if (i != s->active_buf && i != s->pending_buf) {
+            buf = i;
+            break;
+        }
+    }
+    
+    if (buf >= 0) {
+        memcpy(s->send_buf[buf], s->framebuf, s->width * s->height * 4);
+        s->pending_buf = buf;
+        if (s->force_full_frame) {
+            s->send_full = 1;
+        }
+        pthread_cond_signal(&s->send_cond);
+    }
+    
+    pthread_mutex_unlock(&s->send_lock);
     return 0;
 }
 
@@ -280,22 +126,6 @@ int tile_changed_send(struct server *s, uint32_t *send_buf, int tx, int ty) {
     return 0;
 }
 
-/*
- * Check if scroll optimization should be disabled.
- * 
- * With the new fractional scaling architecture, scroll detection works
- * because everything operates at logical resolution:
- * - Compositor renders at logical resolution
- * - Scroll detection compares logical pixels
- * - Scroll command operates on logical source image
- * 
- * Only disable scroll for other reasons (e.g., debugging).
- */
-static int scroll_disabled(struct server *s) {
-    (void)s;
-    return 0;  /* Scroll works with fractional scaling now */
-}
-
 void *send_thread_func(void *arg) {
     struct server *s = arg;
     struct draw_state *draw = &s->draw;
@@ -304,11 +134,6 @@ void *send_thread_func(void *arg) {
     uint32_t last_probe_time = 0;
     
     wlr_log(WLR_INFO, "Send thread started");
-    
-    /* Log if scroll optimization is disabled */
-    if (scroll_disabled(s)) {
-        wlr_log(WLR_INFO, "Scroll optimization disabled (fractional scale: %.2f)", s->scale);
-    }
     
     /*
      * Determine max batch size from iounit.
@@ -333,53 +158,29 @@ void *send_thread_func(void *arg) {
         return NULL;
     }
     
-    /* Start drain thread */
-    if (drain_start(p9) < 0) {
-        wlr_log(WLR_ERROR, "Failed to start drain thread");
-        free(batch);
-        return NULL;
-    }
-    
-    /* Initialize parallel compression pool */
-    int nthreads = sysconf(_SC_NPROCESSORS_ONLN) / 2;  
-    if (compress_pool_init(nthreads) < 0) {
-        wlr_log(WLR_ERROR, "Failed to init compression pool, falling back to single-threaded");
-        nthreads = 0;
-    } else {
-        wlr_log(WLR_INFO, "Compression pool initialized with %d threads", nthreads);
-    }
-    
-    /* Allocate work arrays for parallel compression */
-    /* Use max possible size (4096x4096 / 16x16 = 65536 tiles) to handle resizes */
-    int max_tiles = (4096 / TILE_SIZE) * (4096 / TILE_SIZE);
-    struct tile_work *work = malloc(max_tiles * sizeof(struct tile_work));
-    struct tile_result *results = malloc(max_tiles * sizeof(struct tile_result));
-    if (!work || !results) {
-        wlr_log(WLR_ERROR, "Failed to allocate compression work arrays");
-        nthreads = 0;  /* Fall back to single-threaded */
-    }
-    
-    /* Allocate compression buffer for single-threaded fallback */
+    /* Allocate compression buffer */
     const size_t comp_buf_size = TILE_SIZE * TILE_SIZE * 4 + 256;
     uint8_t *comp_buf = malloc(comp_buf_size);
     
-    int write_errors = 0;
     while (s->running) {
-
+        pthread_mutex_lock(&s->send_lock);
+        
         /* Wait for work with timeout */
         while (s->pending_buf < 0 && !s->window_changed && s->running) {
             struct timespec ts;
-            ts.tv_sec = 0;          
-            ts.tv_nsec = 100000;  
-            nanosleep(&ts, NULL);  
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 2;
+            int rc = pthread_cond_timedwait(&s->send_cond, &s->send_lock, &ts);
+            if (rc == ETIMEDOUT) {
+                break;
+            }
         }
         
         if (!s->running) {
+            pthread_mutex_unlock(&s->send_lock);
             break;
         }
-
-        pthread_mutex_lock(&s->send_lock);
-
+        
         /* Capture which buffer to process */
         int current_buf = s->pending_buf;
         int got_frame = (current_buf >= 0);
@@ -399,23 +200,15 @@ void *send_thread_func(void *arg) {
             p9->draw_error = 0;
             draw->xor_enabled = 0;
             memset(s->prev_framebuf, 0, s->width * s->height * 4);
+            pipeline_reset();
             do_full = 1;
-        }
-        
-        /* Check for drain errors */
-        int drain_errs = atomic_exchange(&drain.errors, 0);
-        if (drain_errs > 0) {
-            wlr_log(WLR_ERROR, "Drain thread reported %d errors", drain_errs);
-            memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
         }
         
         /* Check if wctl thread detected window change */
         if (s->window_changed) {
             wlr_log(WLR_INFO, "Wctl detected window change - re-looking up window");
             s->window_changed = 0;
-            drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
-            drain_resume(); /* Restart drain */
             if (s->resize_pending) {
                 continue;
             }
@@ -426,13 +219,44 @@ void *send_thread_func(void *arg) {
         if (p9->unknown_id_error) {
             wlr_log(WLR_INFO, "Detected unknown_id_error - re-looking up window");
             p9->unknown_id_error = 0;
-            drain_pause();  /* Stop drain before synchronous p9 ops */
             relookup_window(s);
-            drain_resume(); /* Restart drain */
             if (s->resize_pending) {
                 continue;
             }
             do_full = 1;
+        }
+        
+        /* Periodic probe */
+        uint32_t now = now_ms();
+        if (now - last_probe_time > 2000 && !s->resize_pending) {
+            last_probe_time = now;
+            
+            uint8_t probe[46];
+            int poff = 0;
+            probe[poff++] = 'd';
+            PUT32(probe + poff, draw->screen_id); poff += 4;
+            PUT32(probe + poff, draw->image_id); poff += 4;
+            PUT32(probe + poff, draw->opaque_id); poff += 4;
+            PUT32(probe + poff, draw->win_minx); poff += 4;
+            PUT32(probe + poff, draw->win_miny); poff += 4;
+            PUT32(probe + poff, draw->win_minx + 1); poff += 4;
+            PUT32(probe + poff, draw->win_miny + 1); poff += 4;
+            PUT32(probe + poff, 0); poff += 4;
+            PUT32(probe + poff, 0); poff += 4;
+            PUT32(probe + poff, 0); poff += 4;
+            PUT32(probe + poff, 0); poff += 4;
+            probe[poff++] = 'v';
+            p9_write(p9, draw->drawdata_fid, 0, probe, poff);
+            
+            if (p9->unknown_id_error) {
+                wlr_log(WLR_INFO, "Probe detected window change - re-looking up");
+                p9->unknown_id_error = 0;
+                relookup_window(s);
+                if (s->resize_pending) {
+                    continue;
+                }
+                do_full = 1;
+            }
         }
         
         if (!got_frame) {
@@ -449,40 +273,34 @@ void *send_thread_func(void *arg) {
             s->force_full_frame = 0;
         }
         
+        int pending_writes = 0;
+        int write_errors = 0;
         uint64_t t_frame_start = now_us();
-        uint64_t t_send_done = 0;
+        uint64_t t_send_done = 0, t_recv_done = 0;
         
-        /* Try to detect scroll (disabled for fractional scaling) */
+        /* Try to detect scroll */
         int scrolled_regions = 0;
-        if (!do_full && !scroll_disabled(s)) {
+        if (!do_full) {
             detect_scroll(s, send_buf);
-            /* Apply scroll to prev_framebuf BEFORE tile detection */
-            scrolled_regions = apply_scroll_to_prevbuf(s);
+            scrolled_regions = send_scroll_commands(s, &pending_writes);
+            
+            /* Drain responses to maintain adaptive pipeline depth */
+            int depth = pipeline_get_depth();
+            while (pending_writes > depth) {
+                if (p9_write_recv(p9) < 0) write_errors++;
+                pending_writes--;
+            }
         }
         
         /* Send tiles */
         size_t off = 0;
-        
-        /* Write scroll commands to batch first (batched with tiles) */
-        if (scrolled_regions > 0) {
-            off = write_scroll_commands(s, batch, max_batch);
-            wlr_log(WLR_DEBUG, "Batched %d scroll regions (%d bytes)", scrolled_regions, (int)off);
-        }
-        
         int tile_count = 0;
         int batch_count = 0;
         int comp_tiles = 0, delta_tiles = 0;
         size_t bytes_raw = 0, bytes_sent = 0;
         
-        /* Per-batch stats */
-        int batch_tiles = 0;
-        size_t batch_raw = 0, batch_sent = 0;
-        int batch_comp = 0, batch_delta = 0;
-        
         int can_delta = draw->xor_enabled && !do_full && s->prev_framebuf;
         
-        /* First pass: collect changed tiles */
-        int work_count = 0;
         for (int ty = 0; ty < s->tiles_y; ty++) {
             for (int tx = 0; tx < s->tiles_x; tx++) {
                 if (do_full || tile_changed_send(s, send_buf, tx, ty)) {
@@ -493,200 +311,116 @@ void *send_thread_func(void *arg) {
                     int w = x2 - x1, h = y2 - y1;
                     if (w <= 0 || h <= 0) continue;
                     
-                    if (work_count >= max_tiles) {
-                        wlr_log(WLR_ERROR, "Work array overflow!");
-                        goto tiles_collected;
+                    int raw_size = w * h * 4;
+                    bytes_raw += raw_size;
+                    
+                    int comp_result = 0;
+                    if (comp_buf) {
+                        comp_result = compress_tile_adaptive(comp_buf, comp_buf_size,
+                                                             send_buf, s->width,
+                                                             can_delta ? s->prev_framebuf : NULL,
+                                                             s->width,
+                                                             x1, y1, w, h);
                     }
                     
-                    /* Check if tile overlaps scroll-exposed region (marked 0xDEADBEEF).
-                     * Server's buffer has garbage there after blit, so delta
-                     * encoding would produce wrong pixels. Force raw.
-                     * Check all 4 edges since exposed boundary may cut through
-                     * tile from any direction (vertical or horizontal scroll). */
-                    int use_delta = can_delta;
-                    if (use_delta) {
-                        int x2m1 = x1 + w - 1;
-                        int y2m1 = y1 + h - 1;
-                        /* Check top and bottom rows */
-                        for (int x = x1; x < x1 + w && use_delta; x++) {
-                            if (s->prev_framebuf[y1 * s->width + x] == 0xDEADBEEF ||
-                                s->prev_framebuf[y2m1 * s->width + x] == 0xDEADBEEF) {
-                                use_delta = 0;
-                            }
+                    int use_delta = (comp_result > 0);
+                    int comp_size = use_delta ? comp_result : (comp_result < 0 ? -comp_result : 0);
+
+                    size_t tile_size;
+                    if (comp_size > 0) {
+                        if (use_delta) {
+                            tile_size = (1 + 4 + 16 + comp_size) + ALPHA_DELTA_OVERHEAD;
+                        } else {
+                            tile_size = 1 + 4 + 16 + comp_size;
                         }
-                        /* Check left and right columns */
-                        for (int y = y1; y <= y2m1 && use_delta; y++) {
-                            if (s->prev_framebuf[y * s->width + x1] == 0xDEADBEEF ||
-                                s->prev_framebuf[y * s->width + x2m1] == 0xDEADBEEF) {
-                                use_delta = 0;
-                            }
+                    } else {
+                        tile_size = 1 + 4 + 16 + raw_size;
+                    }
+                    
+                    /* Flush current batch if needed */
+                    if (off + tile_size > max_batch && off > 0) {
+                        if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
+                            wlr_log(WLR_ERROR, "Batch write send failed");
+                            memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+                        }
+                        pending_writes++;
+                        batch_count++;
+                        off = 0;
+                        
+                        /* Drain to maintain adaptive pipeline depth */
+                        int depth = pipeline_get_depth();
+                        while (pending_writes > depth) {
+                            if (p9_write_recv(p9) < 0) write_errors++;
+                            pending_writes--;
                         }
                     }
                     
-                    work[work_count].pixels = send_buf;
-                    work[work_count].stride = s->width;
-                    work[work_count].prev_pixels = use_delta ? s->prev_framebuf : NULL;
-                    work[work_count].prev_stride = s->width;
-                    work[work_count].x1 = x1;
-                    work[work_count].y1 = y1;
-                    work[work_count].w = w;
-                    work[work_count].h = h;
-                    work_count++;
-                }
-            }
-        }
-        tiles_collected:
-        
-        /* Compress all tiles in parallel */
-        if (work_count > 0 && nthreads > 0) {
-            compress_tiles_parallel(work, results, work_count);
-        }
-        
-        /* Throttle if too many writes pending */
-        drain_throttle(2);
-        
-        /* Second pass: build batches from results */
-        for (int i = 0; i < work_count; i++) {
-            struct tile_work *w = &work[i];
-            struct tile_result *r = &results[i];
-            int x1 = w->x1, y1 = w->y1;
-            int x2 = x1 + w->w, y2 = y1 + w->h;
-            int raw_size = w->w * w->h * 4;
-            
-            /* Single-threaded fallback */
-            if (nthreads == 0) {
-                int comp_result = compress_tile_adaptive(comp_buf, comp_buf_size,
-                                                         w->pixels, w->stride,
-                                                         w->prev_pixels, w->prev_stride,
-                                                         x1, y1, w->w, w->h);
-                if (comp_result > 0) {
-                    r->size = comp_result;
-                    r->is_delta = 1;
-                    memcpy(r->data, comp_buf, comp_result);
-                } else if (comp_result < 0) {
-                    r->size = -comp_result;
-                    r->is_delta = 0;
-                    memcpy(r->data, comp_buf, -comp_result);
-                } else {
-                    r->size = 0;
-                    r->is_delta = 0;
-                }
-            }
-            
-            bytes_raw += raw_size;
-            
-            int use_delta = r->is_delta;
-            int comp_size = r->size;
-            
-            size_t tile_size;
-            if (comp_size > 0) {
-                if (use_delta) {
-                    tile_size = (1 + 4 + 16 + comp_size) + ALPHA_DELTA_OVERHEAD;
-                } else {
-                    tile_size = 1 + 4 + 16 + comp_size;
-                }
-            } else {
-                tile_size = 1 + 4 + 16 + raw_size;
-            }
-            
-            /* Flush current batch if needed */
-            if (off + tile_size > max_batch && off > 0) {
-                if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
-                    wlr_log(WLR_ERROR, "Batch write send failed");
-                    memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
-                }
-                drain_notify();
-                batch_count++;
-                
-                /* Log batch stats */
-                if (batch_tiles > 0) {
-                    int ratio = batch_raw > 0 ? (int)(batch_sent * 100 / batch_raw) : 100;
-                    wlr_log(WLR_DEBUG, "Batch %d: %d tiles (%d comp, %d delta) %zu->%zu bytes (%d%%)",
-                            batch_count, batch_tiles, batch_comp, batch_delta,
-                            batch_raw, batch_sent, ratio);
-                }
-                batch_tiles = 0;
-                batch_raw = 0;
-                batch_sent = 0;
-                batch_comp = 0;
-                batch_delta = 0;
-                
-                off = 0;
-            }
-            
-            if (comp_size > 0) {
-                if (use_delta) {
-                    /* Alpha-delta path */
-                    batch[off++] = 'Y';
-                    PUT32(batch + off, draw->delta_id); off += 4;
-                    PUT32(batch + off, x1); off += 4;
-                    PUT32(batch + off, y1); off += 4;
-                    PUT32(batch + off, x2); off += 4;
-                    PUT32(batch + off, y2); off += 4;
-                    memcpy(batch + off, r->data, comp_size);
-                    off += comp_size;
+                    if (comp_size > 0) {
+                        if (use_delta) {
+                            /* Alpha-delta path */
+                            batch[off++] = 'Y';
+                            PUT32(batch + off, draw->delta_id); off += 4;
+                            PUT32(batch + off, x1); off += 4;
+                            PUT32(batch + off, y1); off += 4;
+                            PUT32(batch + off, x2); off += 4;
+                            PUT32(batch + off, y2); off += 4;
+                            memcpy(batch + off, comp_buf, comp_size);
+                            off += comp_size;
+                            
+                            /* Composite delta onto image */
+                            batch[off++] = 'd';
+                            PUT32(batch + off, draw->image_id); off += 4;
+                            PUT32(batch + off, draw->delta_id); off += 4;
+                            PUT32(batch + off, draw->delta_id); off += 4;
+                            PUT32(batch + off, x1); off += 4;
+                            PUT32(batch + off, y1); off += 4;
+                            PUT32(batch + off, x2); off += 4;
+                            PUT32(batch + off, y2); off += 4;
+                            PUT32(batch + off, x1); off += 4;
+                            PUT32(batch + off, y1); off += 4;
+                            PUT32(batch + off, x1); off += 4;
+                            PUT32(batch + off, y1); off += 4;
+                            
+                            bytes_sent += comp_size + ALPHA_DELTA_OVERHEAD;
+                            delta_tiles++;
+                        } else {
+                            /* Direct path */
+                            batch[off++] = 'Y';
+                            PUT32(batch + off, draw->image_id); off += 4;
+                            PUT32(batch + off, x1); off += 4;
+                            PUT32(batch + off, y1); off += 4;
+                            PUT32(batch + off, x2); off += 4;
+                            PUT32(batch + off, y2); off += 4;
+                            memcpy(batch + off, comp_buf, comp_size);
+                            off += comp_size;
+                            bytes_sent += comp_size;
+                        }
+                        comp_tiles++;
+                    } else {
+                        /* Uncompressed */
+                        batch[off++] = 'y';
+                        PUT32(batch + off, draw->image_id); off += 4;
+                        PUT32(batch + off, x1); off += 4;
+                        PUT32(batch + off, y1); off += 4;
+                        PUT32(batch + off, x2); off += 4;
+                        PUT32(batch + off, y2); off += 4;
+                        
+                        for (int row = 0; row < h; row++) {
+                            memcpy(batch + off, &send_buf[(y1 + row) * s->width + x1], w * 4);
+                            off += w * 4;
+                        }
+                        bytes_sent += raw_size;
+                    }
                     
-                    /* Composite delta onto image */
-                    batch[off++] = 'd';
-                    PUT32(batch + off, draw->image_id); off += 4;
-                    PUT32(batch + off, draw->delta_id); off += 4;
-                    PUT32(batch + off, draw->delta_id); off += 4;
-                    PUT32(batch + off, x1); off += 4;
-                    PUT32(batch + off, y1); off += 4;
-                    PUT32(batch + off, x2); off += 4;
-                    PUT32(batch + off, y2); off += 4;
-                    PUT32(batch + off, x1); off += 4;
-                    PUT32(batch + off, y1); off += 4;
-                    PUT32(batch + off, x1); off += 4;
-                    PUT32(batch + off, y1); off += 4;
+                    /* Update prev_framebuf */
+                    for (int row = 0; row < h; row++) {
+                        memcpy(&s->prev_framebuf[(y1 + row) * s->width + x1],
+                               &send_buf[(y1 + row) * s->width + x1], w * 4);
+                    }
                     
-                    bytes_sent += comp_size + ALPHA_DELTA_OVERHEAD;
-                    batch_sent += comp_size + ALPHA_DELTA_OVERHEAD;
-                    delta_tiles++;
-                    batch_delta++;
-                } else {
-                    /* Direct path */
-                    batch[off++] = 'Y';
-                    PUT32(batch + off, draw->image_id); off += 4;
-                    PUT32(batch + off, x1); off += 4;
-                    PUT32(batch + off, y1); off += 4;
-                    PUT32(batch + off, x2); off += 4;
-                    PUT32(batch + off, y2); off += 4;
-                    memcpy(batch + off, r->data, comp_size);
-                    off += comp_size;
-                    bytes_sent += comp_size;
-                    batch_sent += comp_size;
+                    tile_count++;
                 }
-                comp_tiles++;
-                batch_comp++;
-            } else {
-                /* Uncompressed */
-                batch[off++] = 'y';
-                PUT32(batch + off, draw->image_id); off += 4;
-                PUT32(batch + off, x1); off += 4;
-                PUT32(batch + off, y1); off += 4;
-                PUT32(batch + off, x2); off += 4;
-                PUT32(batch + off, y2); off += 4;
-                
-                for (int row = 0; row < w->h; row++) {
-                    memcpy(batch + off, &send_buf[(y1 + row) * s->width + x1], w->w * 4);
-                    off += w->w * 4;
-                }
-                bytes_sent += raw_size;
-                batch_sent += raw_size;
             }
-            
-            /* Track batch stats */
-            batch_tiles++;
-            batch_raw += raw_size;
-            
-            /* Update prev_framebuf */
-            for (int row = 0; row < w->h; row++) {
-                memcpy(&s->prev_framebuf[(y1 + row) * s->width + x1],
-                       &send_buf[(y1 + row) * s->width + x1], w->w * 4);
-            }
-            
-            tile_count++;
         }
         
         /* Send final batch with copy+borders+flush */
@@ -698,159 +432,94 @@ void *send_thread_func(void *arg) {
                     wlr_log(WLR_ERROR, "Pre-footer batch write send failed");
                     memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
                 }
-                drain_notify();
+                pending_writes++;
                 batch_count++;
                 off = 0;
                 
+                /* Drain to maintain adaptive pipeline depth */
+                int depth = pipeline_get_depth();
+                while (pending_writes > depth) {
+                    if (p9_write_recv(p9) < 0) write_errors++;
+                    pending_writes--;
+                }
             }
             
-            /* Copy buffer to window using 'a' (affine warp) command with scaling.
-             *
-             * Matrix uses 25.7 fixed-point (1.0 = 0x80 = 128).
-             *
-             * For upscaling by factor S (e.g., 1.5x):
-             * - Source image is at logical resolution (physical / S)
-             * - Window is at physical resolution
-             * - Matrix diagonal = 1/S (each dest pixel step = 1/S src pixel step)
-             *
-             * For scale=1.0, this is just an identity transform (1:1 copy).
-             */
-            
-            /* Get scale from draw state (set at runtime from -S flag) */
-            float scale = draw->scale;
-            if (scale <= 0.0f) scale = 1.0f;
-            
-            /* Matrix diagonal in 25.7 fixed-point: 1/scale * 128 */
-            int matrix_scale = (int)(128.0f / scale + 0.5f);
-            
-            /* smooth=1 enables bilinear interpolation.
-             * Enable for fractional scaling (scale != 1.0) to prevent aliasing.
-             * Disable for identity transform (scale ≈ 1.0) to avoid blurring.
-             */
-            float scale_diff = (scale > 1.0f) ? (scale - 1.0f) : (1.0f - scale);
-            int smooth = (scale_diff > 0.001f) ? 1 : 0;
-            
-            /* sp0 must be in SOURCE (logical) coordinates.
-             * p2 = M * local, sp = sp0 + p2
-             * After matrix: p2 = (win_minx/scale, win_miny/scale)
-             * We want sp = (0,0), so sp0 = (-win_minx/scale, -win_miny/scale)
-             */
-            int sp_x = -(int)(draw->win_minx / scale + 0.5f);
-            int sp_y = -(int)(draw->win_miny / scale + 0.5f);
-            
-            batch[off++] = 'a';
+            /* Copy buffer to window */
+            batch[off++] = 'd';
             PUT32(batch + off, draw->screen_id); off += 4;
-            /* R = dest rect in physical window coordinates */
+            PUT32(batch + off, draw->image_id); off += 4;
+            PUT32(batch + off, draw->opaque_id); off += 4;
             PUT32(batch + off, draw->win_minx); off += 4;
             PUT32(batch + off, draw->win_miny); off += 4;
             PUT32(batch + off, draw->win_minx + draw->width); off += 4;
             PUT32(batch + off, draw->win_miny + draw->height); off += 4;
-            PUT32(batch + off, draw->image_id); off += 4;
-            /* sp0 in logical (source) coordinates */
-            PUT32(batch + off, sp_x); off += 4;
-            PUT32(batch + off, sp_y); off += 4;
-            /* Scaling matrix in 25.7 fixed-point */
-            PUT32(batch + off, matrix_scale); off += 4;  /* m[0][0] = 1/scale */
-            PUT32(batch + off, 0); off += 4;              /* m[0][1] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[0][2] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[1][0] = 0 */
-            PUT32(batch + off, matrix_scale); off += 4;  /* m[1][1] = 1/scale */
-            PUT32(batch + off, 0); off += 4;              /* m[1][2] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[2][0] = 0 */
-            PUT32(batch + off, 0); off += 4;              /* m[2][1] = 0 */
-            PUT32(batch + off, 0x80); off += 4;           /* m[2][2] = 1.0 */
-            batch[off++] = smooth;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
             
-            /* 
-             * Draw borders using actual window bounds.
-             * This fills the gap between the TILE_SIZE-aligned content area
-             * and the actual window edges, creating equal borders on all sides.
-             *
-             * Content area: (win_minx, win_miny) to (win_minx + width, win_miny + height)
-             * Actual window: (actual_minx, actual_miny) to (actual_maxx, actual_maxy)
-             */
+            /* Draw borders */
+            int bw = 4;
             int mx = draw->win_minx;
             int my = draw->win_miny;
             int Mx = mx + draw->width;
             int My = my + draw->height;
             
-            /* Use actual window bounds if available, otherwise use a small border */
-            int ax = draw->actual_minx;
-            int ay = draw->actual_miny;
-            int Ax = draw->actual_maxx;
-            int Ay = draw->actual_maxy;
+            /* Top border */
+            batch[off++] = 'd';
+            PUT32(batch + off, draw->screen_id); off += 4;
+            PUT32(batch + off, draw->border_id); off += 4;
+            PUT32(batch + off, draw->opaque_id); off += 4;
+            PUT32(batch + off, mx); off += 4;
+            PUT32(batch + off, my); off += 4;
+            PUT32(batch + off, Mx); off += 4;
+            PUT32(batch + off, my + bw); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
             
-            /* Fallback: if actual bounds not set, use content bounds with 16px margin */
-            if (ax == 0 && ay == 0 && Ax == 0 && Ay == 0) {
-                ax = mx - 16;
-                ay = my - 16;
-                Ax = Mx + 16;
-                Ay = My + 16;
-            }
+            /* Bottom border */
+            batch[off++] = 'd';
+            PUT32(batch + off, draw->screen_id); off += 4;
+            PUT32(batch + off, draw->border_id); off += 4;
+            PUT32(batch + off, draw->opaque_id); off += 4;
+            PUT32(batch + off, mx); off += 4;
+            PUT32(batch + off, My - bw); off += 4;
+            PUT32(batch + off, Mx); off += 4;
+            PUT32(batch + off, My); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
             
-            /* Top border: from actual top to content top, full actual width */
-            if (my > ay) {
-                batch[off++] = 'd';
-                PUT32(batch + off, draw->screen_id); off += 4;
-                PUT32(batch + off, draw->border_id); off += 4;
-                PUT32(batch + off, draw->opaque_id); off += 4;
-                PUT32(batch + off, ax); off += 4;
-                PUT32(batch + off, ay); off += 4;
-                PUT32(batch + off, Ax); off += 4;
-                PUT32(batch + off, my); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-            }
+            /* Left border */
+            batch[off++] = 'd';
+            PUT32(batch + off, draw->screen_id); off += 4;
+            PUT32(batch + off, draw->border_id); off += 4;
+            PUT32(batch + off, draw->opaque_id); off += 4;
+            PUT32(batch + off, mx); off += 4;
+            PUT32(batch + off, my + bw); off += 4;
+            PUT32(batch + off, mx + bw); off += 4;
+            PUT32(batch + off, My - bw); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
             
-            /* Bottom border: from content bottom to actual bottom, full actual width */
-            if (Ay > My) {
-                batch[off++] = 'd';
-                PUT32(batch + off, draw->screen_id); off += 4;
-                PUT32(batch + off, draw->border_id); off += 4;
-                PUT32(batch + off, draw->opaque_id); off += 4;
-                PUT32(batch + off, ax); off += 4;
-                PUT32(batch + off, My); off += 4;
-                PUT32(batch + off, Ax); off += 4;
-                PUT32(batch + off, Ay); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-            }
-            
-            /* Left border: from content top to content bottom, actual left to content left */
-            if (mx > ax) {
-                batch[off++] = 'd';
-                PUT32(batch + off, draw->screen_id); off += 4;
-                PUT32(batch + off, draw->border_id); off += 4;
-                PUT32(batch + off, draw->opaque_id); off += 4;
-                PUT32(batch + off, ax); off += 4;
-                PUT32(batch + off, my); off += 4;
-                PUT32(batch + off, mx); off += 4;
-                PUT32(batch + off, My); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-            }
-            
-            /* Right border: from content top to content bottom, content right to actual right */
-            if (Ax > Mx) {
-                batch[off++] = 'd';
-                PUT32(batch + off, draw->screen_id); off += 4;
-                PUT32(batch + off, draw->border_id); off += 4;
-                PUT32(batch + off, draw->opaque_id); off += 4;
-                PUT32(batch + off, Mx); off += 4;
-                PUT32(batch + off, my); off += 4;
-                PUT32(batch + off, Ax); off += 4;
-                PUT32(batch + off, My); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-                PUT32(batch + off, 0); off += 4;
-            }
+            /* Right border */
+            batch[off++] = 'd';
+            PUT32(batch + off, draw->screen_id); off += 4;
+            PUT32(batch + off, draw->border_id); off += 4;
+            PUT32(batch + off, draw->opaque_id); off += 4;
+            PUT32(batch + off, Mx - bw); off += 4;
+            PUT32(batch + off, my + bw); off += 4;
+            PUT32(batch + off, Mx); off += 4;
+            PUT32(batch + off, My - bw); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
+            PUT32(batch + off, 0); off += 4;
             
             /* Flush */
             batch[off++] = 'v';
@@ -859,28 +528,46 @@ void *send_thread_func(void *arg) {
                 wlr_log(WLR_ERROR, "Final batch write send failed");
                 memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
             }
-            drain_notify();
+            pending_writes++;
             batch_count++;
             
             t_send_done = now_us();
             
-            double send_ms = (t_send_done - t_frame_start) / 1000.0;
-            int pending = atomic_load(&drain.pending);
+            /* Collect remaining pipelined responses */
+            while (pending_writes > 0) {
+                if (p9_write_recv(p9) < 0) {
+                    write_errors++;
+                }
+                pending_writes--;
+            }
             
-            /* Log PIPE stats frequently for debugging */
-            if (send_count % 30 == 0) {
-                wlr_log(WLR_INFO, "PIPE: %d batches, send=%.1fms, pending=%d",
-                    batch_count, send_ms, pending);
+            t_recv_done = now_us();
+            
+            if (write_errors > 0) {
+                wlr_log(WLR_ERROR, "Pipelined writes: %d/%d failed", write_errors, batch_count);
+                memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+            }
+            
+            double send_ms = (t_send_done - t_frame_start) / 1000.0;
+            double recv_ms = (t_recv_done - t_send_done) / 1000.0;
+            double total_ms = (t_recv_done - t_frame_start) / 1000.0;
+            
+            /* Adjust pipeline depth based on send/drain ratio */
+            pipeline_adjust(send_ms, recv_ms, batch_count);
+            
+            if (total_ms > 50 || send_count <= 10) {
+                wlr_log(WLR_INFO, "PIPE(d=%d): %d batches, send=%.1fms, drain=%.1fms, total=%.1fms",
+                    pipeline_get_depth(), batch_count, send_ms, recv_ms, total_ms);
             }
             
             /* Enable alpha-delta mode after first successful full frame */
-            if (!draw->xor_enabled && tile_count > 0) {
+            if (!draw->xor_enabled && tile_count > 0 && write_errors == 0) {
                 draw->xor_enabled = 1;
                 wlr_log(WLR_INFO, "Alpha-delta mode enabled for future frames");
             }
             
             send_count++;
-            if (send_count % 30 == 0) {
+            if (send_count <= 20 || send_count % 100 == 0) {
                 int ratio = bytes_raw > 0 ? (int)(bytes_sent * 100 / bytes_raw) : 100;
                 if (scrolled_regions > 0) {
                     wlr_log(WLR_INFO, "Send #%d: %d tiles (%d comp, %d delta) %zu->%zu bytes (%d%%) [%d regions scrolled] [%d batches]", 
@@ -900,11 +587,6 @@ void *send_thread_func(void *arg) {
         pthread_mutex_unlock(&s->send_lock);
     }
     
-    /* Cleanup */
-    drain_stop();
-    compress_pool_shutdown();
-    if (work) free(work);
-    if (results) free(results);
     if (comp_buf) free(comp_buf);
     free(batch);
     wlr_log(WLR_INFO, "Send thread exiting");

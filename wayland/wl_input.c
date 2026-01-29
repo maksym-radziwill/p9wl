@@ -147,37 +147,20 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
 void handle_mouse(struct server *s, int mx, int my, int buttons) {
     struct focus_manager *fm = &s->focus;
     
-    /* Mouse coordinates from 9front are in PHYSICAL screen coordinates.
-     * Compositor operates at LOGICAL resolution (s->width, s->height).
-     * Convert physical mouse coords to logical using draw->input_scale.
-     */
-    float scale = s->draw.input_scale;
-    if (scale <= 0.0f) scale = 1.0f;
+    /* Translate from screen coordinates to window-local coordinates */
+    int local_x = mx - s->draw.win_minx;
+    int local_y = my - s->draw.win_miny;
     
-    /* Convert to window-relative physical, then to logical */
-    int phys_local_x = mx - s->draw.win_minx;
-    int phys_local_y = my - s->draw.win_miny;
-    
-    int local_x = (int)(phys_local_x / scale + 0.5f);
-    int local_y = (int)(phys_local_y / scale + 0.5f);
-    
-    /* Use scene dimensions (what Wayland apps see) for cursor positioning.
-     * This differs from s->width/height in fractional Wayland mode. */
-    int scene_w = s->draw.scene_width;
-    int scene_h = s->draw.scene_height;
-    if (scene_w <= 0) scene_w = s->width;
-    if (scene_h <= 0) scene_h = s->height;
-    
-    /* Clamp to scene bounds */
+    /* Clamp to window bounds */
     if (local_x < 0) local_x = 0;
     if (local_y < 0) local_y = 0;
-    if (local_x >= scene_w) local_x = scene_w - 1;
-    if (local_y >= scene_h) local_y = scene_h - 1;
+    if (local_x >= s->width) local_x = s->width - 1;
+    if (local_y >= s->height) local_y = s->height - 1;
     
-    /* Update cursor position (using scene logical coordinates) */
+    /* Update cursor position */
     wlr_cursor_warp_absolute(s->cursor, NULL,
-                             (double)local_x / scene_w,
-                             (double)local_y / scene_h);
+                             (double)local_x / s->width,
+                             (double)local_y / s->height);
     
     /* Find surface under cursor */
     double sx, sy;

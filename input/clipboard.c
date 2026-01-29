@@ -4,10 +4,6 @@
  * Syncs the Wayland clipboard with Plan 9's /dev/snarf:
  * - When a Wayland client copies, write to /dev/snarf
  * - When a Wayland client pastes, read from /dev/snarf (lazily, on demand)
- *
- * IMPORTANT: All 9P I/O is done asynchronously to avoid blocking the
- * Wayland event loop. The snarf read for paste operations is done in
- * a detached thread.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -32,6 +28,7 @@
 #include "../p9/p9.h"
 
 #define SNARF_MAX_SIZE (1024 * 1024)  /* 1MB max clipboard */
+#define SNARF_CHUNK_SIZE 8192         /* Read chunk size for async transfer */
 
 /* Forward declaration */
 static void snarf_to_wayland_register(struct server *s);
@@ -41,8 +38,8 @@ static void snarf_to_wayland_register(struct server *s);
  * ───────────────────────────────────────────────────────────────────────────── */
 
 static const char *text_mime_types[] = {
-    "text/plain;charset=utf-8",
     "text/plain",
+    "text/plain;charset=utf-8",
     "UTF8_STRING",
     "STRING",
     "TEXT",
@@ -52,15 +49,7 @@ static const char *text_mime_types[] = {
 
 /* Check if mime type is a text type we handle */
 static bool is_text_mime_type(const char *mime) {
-    if (!mime) return false;
-    
-    /* Handle text/plain with any charset variant */
-    if (strncmp(mime, "text/plain", 10) == 0) {
-        return true;
-    }
-    
-    /* Check exact matches for X11-style types */
-    for (size_t i = 2; i < NUM_TEXT_MIME_TYPES; i++) {
+    for (size_t i = 0; i < NUM_TEXT_MIME_TYPES; i++) {
         if (strcmp(mime, text_mime_types[i]) == 0) {
             return true;
         }
@@ -88,7 +77,7 @@ static const char *find_text_mime_type(struct wl_array *mime_types) {
  * 
  * Ownership dance:
  *   1. Client copies  → Wayland makes client the "selection owner"
- *   2. We read data   → async via event loop fd, then write to snarf
+ *   2. We read data   → async via pipe, then write to snarf
  *   3. We reclaim     → register ourselves as owner again
  *   4. Future pastes  → all go through snarf, even Wayland-to-Wayland
  *
@@ -96,7 +85,7 @@ static const char *find_text_mime_type(struct wl_array *mime_types) {
  * ───────────────────────────────────────────────────────────────────────────── */
 
 /* State for async transfer from Wayland client to snarf */
-struct wayland_to_snarf_state {
+struct wayland_to_snarf_transfer {
     struct server *server;
     struct wl_event_source *event_source;
     int fd;
@@ -106,15 +95,15 @@ struct wayland_to_snarf_state {
 };
 
 static int wayland_to_snarf_read_handler(int fd, uint32_t mask, void *data) {
-    struct wayland_to_snarf_state *state = data;
+    struct wayland_to_snarf_transfer *transfer = data;
     
     if (mask & WL_EVENT_READABLE) {
-        char tmp[8192];
+        char tmp[SNARF_CHUNK_SIZE];
         ssize_t n = read(fd, tmp, sizeof(tmp));
         if (n > 0) {
-            if (state->len + n < state->capacity) {
-                memcpy(state->buf + state->len, tmp, n);
-                state->len += n;
+            if (transfer->len + n < transfer->capacity) {
+                memcpy(transfer->buf + transfer->len, tmp, n);
+                transfer->len += n;
             }
             return 0;  /* Keep listening */
         }
@@ -122,23 +111,25 @@ static int wayland_to_snarf_read_handler(int fd, uint32_t mask, void *data) {
     }
     
     /* Step 2: Write captured data to snarf */
-    if (state->len > 0) {
-        state->buf[state->len] = '\0';
-        int ret = p9_write_file(&state->server->p9_snarf, "snarf", 
-                                state->buf, state->len);
+    if (transfer->len > 0) {
+        transfer->buf[transfer->len] = '\0';
+        int ret = p9_write_file(&transfer->server->p9_snarf, "snarf", 
+                                transfer->buf, transfer->len);
         if (ret < 0) {
             wlr_log(WLR_ERROR, "wayland_to_snarf: write failed");
         } else {
-            wlr_log(WLR_INFO, "wayland_to_snarf: copied %zu bytes", state->len);
+            wlr_log(WLR_INFO, "wayland_to_snarf: copied %zu bytes", transfer->len);
         }
+    } else {
+        wlr_log(WLR_DEBUG, "wayland_to_snarf: no data received from source");
     }
     
-    struct server *s = state->server;
+    struct server *s = transfer->server;
     
-    wl_event_source_remove(state->event_source);
-    close(state->fd);
-    free(state->buf);
-    free(state);
+    wl_event_source_remove(transfer->event_source);
+    close(transfer->fd);
+    free(transfer->buf);
+    free(transfer);
     
     /* Step 3: Reclaim ownership so future pastes go through snarf */
     snarf_to_wayland_register(s);
@@ -179,40 +170,43 @@ static void on_wayland_copy(struct wl_listener *listener, void *data) {
     fcntl(fds[0], F_SETFL, O_NONBLOCK);
     
     /* Set up async transfer state */
-    struct wayland_to_snarf_state *state = calloc(1, sizeof(*state));
-    if (!state) {
+    struct wayland_to_snarf_transfer *transfer = calloc(1, sizeof(*transfer));
+    if (!transfer) {
+        wlr_log(WLR_ERROR, "on_wayland_copy: failed to allocate transfer state");
         close(fds[0]);
         close(fds[1]);
         return;
     }
     
-    state->server = s;
-    state->fd = fds[0];
-    state->capacity = SNARF_MAX_SIZE;
-    state->buf = malloc(state->capacity);
-    if (!state->buf) {
-        free(state);
+    transfer->server = s;
+    transfer->fd = fds[0];
+    transfer->capacity = SNARF_MAX_SIZE;
+    transfer->buf = malloc(transfer->capacity);
+    if (!transfer->buf) {
+        wlr_log(WLR_ERROR, "on_wayland_copy: failed to allocate transfer buffer");
+        free(transfer);
         close(fds[0]);
         close(fds[1]);
         return;
     }
-    state->len = 0;
+    transfer->len = 0;
     
     /* Add to event loop */
-    state->event_source = wl_event_loop_add_fd(
+    transfer->event_source = wl_event_loop_add_fd(
         wl_display_get_event_loop(s->display),
         fds[0], WL_EVENT_READABLE,
-        wayland_to_snarf_read_handler, state);
+        wayland_to_snarf_read_handler, transfer);
     
-    if (!state->event_source) {
-        free(state->buf);
-        free(state);
+    if (!transfer->event_source) {
+        wlr_log(WLR_ERROR, "on_wayland_copy: failed to add fd to event loop");
+        free(transfer->buf);
+        free(transfer);
         close(fds[0]);
         close(fds[1]);
         return;
     }
     
-    /* Request data from source - this closes fds[1] when done */
+    /* Request data from source - this closes fds[1] */
     wlr_data_source_send(event->source, mime, fds[1]);
 }
 
@@ -222,6 +216,8 @@ static void on_wayland_copy(struct wl_listener *listener, void *data) {
  * We intentionally do NOT sync primary selection to snarf. Primary selection
  * changes frequently (every text highlight), and syncing would overwrite the
  * snarf buffer unexpectedly. Only explicit Ctrl+C copies go to snarf.
+ *
+ * This still allows middle-click paste to work between Wayland clients.
  */
 static void on_wayland_primary_copy(struct wl_listener *listener, void *data) {
     struct server *s = wl_container_of(listener, s, wayland_to_snarf_primary);
@@ -231,18 +227,17 @@ static void on_wayland_primary_copy(struct wl_listener *listener, void *data) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * Snarf → Wayland (client requests paste) - ASYNC VERSION
+ * Snarf → Wayland (client requests paste)
  *
  * We register as the Wayland "selection owner" so paste requests come to us.
- * 
- * CRITICAL: The p9_read_file() call blocks on network I/O. If we do this in
- * the Wayland event callback, we block the entire compositor. Instead, we
- * spawn a detached thread to do the 9P read and write to the client fd.
  *
- * Flow:
+ * Lazy read:
  *   1. Client pastes  → Wayland calls our send callback
- *   2. We spawn thread → thread reads from /dev/snarf (blocking is OK in thread)
- *   3. Thread writes  → to the client's fd, then closes it
+ *   2. We read snarf  → fresh read from /dev/snarf at that moment
+ *   3. We write data  → to the client's fd, then close it
+ *
+ * By reading lazily (not caching), pastes always get current snarf contents,
+ * even if Plan 9 modified snarf since our last copy.
  * ───────────────────────────────────────────────────────────────────────────── */
 
 /* 
@@ -254,44 +249,6 @@ struct snarf_to_wayland_source {
     struct server *server;
 };
 
-/* State passed to the async read thread */
-struct snarf_read_thread_args {
-    struct p9conn *p9;  /* The snarf 9P connection */
-    int fd;             /* fd to write to (from wlr_data_source_send) */
-};
-
-/* Thread function: read from snarf and write to client fd */
-static void *snarf_read_thread(void *arg) {
-    struct snarf_read_thread_args *args = arg;
-    
-    char *buf = malloc(SNARF_MAX_SIZE);
-    if (buf) {
-        int len = p9_read_file(args->p9, "snarf", buf, SNARF_MAX_SIZE);
-        if (len > 0) {
-            /* Write all data to fd - may need multiple writes */
-            ssize_t total = 0;
-            while (total < len) {
-                ssize_t n = write(args->fd, buf + total, len - total);
-                if (n <= 0) {
-                    if (n < 0 && errno == EINTR) continue;
-                    break;  /* Error or would block */
-                }
-                total += n;
-            }
-            wlr_log(WLR_INFO, "snarf_to_wayland: sent %zd/%d bytes", total, len);
-        } else {
-            wlr_log(WLR_DEBUG, "snarf_to_wayland: snarf empty or read failed");
-        }
-        free(buf);
-    } else {
-        wlr_log(WLR_ERROR, "snarf_to_wayland: failed to allocate read buffer");
-    }
-    
-    close(args->fd);
-    free(args);
-    return NULL;
-}
-
 static void snarf_to_wayland_destroy(struct wlr_data_source *source) {
     struct snarf_to_wayland_source *sts = wl_container_of(source, sts, base);
     /* Note: wlroots frees mime_types strings before calling this */
@@ -302,40 +259,21 @@ static void snarf_to_wayland_send(struct wlr_data_source *source,
                                   const char *mime_type, int fd) {
     struct snarf_to_wayland_source *sts = wl_container_of(source, sts, base);
     
-    wlr_log(WLR_DEBUG, "snarf_to_wayland_send: mime='%s' fd=%d", mime_type, fd);
-    
-    if (!is_text_mime_type(mime_type)) {
-        wlr_log(WLR_DEBUG, "snarf_to_wayland_send: unsupported mime '%s'", mime_type);
-        close(fd);
-        return;
+    if (is_text_mime_type(mime_type)) {
+        char *buf = malloc(SNARF_MAX_SIZE);
+        if (buf) {
+            int len = p9_read_file(&sts->server->p9_snarf, "snarf", buf, SNARF_MAX_SIZE);
+            if (len > 0) {
+                ssize_t ret = write(fd, buf, len);
+                (void)ret;
+                wlr_log(WLR_DEBUG, "snarf_to_wayland_send: sent %d bytes", len);
+            }
+            free(buf);
+        } else {
+            wlr_log(WLR_ERROR, "snarf_to_wayland_send: failed to allocate buffer");
+        }
     }
-    
-    /* Allocate args for the thread */
-    struct snarf_read_thread_args *args = malloc(sizeof(*args));
-    if (!args) {
-        wlr_log(WLR_ERROR, "snarf_to_wayland_send: failed to allocate thread args");
-        close(fd);
-        return;
-    }
-    
-    args->p9 = &sts->server->p9_snarf;
-    args->fd = fd;
-    
-    /* Spawn detached thread to do the blocking 9P read */
-    pthread_t thread;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    
-    if (pthread_create(&thread, &attr, snarf_read_thread, args) != 0) {
-        wlr_log(WLR_ERROR, "snarf_to_wayland_send: failed to create thread: %s",
-                strerror(errno));
-        close(fd);
-        free(args);
-    }
-    
-    pthread_attr_destroy(&attr);
-    /* Thread will close fd and free args when done */
+    close(fd);
 }
 
 static const struct wlr_data_source_impl snarf_to_wayland_impl = {
@@ -367,7 +305,7 @@ static void snarf_to_wayland_register(struct server *s) {
     }
     
     wlr_seat_set_selection(s->seat, &source->base, wl_display_next_serial(s->display));
-    wlr_log(WLR_INFO, "snarf_to_wayland_register: registered as selection owner");
+    wlr_log(WLR_DEBUG, "snarf_to_wayland_register: registered as selection owner");
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -387,7 +325,7 @@ int clipboard_init(struct server *s) {
     /* Snarf → Wayland: register as selection owner (reads lazily on paste) */
     snarf_to_wayland_register(s);
     
-    wlr_log(WLR_INFO, "clipboard: initialized (async paste mode)");
+    wlr_log(WLR_INFO, "clipboard: initialized");
     return 0;
 }
 

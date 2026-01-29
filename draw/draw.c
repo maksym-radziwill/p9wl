@@ -19,21 +19,6 @@
 #include "../p9/p9.h"
 #include "send.h"  /* For TILE_SIZE */
 
-/*
- * FRACTIONAL SCALING SUPPORT
- *
- * When DRAW_SCALE > 1.0, the compositor runs at logical resolution
- * and 9front scales up to physical resolution using the 'a' command.
- *
- * Example: DRAW_SCALE = 1.5
- *   Physical window: 1552 x 880
- *   Logical source:  1035 x 587 (physical / 1.5)
- *   Bandwidth savings: sends 44% as many pixels (1/1.5²)
- *
- * Set to 1.0 for no scaling (1:1 pixel mapping).
- */
-#define DRAW_SCALE 1.0f
-
 /* Round down to nearest multiple of TILE_SIZE to avoid partial edge tiles */
 #define TILE_ALIGN_DOWN(x) (((x) / TILE_SIZE) * TILE_SIZE)
 
@@ -204,11 +189,9 @@ int relookup_window(struct server *s) {
         wlr_log(WLR_INFO, "relookup_window: resize pending %dx%d -> %dx%d, main thread will handle",
                 draw->width, draw->height, new_width, new_height);
     } else {
-        /* Just position change, update now and force full redraw */
+        /* Just position change, update now */
         wlr_log(WLR_INFO, "Window position updated: '%s' at (%d,%d) %dx%d",
                 draw->winname, draw->win_minx, draw->win_miny, draw->width, draw->height);
-        s->force_full_frame = 1;
-        s->frame_dirty = 1;
     }
     
     return 0;
@@ -454,34 +437,7 @@ int init_draw(struct server *s) {
     /* Allocate memory image for framebuffer */
     draw->image_id = 1;
     
-    /* Compute logical dimensions for the source image.
-     * Physical dimensions: draw->width x draw->height
-     * Logical dimensions: physical / DRAW_SCALE
-     * The 'a' command will scale from logical to physical.
-     */
-    int logical_width = (int)(draw->width / DRAW_SCALE + 0.5f);
-    int logical_height = (int)(draw->height / DRAW_SCALE + 0.5f);
-    
-    /* Ensure logical dimensions are tile-aligned */
-    logical_width = TILE_ALIGN_DOWN(logical_width);
-    logical_height = TILE_ALIGN_DOWN(logical_height);
-    if (logical_width < MIN_ALIGNED_DIM) logical_width = MIN_ALIGNED_DIM;
-    if (logical_height < MIN_ALIGNED_DIM) logical_height = MIN_ALIGNED_DIM;
-    
-    if (DRAW_SCALE != 1.0f) {
-        wlr_log(WLR_INFO, "Fractional scaling: physical %dx%d -> logical %dx%d (scale=%.2f)",
-                draw->width, draw->height, logical_width, logical_height, DRAW_SCALE);
-    }
-    
-    /* Store logical dimensions for use by send.c */
-    draw->logical_width = logical_width;
-    draw->logical_height = logical_height;
-    draw->scale = DRAW_SCALE;
-    draw->input_scale = DRAW_SCALE;  /* Default: same as draw scale */
-    draw->scene_width = logical_width;   /* Default: same as logical */
-    draw->scene_height = logical_height;
-    
-    /* 'b' command: allocate image at LOGICAL resolution */
+    /* 'b' command: allocate image */
     uint8_t bcmd[1 + 4 + 4 + 1 + 4 + 1 + 16 + 16 + 4];
     int off = 0;
     
@@ -493,12 +449,12 @@ int init_draw(struct server *s) {
     bcmd[off++] = 0;                              /* repl = 0 */
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, logical_width); off += 4;   /* width at logical resolution */
-    PUT32(bcmd + off, logical_height); off += 4;  /* height at logical resolution */
+    PUT32(bcmd + off, draw->width); off += 4;
+    PUT32(bcmd + off, draw->height); off += 4;
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, logical_width); off += 4;
-    PUT32(bcmd + off, logical_height); off += 4;
+    PUT32(bcmd + off, draw->width); off += 4;
+    PUT32(bcmd + off, draw->height); off += 4;
     PUT32(bcmd + off, 0xFF000000); off += 4;      /* color = black */
     
     wlr_log(WLR_DEBUG, "Allocating image: 'b' cmd size=%d", off);
@@ -508,8 +464,8 @@ int init_draw(struct server *s) {
         wlr_log(WLR_ERROR, "Failed to allocate framebuffer image");
         return -1;
     }
-    wlr_log(WLR_INFO, "Allocated framebuffer image %d (%dx%d logical, %.2fx scale) format=XRGB32", 
-            draw->image_id, logical_width, logical_height, DRAW_SCALE);
+    wlr_log(WLR_INFO, "Allocated framebuffer image %d (%dx%d) format=XRGB32", 
+            draw->image_id, draw->width, draw->height);
     
     /* Allocate opaque mask: 1x1 white image with repl=1 */
     draw->opaque_id = 2;

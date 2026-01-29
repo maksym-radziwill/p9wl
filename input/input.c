@@ -694,70 +694,44 @@ void *kbd_thread_func(void *arg) {
 }
 
 /* Window control thread - watches /dev/wctl for geometry changes.
- * Opens/reads/closes each iteration to allow other programs (like riow) to access wctl.
+ * In Plan 9, reading from wctl blocks until the window state changes.
+ * This is the "watch file" pattern - no polling needed!
  */
 void *wctl_thread_func(void *arg) {
     struct server *s = arg;
     struct p9conn *p9 = &s->p9_wctl;
+    uint32_t wctl_fid;
+    const char *wnames[] = { "wctl" };
     char buf[128];
     int last_x0 = -1, last_y0 = -1, last_x1 = -1, last_y1 = -1;
-    int was_hidden = 0;
-    uint32_t wctl_fid = p9->next_fid++;  /* Use single fid, reuse it */
     
-    wlr_log(WLR_INFO, "Wctl thread started - polling /dev/wctl for window changes");
+    /* Walk to /dev/wctl */
+    wctl_fid = p9->next_fid++;
+    if (p9_walk(p9, p9->root_fid, wctl_fid, 1, wnames) < 0) {
+        wlr_log(WLR_ERROR, "Wctl thread: failed to walk to /dev/wctl");
+        return NULL;
+    }
+    if (p9_open(p9, wctl_fid, OREAD, NULL) < 0) {
+        wlr_log(WLR_ERROR, "Wctl thread: failed to open /dev/wctl");
+        return NULL;
+    }
+    
+    wlr_log(WLR_INFO, "Wctl thread started - watching /dev/wctl for window changes");
     
     while (s->running) {
-        const char *wnames[] = { "wctl" };
-        
-        if (p9_walk(p9, p9->root_fid, wctl_fid, 1, wnames) < 0) {
-            usleep(500000);
-            continue;
-        }
-        
-        if (p9_open(p9, wctl_fid, OREAD, NULL) < 0) {
-            p9_clunk(p9, wctl_fid);
-            usleep(500000);
-            continue;
-        }
-        
-        /* Read wctl: "x0 y0 x1 y1 current|notcurrent hidden|visible" */
+        /* This read BLOCKS until window state changes!
+         * wctl format: "x0 y0 x1 y1 current|notcurrent hidden|visible"
+         * ~72 bytes of space-separated values
+         */
         int n = p9_read(p9, wctl_fid, 0, sizeof(buf) - 1, (uint8_t*)buf);
-        
-        /* Close immediately to release the file for other programs */
-        p9_clunk(p9, wctl_fid);
-        
         if (n <= 0) {
-            usleep(500000);
-            continue;
+            if (s->running) {
+                wlr_log(WLR_ERROR, "Wctl thread: read failed");
+            }
+            break;
         }
         
         buf[n] = '\0';
-        
-        /* Check for hidden/visible state */
-        int is_hidden = (strstr(buf, "hidden") != NULL);
-        int is_visible = (strstr(buf, "visible") != NULL);
-        
-        /* Detect unhide: was hidden, now visible */
-        if (was_hidden && is_visible) {
-            wlr_log(WLR_INFO, "Wctl: window unhidden, triggering full redraw");
-            
-            /* Invalidate prev_framebuf so next frame is seen as different */
-            if (s->prev_framebuf && s->width > 0 && s->height > 0) {
-                memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
-            }
-            s->force_full_frame = 1;
-            s->window_changed = 1;
-            
-            /* Wake up send thread */
-            pthread_mutex_lock(&s->send_lock);
-            pthread_cond_signal(&s->send_cond);
-            pthread_mutex_unlock(&s->send_lock);
-        }
-        
-        if (is_hidden)
-            was_hidden = 1;
-        else if (is_visible)
-            was_hidden = 0;
         
         /* Parse the wctl data: "x0 y0 x1 y1 ..." */
         int x0, y0, x1, y1;
@@ -783,10 +757,13 @@ void *wctl_thread_func(void *arg) {
                 pthread_cond_signal(&s->send_cond);
                 pthread_mutex_unlock(&s->send_lock);
             }
+            /* Note: If /dev/wctl doesn't actually block, this loop will spin.
+             * But we have the 2-second probe fallback in send thread anyway.
+             * Don't sleep here - if wctl blocks we want fast response. */
         }
         
-        /* Poll interval - 500ms to minimize interference with riow */
-        usleep(500000);
+        /* Small sleep to prevent busy loop if wctl doesn't block */
+        usleep(50000);  /* 50ms */
     }
     
     wlr_log(WLR_INFO, "Wctl thread exiting");

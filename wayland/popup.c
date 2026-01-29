@@ -70,19 +70,9 @@ static void popup_commit(struct wl_listener *l, void *d) {
     struct server *s = pd->server;
     
     if (popup->base->initial_commit) {
-        /* For 9front scaling mode, s->width/height are already logical.
-         * For Wayland scaling or no scaling, convert physical to logical.
-         */
-        int logical_w, logical_h;
-        if (!s->wl_scaling && s->scale > 1.001f) {
-            /* 9front scaling: s->width is already logical */
-            logical_w = s->width;
-            logical_h = s->height;
-        } else {
-            /* Wayland scaling or no scaling */
-            logical_w = focus_phys_to_logical(s->width, s->scale);
-            logical_h = focus_phys_to_logical(s->height, s->scale);
-        }
+        /* Use logical dimensions for popup constraints */
+        int logical_w = focus_phys_to_logical(s->width, s->scale);
+        int logical_h = focus_phys_to_logical(s->height, s->scale);
         struct wlr_box box = {
             .x = 0,
             .y = 0,
