@@ -645,7 +645,9 @@ void *kbd_thread_func(void *arg) {
                         for (int j = 0; j < prev_nkeys; j++) {
                             if (prev_keys[j] == rune) { found = 1; break; }
                         }
-                        if (!found && !keymapmod(rune)) {
+                        if (!found) {
+                            /* Send ALL special keys including modifiers (Kctl→KEY_LEFTCTRL)
+                             * Modifiers need to be sent as actual key events for apps like Emacs */
                             keys_read++;
                             wlr_log(WLR_INFO, "Kbd PRESS: rune=0x%04x prev_nkeys=%d", rune, prev_nkeys);
                             struct input_event ev;
@@ -664,7 +666,7 @@ void *kbd_thread_func(void *arg) {
                         for (int j = 0; j < curr_nkeys; j++) {
                             if (curr_keys[j] == rune) { found = 1; break; }
                         }
-                        if (!found && !keymapmod(rune)) {
+                        if (!found) {
                             wlr_log(WLR_INFO, "Kbd RELEASE: rune=0x%04x", rune);
                             struct input_event ev;
                             ev.type = INPUT_KEY;

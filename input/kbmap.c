@@ -10,7 +10,11 @@
  *   rune: 'x (literal), ^X (control), 0xNNNN (hex), or decimal
  *
  * We build the INVERSE mapping: rune → (keycode, shift, ctrl)
- * For ctl layer entries, ctrl=1 so handle_key knows to add Ctrl modifier.
+ *
+ * For ctl layer entries, ctrl=0 because:
+ * - Modifier keys (Kctl, Kshift) are now sent as KEY_LEFTCTRL, KEY_LEFTSHIFT events
+ * - The Ctrl modifier is active from the physical key press
+ * - We just need to send the correct keycode (e.g., ^X → KEY_X)
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -218,8 +222,12 @@ static void parse_kbmap_line(struct kbmap *km, const char *line) {
      * Determine shift/ctrl state from layer:
      *   Layer 0 (none): shift=0, ctrl=0
      *   Layer 1 (shift): shift=1, ctrl=0
-     *   Layer 4 (ctl): shift=0, ctrl=1 (handle_key uses ctrl to add Ctrl modifier)
+     *   Layer 4 (ctl): shift=0, ctrl=0 - Kctl is now sent as KEY_LEFTCTRL event
      *   Other layers: skip (altgr, etc. not supported yet)
+     *
+     * Note: ctrl=0 for ctl layer because we now send Kctl as KEY_LEFTCTRL events
+     * from 'k'/'K' messages. The Ctrl modifier is handled by the physical key,
+     * not by synthesizing it in handle_key.
      */
     int shift = 0;
     int ctrl = 0;
@@ -232,9 +240,9 @@ static void parse_kbmap_line(struct kbmap *km, const char *line) {
         shift = 1;
         ctrl = 0;
         break;
-    case 4:  /* ctl - set ctrl=1 so handle_key adds Ctrl modifier */
+    case 4:  /* ctl - ctrl=0, Kctl handles the modifier via KEY_LEFTCTRL */
         shift = 0;
-        ctrl = 1;
+        ctrl = 0;
         break;
     default:
         /* Skip other layers for now */
