@@ -490,6 +490,7 @@ int main(int argc, char *argv[]) {
      * We use p9_draw since it's already connected to /dev. If this fails,
      * we fall back gracefully to the static keymap - non-fatal.
      */
+
     if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {        
         wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
     }

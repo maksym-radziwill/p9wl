@@ -1,17 +1,16 @@
 /*
  * kbmap.c - Dynamic keyboard map loading from Plan 9 /dev/kbmap
  *
- * /dev/kbmap format (tab-separated):
+ * /dev/kbmap format (space/tab-separated):
  *   layer  scancode  rune
  *
  * Where:
- *   layer: 0=none, 1=shift, 2=esc, 3=shiftesc, 4=ctl
+ *   layer: none, shift, esc, shiftesc, ctl, ctlesc, altgr, shiftaltgr, mod4, altgrmod4
  *   scancode: PC/AT scancode (0-127)
  *   rune: 'x (literal), ^X (control), 0xNNNN (hex), or decimal
  *
- * We build the INVERSE mapping: rune → (keycode, shift)
- * The ctrl flag is NEVER set because Ctrl state is tracked
- * separately via Kctl (0xF017) key events from 9front.
+ * We build the INVERSE mapping: rune → (keycode, shift, ctrl)
+ * For ctl layer entries, ctrl=1 so handle_key knows to add Ctrl modifier.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -115,7 +114,7 @@ static int scancode_to_keycode[128] = {
 };
 
 /* Add entry if not already present (prefer unshifted) */
-static void kbmap_add(struct kbmap *km, int rune, int keycode, int shift) {
+static void kbmap_add(struct kbmap *km, int rune, int keycode, int shift, int ctrl) {
     if (rune == 0 || keycode == 0) return;
     if (km->count >= KBMAP_MAX_ENTRIES) return;
     
@@ -126,16 +125,17 @@ static void kbmap_add(struct kbmap *km, int rune, int keycode, int shift) {
             if (!shift && km->entries[i].shift) {
                 km->entries[i].keycode = keycode;
                 km->entries[i].shift = 0;
+                km->entries[i].ctrl = ctrl;
             }
             return;
         }
     }
     
-    /* Add new entry - ctrl is ALWAYS 0 */
+    /* Add new entry */
     km->entries[km->count].rune = rune;
     km->entries[km->count].keycode = keycode;
     km->entries[km->count].shift = shift;
-    km->entries[km->count].ctrl = 0;  /* NEVER set ctrl - tracked via Kctl */
+    km->entries[km->count].ctrl = ctrl;
     km->count++;
 }
 
@@ -176,12 +176,31 @@ static int parse_rune(const char *s) {
 
 /* Parse one line from /dev/kbmap */
 static void parse_kbmap_line(struct kbmap *km, const char *line) {
+    char layer_str[32];
     int layer, scancode;
     char rune_str[64];
     
-    /* Format: layer scancode rune */
-    if (sscanf(line, "%d %d %63s", &layer, &scancode, rune_str) != 3)
+    /* Format: layer_string scancode rune (e.g., "none 30 97") */
+    if (sscanf(line, "%31s %d %63s", layer_str, &scancode, rune_str) != 3) {
+        wlr_log(WLR_DEBUG, "kbmap: sscanf failed on: '%s'", line);
         return;
+    }
+    
+    /* Convert layer string to number */
+    if (strcmp(layer_str, "none") == 0) layer = 0;
+    else if (strcmp(layer_str, "shift") == 0) layer = 1;
+    else if (strcmp(layer_str, "esc") == 0) layer = 2;
+    else if (strcmp(layer_str, "shiftesc") == 0) layer = 3;
+    else if (strcmp(layer_str, "ctl") == 0 || strcmp(layer_str, "ctrl") == 0) layer = 4;
+    else if (strcmp(layer_str, "ctlesc") == 0) layer = 5;
+    else if (strcmp(layer_str, "altgr") == 0) layer = 6;
+    else if (strcmp(layer_str, "shiftaltgr") == 0) layer = 7;
+    else if (strcmp(layer_str, "mod4") == 0) layer = 8;
+    else if (strcmp(layer_str, "altgrmod4") == 0) layer = 9;
+    else {
+        wlr_log(WLR_DEBUG, "kbmap: unknown layer '%s'", layer_str);
+        return;
+    }
     
     /* Validate */
     if (scancode < 0 || scancode >= 128) return;
@@ -196,35 +215,38 @@ static void parse_kbmap_line(struct kbmap *km, const char *line) {
     if (keycode == 0) return;
     
     /*
-     * Determine shift state from layer:
-     *   Layer 0 (none): shift=0
-     *   Layer 1 (shift): shift=1
-     *   Layer 4 (ctl): shift=0 (Ctrl tracked via Kctl events)
+     * Determine shift/ctrl state from layer:
+     *   Layer 0 (none): shift=0, ctrl=0
+     *   Layer 1 (shift): shift=1, ctrl=0
+     *   Layer 4 (ctl): shift=0, ctrl=1 (handle_key uses ctrl to add Ctrl modifier)
      *   Other layers: skip (altgr, etc. not supported yet)
      */
     int shift = 0;
+    int ctrl = 0;
     switch (layer) {
     case 0:  /* none */
         shift = 0;
+        ctrl = 0;
         break;
     case 1:  /* shift */
         shift = 1;
+        ctrl = 0;
         break;
-    case 4:  /* ctl - DO NOT set ctrl=1, just map the rune */
+    case 4:  /* ctl - set ctrl=1 so handle_key adds Ctrl modifier */
         shift = 0;
+        ctrl = 1;
         break;
     default:
         /* Skip other layers for now */
         return;
     }
     
-    kbmap_add(km, rune, keycode, shift);
+    kbmap_add(km, rune, keycode, shift, ctrl);
 }
 
 int kbmap_load(struct kbmap *km, struct p9conn *p9) {
     uint32_t kbmap_fid;
     const char *wnames[] = { "kbmap" };
-    uint8_t buf[8192];
     
     memset(km, 0, sizeof(*km));
     
@@ -235,20 +257,29 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9) {
         return -1;
     }
     
-    if (p9_open(p9, kbmap_fid, OREAD, NULL) < 0) {
+    uint32_t iounit = 8192;
+
+    if (p9_open(p9, kbmap_fid, OREAD, &iounit) < 0) {
         wlr_log(WLR_ERROR, "kbmap: failed to open /dev/kbmap");
         p9_clunk(p9, kbmap_fid);
         return -1;
     }
     
+    uint8_t *buf = malloc(iounit);
+    if (!buf) {
+        p9_clunk(p9, kbmap_fid);
+        return -1;
+    }
+
     /* Read entire file */
     uint64_t offset = 0;
     char *data = NULL;
     size_t data_size = 0;
     
     while (1) {
-        int n = p9_read(p9, kbmap_fid, offset, sizeof(buf), buf);
+        int n = p9_read(p9, kbmap_fid, offset, iounit, buf);
         if (n < 0) {
+            free(buf);
             free(data);
             p9_clunk(p9, kbmap_fid);
             return -1;
@@ -257,6 +288,7 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9) {
         
         char *tmp = realloc(data, data_size + n + 1);
         if (!tmp) {
+            free(buf);
             free(data);
             p9_clunk(p9, kbmap_fid);
             return -1;
@@ -267,6 +299,7 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9) {
         offset += n;
     }
     
+    free(buf);
     p9_clunk(p9, kbmap_fid);
     
     if (!data) return -1;
@@ -296,9 +329,13 @@ const struct kbmap_entry *kbmap_lookup(struct kbmap *km, int rune) {
     if (!km || !km->loaded) return NULL;
     
     for (int i = 0; i < km->count; i++) {
-        if (km->entries[i].rune == rune)
+        if (km->entries[i].rune == rune) {
+            wlr_log(WLR_DEBUG, "kbmap_lookup: rune=%d -> keycode=%d shift=%d ctrl=%d",
+                    rune, km->entries[i].keycode, km->entries[i].shift, km->entries[i].ctrl);
             return &km->entries[i];
+        }
     }
+    wlr_log(WLR_DEBUG, "kbmap_lookup: rune=%d not found", rune);
     return NULL;
 }
 
