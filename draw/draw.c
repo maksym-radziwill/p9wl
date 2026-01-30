@@ -192,6 +192,8 @@ int relookup_window(struct server *s) {
         /* Just position change, update now */
         wlr_log(WLR_INFO, "Window position updated: '%s' at (%d,%d) %dx%d",
                 draw->winname, draw->win_minx, draw->win_miny, draw->width, draw->height);
+    	s->force_full_frame = 1;
+        s->frame_dirty = 1;
     }
     
     return 0;
