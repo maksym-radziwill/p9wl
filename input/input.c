@@ -599,12 +599,17 @@ void *kbd_thread_func(void *arg) {
                     int rune = 0;
                     int consumed = utf8_decode(p, msg_end, &rune);
                     if (consumed > 0 && rune != 0 && rune < KF) {
-                        /* Skip control characters when modifiers are held - 
-                         * the 'k' message handles them to avoid double ctrl manipulation */
-                        if (rune < 32 && prev_mods != 0) {
-                            wlr_log(WLR_DEBUG, "Kbd 'c': skip ctrl char 0x%02x (mods held)", rune);
-                        } else {
-                            /* Regular character (below KF range) - send press+release */
+                        /* Skip when Ctrl or Alt is held - those combos are handled
+                         * via 'k' messages to get proper key events.
+                         * Check prev_mods for CTRL or ALT bits. */
+                        int skip = 0;
+                        if (prev_mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) {
+                            skip = 1;
+                            wlr_log(WLR_DEBUG, "Kbd 'c': skip 0x%04x (ctrl/alt held)", rune);
+                        }
+                        
+                        if (!skip) {
+                            /* Regular character - send press+release */
                             keys_read++;
                             wlr_log(WLR_DEBUG, "Kbd 'c': char 0x%04x '%c'", 
                                     rune, (rune >= 32 && rune < 127) ? rune : '?');
@@ -644,6 +649,16 @@ void *kbd_thread_func(void *arg) {
                 
                 if (is_press) {
                     /* 'k' message: find newly pressed keys */
+                    
+                    /* Check if Ctrl or Alt is held (not just Shift) */
+                    int ctrl_alt_held = 0;
+                    for (int i = 0; i < curr_nkeys; i++) {
+                        if (curr_keys[i] == Kctl || curr_keys[i] == Kalt) { 
+                            ctrl_alt_held = 1; 
+                            break; 
+                        }
+                    }
+                    
                     for (int i = 0; i < curr_nkeys; i++) {
                         int rune = curr_keys[i];
                         int found = 0;
@@ -652,11 +667,12 @@ void *kbd_thread_func(void *arg) {
                         }
                         if (!found) {
                             /* For special keys (>= KF), always send */
-                            /* For regular keys (< KF), only send when modifiers are held */
-                            if (rune >= KF || curr_mods != 0) {
+                            /* For regular keys (< KF), only send when CTRL or ALT is held
+                             * (not Shift - shifted chars come via 'c' message) */
+                            if (rune >= KF || ctrl_alt_held) {
                                 keys_read++;
-                                wlr_log(WLR_INFO, "Kbd PRESS: rune=0x%04x prev_nkeys=%d mods=0x%x", 
-                                        rune, prev_nkeys, curr_mods);
+                                wlr_log(WLR_INFO, "Kbd PRESS: rune=0x%04x prev_nkeys=%d ctrl_alt=%d", 
+                                        rune, prev_nkeys, ctrl_alt_held);
                                 struct input_event ev;
                                 ev.type = INPUT_KEY;
                                 ev.key.rune = rune;
@@ -667,6 +683,16 @@ void *kbd_thread_func(void *arg) {
                     }
                 } else {
                     /* 'K' message: find released keys */
+                    
+                    /* Check if Ctrl or Alt was held */
+                    int ctrl_alt_was_held = 0;
+                    for (int i = 0; i < prev_nkeys; i++) {
+                        if (prev_keys[i] == Kctl || prev_keys[i] == Kalt) { 
+                            ctrl_alt_was_held = 1; 
+                            break; 
+                        }
+                    }
+                    
                     for (int i = 0; i < prev_nkeys; i++) {
                         int rune = prev_keys[i];
                         int found = 0;
@@ -675,9 +701,9 @@ void *kbd_thread_func(void *arg) {
                         }
                         if (!found) {
                             /* For special keys (>= KF), always send */
-                            /* For regular keys (< KF), only send when modifiers were held */
-                            if (rune >= KF || prev_mods != 0) {
-                                wlr_log(WLR_INFO, "Kbd RELEASE: rune=0x%04x mods=0x%x", rune, prev_mods);
+                            /* For regular keys (< KF), only send when CTRL or ALT was held */
+                            if (rune >= KF || ctrl_alt_was_held) {
+                                wlr_log(WLR_INFO, "Kbd RELEASE: rune=0x%04x ctrl_alt=%d", rune, ctrl_alt_was_held);
                                 struct input_event ev;
                                 ev.type = INPUT_KEY;
                                 ev.key.rune = rune;
