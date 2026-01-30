@@ -480,6 +480,21 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /*
+     * Load dynamic keyboard map from /dev/kbmap.
+     *
+     * This reads the 9front keyboard layout and builds a rune→keycode
+     * mapping. Without this, keymap_lookup_dynamic() always falls back
+     * to the static US-layout keymap table.
+     *
+     * We use p9_draw since it's already connected to /dev. If this fails,
+     * we fall back gracefully to the static keymap - non-fatal.
+     */
+    if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {        
+        wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
+    }
+
+
     /* Set dimensions from draw device */
     s.width = s.draw.width;
     s.height = s.draw.height;
