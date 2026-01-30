@@ -599,21 +599,27 @@ void *kbd_thread_func(void *arg) {
                     int rune = 0;
                     int consumed = utf8_decode(p, msg_end, &rune);
                     if (consumed > 0 && rune != 0 && rune < KF) {
-                        /* Regular character (below KF range) - send press+release */
-                        keys_read++;
-                        wlr_log(WLR_DEBUG, "Kbd 'c': char 0x%04x '%c'", 
-                                rune, (rune >= 32 && rune < 127) ? rune : '?');
-                        struct input_event ev;
-                        ev.type = INPUT_KEY;
-                        ev.key.rune = rune;
-                        ev.key.pressed = 1;
-                        input_queue_push(&s->input_queue, &ev);
-                        ev.key.pressed = 0;
-                        input_queue_push(&s->input_queue, &ev);
+                        /* Skip control characters when modifiers are held - 
+                         * the 'k' message handles them to avoid double ctrl manipulation */
+                        if (rune < 32 && prev_mods != 0) {
+                            wlr_log(WLR_DEBUG, "Kbd 'c': skip ctrl char 0x%02x (mods held)", rune);
+                        } else {
+                            /* Regular character (below KF range) - send press+release */
+                            keys_read++;
+                            wlr_log(WLR_DEBUG, "Kbd 'c': char 0x%04x '%c'", 
+                                    rune, (rune >= 32 && rune < 127) ? rune : '?');
+                            struct input_event ev;
+                            ev.type = INPUT_KEY;
+                            ev.key.rune = rune;
+                            ev.key.pressed = 1;
+                            input_queue_push(&s->input_queue, &ev);
+                            ev.key.pressed = 0;
+                            input_queue_push(&s->input_queue, &ev);
+                        }
                     }
                 }
             } else if (msg_type == 'k' || msg_type == 'K') {
-                /* Key state message - use for special keys (>= KF) only */
+                /* Key state message - contains ALL currently held buttons */
                 int curr_keys[16];
                 int curr_nkeys = 0;
                 int is_press = (msg_type == 'k');
@@ -637,42 +643,47 @@ void *kbd_thread_func(void *arg) {
                 }
                 
                 if (is_press) {
-                    /* 'k' message: find newly pressed SPECIAL keys (>= KF) */
+                    /* 'k' message: find newly pressed keys */
                     for (int i = 0; i < curr_nkeys; i++) {
                         int rune = curr_keys[i];
-                        if (rune < KF) continue;  /* Regular chars handled by 'c' */
                         int found = 0;
                         for (int j = 0; j < prev_nkeys; j++) {
                             if (prev_keys[j] == rune) { found = 1; break; }
                         }
                         if (!found) {
-                            /* Send ALL special keys including modifiers (Kctl→KEY_LEFTCTRL)
-                             * Modifiers need to be sent as actual key events for apps like Emacs */
-                            keys_read++;
-                            wlr_log(WLR_INFO, "Kbd PRESS: rune=0x%04x prev_nkeys=%d", rune, prev_nkeys);
-                            struct input_event ev;
-                            ev.type = INPUT_KEY;
-                            ev.key.rune = rune;
-                            ev.key.pressed = 1;
-                            input_queue_push(&s->input_queue, &ev);
+                            /* For special keys (>= KF), always send */
+                            /* For regular keys (< KF), only send when modifiers are held */
+                            if (rune >= KF || curr_mods != 0) {
+                                keys_read++;
+                                wlr_log(WLR_INFO, "Kbd PRESS: rune=0x%04x prev_nkeys=%d mods=0x%x", 
+                                        rune, prev_nkeys, curr_mods);
+                                struct input_event ev;
+                                ev.type = INPUT_KEY;
+                                ev.key.rune = rune;
+                                ev.key.pressed = 1;
+                                input_queue_push(&s->input_queue, &ev);
+                            }
                         }
                     }
                 } else {
-                    /* 'K' message: find released SPECIAL keys (>= KF) */
+                    /* 'K' message: find released keys */
                     for (int i = 0; i < prev_nkeys; i++) {
                         int rune = prev_keys[i];
-                        if (rune < KF) continue;  /* Regular chars handled by 'c' */
                         int found = 0;
                         for (int j = 0; j < curr_nkeys; j++) {
                             if (curr_keys[j] == rune) { found = 1; break; }
                         }
                         if (!found) {
-                            wlr_log(WLR_INFO, "Kbd RELEASE: rune=0x%04x", rune);
-                            struct input_event ev;
-                            ev.type = INPUT_KEY;
-                            ev.key.rune = rune;
-                            ev.key.pressed = 0;
-                            input_queue_push(&s->input_queue, &ev);
+                            /* For special keys (>= KF), always send */
+                            /* For regular keys (< KF), only send when modifiers were held */
+                            if (rune >= KF || prev_mods != 0) {
+                                wlr_log(WLR_INFO, "Kbd RELEASE: rune=0x%04x mods=0x%x", rune, prev_mods);
+                                struct input_event ev;
+                                ev.type = INPUT_KEY;
+                                ev.key.rune = rune;
+                                ev.key.pressed = 0;
+                                input_queue_push(&s->input_queue, &ev);
+                            }
                         }
                     }
                 }
