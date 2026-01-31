@@ -2,6 +2,10 @@
  * draw.c - Plan 9 draw device initialization and window management
  *
  * Manages connection to /dev/draw and window lookup/relookup.
+ *
+ * Refactored:
+ * - Extracted align_dimension() for consistent tile alignment
+ * - Extracted compute_centered_window() for centering calculations
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -23,8 +27,28 @@
 #define TILE_ALIGN_DOWN(x) (((x) / TILE_SIZE) * TILE_SIZE)
 #define MIN_ALIGNED_DIM (TILE_SIZE * 4)
 
-/* ============== Window Management ============== */
+/* ============== Dimension Helpers ============== */
 
+/*
+ * Align a dimension to tile boundaries with minimum constraint.
+ * Returns aligned dimension that is:
+ *   - Tile-aligned (multiple of TILE_SIZE)
+ *   - At least MIN_ALIGNED_DIM (unless actual is smaller)
+ *   - Not larger than actual
+ */
+static int align_dimension(int actual) {
+    int aligned = TILE_ALIGN_DOWN(actual);
+    if (aligned < MIN_ALIGNED_DIM) aligned = MIN_ALIGNED_DIM;
+    if (aligned > actual) aligned = actual;
+    return aligned;
+}
+
+/*
+ * Compute centered position within window bounds.
+ * Given actual bounds and aligned dimension, returns:
+ *   - out_min: starting coordinate (centered)
+ *   - out_actual_dim: original dimension for reference
+ */
 static void center_in_window(int actual_min, int actual_max, int aligned_dim,
                              int *out_min, int *out_actual_dim) {
     int actual_dim = actual_max - actual_min;
@@ -33,6 +57,50 @@ static void center_in_window(int actual_min, int actual_max, int aligned_dim,
     if (excess < 0) excess = 0;
     *out_min = actual_min + excess / 2;
 }
+
+/*
+ * Parse ctl buffer and compute aligned/centered dimensions.
+ * Encapsulates the common pattern of reading geometry from ctl.
+ */
+static int parse_ctl_geometry(const uint8_t *ctlbuf, int n,
+                              int *out_width, int *out_height,
+                              int *out_minx, int *out_miny,
+                              int *out_actual_minx, int *out_actual_miny,
+                              int *out_actual_maxx, int *out_actual_maxy) {
+    if (n < 12 * 12) return -1;
+    
+    int rminx = atoi((char*)ctlbuf + 4*12);
+    int rminy = atoi((char*)ctlbuf + 5*12);
+    int rmaxx = atoi((char*)ctlbuf + 6*12);
+    int rmaxy = atoi((char*)ctlbuf + 7*12);
+    
+    int actual_width = rmaxx - rminx;
+    int actual_height = rmaxy - rminy;
+    
+    int width = align_dimension(actual_width);
+    int height = align_dimension(actual_height);
+    
+    if (width <= 0 || height <= 0 || width > 4096 || height > 4096) {
+        return -1;
+    }
+    
+    int centered_minx, centered_miny, actual_w, actual_h;
+    center_in_window(rminx, rmaxx, width, &centered_minx, &actual_w);
+    center_in_window(rminy, rmaxy, height, &centered_miny, &actual_h);
+    
+    *out_width = width;
+    *out_height = height;
+    *out_minx = centered_minx;
+    *out_miny = centered_miny;
+    *out_actual_minx = rminx;
+    *out_actual_miny = rminy;
+    *out_actual_maxx = rmaxx;
+    *out_actual_maxy = rmaxy;
+    
+    return 0;
+}
+
+/* ============== Window Management ============== */
 
 int relookup_window(struct server *s) {
     struct draw_state *draw = &s->draw;
@@ -82,35 +150,16 @@ int relookup_window(struct server *s) {
     /* Re-read ctl for geometry */
     uint8_t ctlbuf[256];
     int n = p9_read(p9, draw->drawctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);
-    if (n < 12*12) {
-        wlr_log(WLR_ERROR, "relookup_window: failed to read ctl");
+    
+    int new_width, new_height, centered_minx, centered_miny;
+    int rminx, rminy, rmaxx, rmaxy;
+    
+    if (parse_ctl_geometry(ctlbuf, n, &new_width, &new_height,
+                           &centered_minx, &centered_miny,
+                           &rminx, &rminy, &rmaxx, &rmaxy) < 0) {
+        wlr_log(WLR_ERROR, "relookup_window: invalid geometry");
         return -1;
     }
-    
-    ctlbuf[n] = '\0';
-    int rminx = atoi((char*)ctlbuf + 4*12);
-    int rminy = atoi((char*)ctlbuf + 5*12);
-    int rmaxx = atoi((char*)ctlbuf + 6*12);
-    int rmaxy = atoi((char*)ctlbuf + 7*12);
-    
-    int actual_width = rmaxx - rminx;
-    int actual_height = rmaxy - rminy;
-    int new_width = TILE_ALIGN_DOWN(actual_width);
-    int new_height = TILE_ALIGN_DOWN(actual_height);
-    
-    if (new_width < MIN_ALIGNED_DIM) new_width = MIN_ALIGNED_DIM;
-    if (new_height < MIN_ALIGNED_DIM) new_height = MIN_ALIGNED_DIM;
-    if (new_width > actual_width) new_width = actual_width;
-    if (new_height > actual_height) new_height = actual_height;
-    
-    if (new_width <= 0 || new_height <= 0 || new_width > 4096 || new_height > 4096) {
-        wlr_log(WLR_ERROR, "relookup_window: invalid dimensions %dx%d", new_width, new_height);
-        return -1;
-    }
-    
-    int centered_minx, centered_miny, actual_w, actual_h;
-    center_in_window(rminx, rmaxx, new_width, &centered_minx, &actual_w);
-    center_in_window(rminy, rmaxy, new_height, &centered_miny, &actual_h);
     
     draw->win_minx = centered_minx;
     draw->win_miny = centered_miny;
@@ -154,8 +203,6 @@ int init_draw(struct server *s) {
     struct p9conn *p9 = &s->p9_draw;
     struct draw_state *draw = &s->draw;
     const char *wnames[3];
-    int rminx, rminy, rmaxx, rmaxy;
-    int actual_width, actual_height;
     uint8_t cmd[64];
     
     draw->p9 = p9;
@@ -196,17 +243,16 @@ int init_draw(struct server *s) {
     draw->client_id = atoi((char*)buf);
     wlr_log(WLR_INFO, "Draw client ID: %d", draw->client_id);
     
-    rminx = atoi((char*)buf + 4*12);
-    rminy = atoi((char*)buf + 5*12);
-    rmaxx = atoi((char*)buf + 6*12);
-    rmaxy = atoi((char*)buf + 7*12);
-    actual_width = rmaxx - rminx;
-    actual_height = rmaxy - rminy;
+    /* Parse initial geometry from draw/new */
+    int rminx = atoi((char*)buf + 4*12);
+    int rminy = atoi((char*)buf + 5*12);
+    int rmaxx = atoi((char*)buf + 6*12);
+    int rmaxy = atoi((char*)buf + 7*12);
+    int actual_width = rmaxx - rminx;
+    int actual_height = rmaxy - rminy;
     
-    draw->width = TILE_ALIGN_DOWN(actual_width);
-    draw->height = TILE_ALIGN_DOWN(actual_height);
-    if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
-    if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
+    draw->width = align_dimension(actual_width);
+    draw->height = align_dimension(actual_height);
     
     wlr_log(WLR_INFO, "Screen dimensions: %dx%d (aligned to %dx%d)",
             actual_width, actual_height, draw->width, draw->height);
@@ -278,34 +324,25 @@ int init_draw(struct server *s) {
             
             uint8_t ctlbuf[256];
             n = p9_read(p9, draw->drawctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);
-            if (n >= 12*12) {
-                ctlbuf[n] = '\0';
-                rminx = atoi((char*)ctlbuf + 4*12);
-                rminy = atoi((char*)ctlbuf + 5*12);
-                rmaxx = atoi((char*)ctlbuf + 6*12);
-                rmaxy = atoi((char*)ctlbuf + 7*12);
-                
-                actual_width = rmaxx - rminx;
-                actual_height = rmaxy - rminy;
-                
-                draw->width = TILE_ALIGN_DOWN(actual_width);
-                draw->height = TILE_ALIGN_DOWN(actual_height);
-                if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
-                if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
-                
-                int centered_minx, centered_miny, actual_w, actual_h;
-                center_in_window(rminx, rmaxx, draw->width, &centered_minx, &actual_w);
-                center_in_window(rminy, rmaxy, draw->height, &centered_miny, &actual_h);
-                
+            
+            int new_width, new_height, centered_minx, centered_miny;
+            int act_minx, act_miny, act_maxx, act_maxy;
+            
+            if (parse_ctl_geometry(ctlbuf, n, &new_width, &new_height,
+                                   &centered_minx, &centered_miny,
+                                   &act_minx, &act_miny, &act_maxx, &act_maxy) == 0) {
+                draw->width = new_width;
+                draw->height = new_height;
                 draw->win_minx = centered_minx;
                 draw->win_miny = centered_miny;
-                draw->actual_minx = rminx;
-                draw->actual_miny = rminy;
-                draw->actual_maxx = rmaxx;
-                draw->actual_maxy = rmaxy;
+                draw->actual_minx = act_minx;
+                draw->actual_miny = act_miny;
+                draw->actual_maxx = act_maxx;
+                draw->actual_maxy = act_maxy;
                 
                 wlr_log(WLR_INFO, "Window rect: (%d,%d)-(%d,%d) -> %dx%d",
-                        rminx, rminy, rmaxx, rmaxy, draw->width, draw->height);
+                        act_minx, act_miny, act_maxx, act_maxy, 
+                        draw->width, draw->height);
             }
         }
     } else {

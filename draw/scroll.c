@@ -5,6 +5,7 @@
  * - Uses compute_scroll_rects() for all rectangle calculations
  * - Uses cmd_copy() for draw commands
  * - Simplified validation logic
+ * - Extracted copy_tile_region() helper for repetitive tile copying
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -40,6 +41,20 @@ static inline double get_time_us(void) {
 }
 
 /*
+ * Copy a rectangular region from src buffer to dst buffer.
+ * Handles different strides for source and destination.
+ */
+static void copy_tile_region(uint32_t *dst, int dst_stride,
+                             const uint32_t *src, int src_stride,
+                             int src_x, int src_y, int w, int h) {
+    for (int row = 0; row < h; row++) {
+        memcpy(&dst[row * dst_stride],
+               &src[(src_y + row) * src_stride + src_x],
+               w * sizeof(uint32_t));
+    }
+}
+
+/*
  * Process a single scroll region (called from thread pool).
  */
 static void detect_region_scroll_worker(void *user_data, int reg_idx) {
@@ -49,7 +64,7 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     uint32_t *prev_buf = s->prev_framebuf;
     int width = s->width;
     
-    /* Access anonymous struct directly (types.h uses anonymous struct, not struct scroll_region) */
+    /* Initialize region state */
     s->scroll_regions[reg_idx].detected = 0;
     s->scroll_regions[reg_idx].dx = 0;
     s->scroll_regions[reg_idx].dy = 0;
@@ -131,14 +146,12 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
                 if (identical) {
                     tiles_identical_with++;
                 } else {
+                    /* Copy tiles using helper */
                     uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
                     uint32_t shifted[TILE_SIZE * TILE_SIZE];
-                    for (int row = 0; row < h; row++) {
-                        memcpy(&curr_tile[row * TILE_SIZE],
-                               &send_buf[(y1 + row) * width + x1], w * 4);
-                        memcpy(&shifted[row * TILE_SIZE],
-                               &prev_buf[(src_y1 + row) * width + src_x1], w * 4);
-                    }
+                    copy_tile_region(curr_tile, TILE_SIZE, send_buf, width, x1, y1, w, h);
+                    copy_tile_region(shifted, TILE_SIZE, prev_buf, width, src_x1, src_y1, w, h);
+                    
                     int size = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
                                                        curr_tile, TILE_SIZE,
                                                        shifted, TILE_SIZE,
@@ -148,15 +161,12 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
                     bytes_with_scroll += size;
                 }
             } else {
-                /* Exposed area */
+                /* Exposed area - copy using helper */
                 uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
                 uint32_t prev_tile[TILE_SIZE * TILE_SIZE];
-                for (int row = 0; row < h; row++) {
-                    memcpy(&curr_tile[row * TILE_SIZE],
-                           &send_buf[(y1 + row) * width + x1], w * 4);
-                    memcpy(&prev_tile[row * TILE_SIZE],
-                           &prev_buf[(y1 + row) * width + x1], w * 4);
-                }
+                copy_tile_region(curr_tile, TILE_SIZE, send_buf, width, x1, y1, w, h);
+                copy_tile_region(prev_tile, TILE_SIZE, prev_buf, width, x1, y1, w, h);
+                
                 int size = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
                                                    curr_tile, TILE_SIZE,
                                                    prev_tile, TILE_SIZE,

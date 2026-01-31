@@ -3,6 +3,10 @@
  *
  * Handles output frame rendering, resize handling,
  * and input device attachment.
+ *
+ * Refactored:
+ * - Uses alloc_image_cmd helper for image reallocation (was manual byte building)
+ * - Uses free_image_cmd helper for cleanup
  */
 
 #include <stdlib.h>
@@ -19,6 +23,7 @@
 
 #include "output.h"
 #include "../draw/send.h"
+#include "../draw/draw_cmd.h"
 #include "../p9/p9.h"
 
 static void output_destroy(struct wl_listener *listener, void *data) {
@@ -26,6 +31,33 @@ static void output_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     wl_list_remove(&s->output_frame.link);
     wl_list_remove(&s->output_destroy.link);
+}
+
+/*
+ * Reallocate Plan 9 draw images after resize.
+ * Uses alloc_image_cmd helper instead of manual byte construction.
+ */
+static void reallocate_draw_images(struct draw_state *draw, int new_w, int new_h) {
+    struct p9conn *p9 = draw->p9;
+    uint8_t cmd[64];
+    int off;
+    
+    /* Free old images */
+    off = free_image_cmd(cmd, draw->image_id);
+    p9_write(p9, draw->drawdata_fid, 0, cmd, off);
+    
+    off = free_image_cmd(cmd, draw->delta_id);
+    p9_write(p9, draw->drawdata_fid, 0, cmd, off);
+    
+    /* Reallocate framebuffer image (XRGB32) */
+    off = alloc_image_cmd(cmd, draw->image_id, CHAN_XRGB32, 0,
+                          0, 0, new_w, new_h, 0x00000000);
+    p9_write(p9, draw->drawdata_fid, 0, cmd, off);
+    
+    /* Reallocate delta image (ARGB32 for alpha compositing) */
+    off = alloc_image_cmd(cmd, draw->delta_id, CHAN_ARGB32, 0,
+                          0, 0, new_w, new_h, 0x00000000);
+    p9_write(p9, draw->drawdata_fid, 0, cmd, off);
 }
 
 static void output_frame(struct wl_listener *listener, void *data) {
@@ -101,51 +133,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 free(old_send_buf0);
                 free(old_send_buf1);
                 
-                /* Reallocate Plan 9 images */
-                struct p9conn *p9 = draw->p9;
-                uint8_t freecmd[5];
-                freecmd[0] = 'f';
-                PUT32(freecmd + 1, draw->image_id);
-                p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-                PUT32(freecmd + 1, draw->delta_id);
-                p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-                
-                uint8_t bcmd[64];
-                int off = 0;
-                bcmd[off++] = 'b';
-                PUT32(bcmd + off, draw->image_id); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                bcmd[off++] = 0;
-                PUT32(bcmd + off, 0x68081828); off += 4;
-                bcmd[off++] = 0;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
-                PUT32(bcmd + off, 0x00000000); off += 4;
-                p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-                
-                off = 0;
-                bcmd[off++] = 'b';
-                PUT32(bcmd + off, draw->delta_id); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                bcmd[off++] = 0;
-                PUT32(bcmd + off, 0x48081828); off += 4;
-                bcmd[off++] = 0;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, 0); off += 4;
-                PUT32(bcmd + off, new_w); off += 4;
-                PUT32(bcmd + off, new_h); off += 4;
-                PUT32(bcmd + off, 0x00000000); off += 4;
-                p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
+                /* Reallocate Plan 9 images using helper */
+                reallocate_draw_images(draw, new_w, new_h);
                 
                 /* Resize wlroots output */
                 struct wlr_output_state state;

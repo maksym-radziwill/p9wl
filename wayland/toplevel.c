@@ -5,6 +5,7 @@
  * - Uses XDG_VALID/XDG_MAPPED macros
  * - Uses focus_phys_to_logical helper
  * - Simplified validation chains
+ * - Uses FOR_EACH_SUBSURFACE macro to reduce duplication
  */
 
 #include <stdlib.h>
@@ -25,6 +26,19 @@
 
 /* Forward declaration */
 static void check_new_subsurfaces(struct toplevel *tl);
+
+/* ============== Subsurface Iteration Macro ============== */
+
+/*
+ * Iterate over both below and above subsurface lists.
+ * Usage: FOR_EACH_SUBSURFACE(surface, sub) { ... }
+ */
+#define FOR_EACH_SUBSURFACE(surface, sub) \
+    for (int _list_idx = 0; _list_idx < 2; _list_idx++) \
+        wl_list_for_each(sub, \
+            (_list_idx == 0) ? &(surface)->current.subsurfaces_below \
+                             : &(surface)->current.subsurfaces_above, \
+            current.link)
 
 /* ============== Subsurface Tracking ============== */
 
@@ -91,12 +105,10 @@ static void check_new_subsurfaces(struct toplevel *tl) {
     struct wlr_surface *surface = tl->xdg->base->surface;
     struct wlr_subsurface *sub;
     
-    wl_list_for_each(sub, &surface->current.subsurfaces_below, current.link) {
-        if (!is_subsurface_tracked(tl, sub)) track_subsurface(tl, sub);
-    }
-    
-    wl_list_for_each(sub, &surface->current.subsurfaces_above, current.link) {
-        if (!is_subsurface_tracked(tl, sub)) track_subsurface(tl, sub);
+    FOR_EACH_SUBSURFACE(surface, sub) {
+        if (!is_subsurface_tracked(tl, sub)) {
+            track_subsurface(tl, sub);
+        }
     }
 }
 

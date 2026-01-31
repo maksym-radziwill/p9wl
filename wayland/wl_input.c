@@ -1,9 +1,10 @@
 /*
  * wl_input.c - Wayland input event handling (streamlined)
  *
- * Removed:
- * - Duplicate KMOD_* definitions (use keymapmod() from input.c)
- * - Redundant modifier switch statement
+ * Refactored:
+ * - Table-driven button handling replaces repetitive if chains
+ * - Table-driven scroll handling
+ * - Removed duplicate KMOD_* definitions (use keymapmod() from input.c)
  */
 
 #include <unistd.h>
@@ -19,6 +20,32 @@
 #include "../types.h"
 #include "../input/input.h"
 #include "../input/clipboard.h"
+
+/* ============== Button Mapping Tables ============== */
+
+/* Mouse button mapping: bitmask -> Linux button code */
+static const struct {
+    int mask;
+    uint32_t button;
+} button_map[] = {
+    { 1, BTN_LEFT },
+    { 2, BTN_MIDDLE },
+    { 4, BTN_RIGHT },
+};
+#define NUM_BUTTONS (sizeof(button_map) / sizeof(button_map[0]))
+
+/* Scroll axis mapping: bitmask -> axis, direction */
+static const struct {
+    int mask;
+    enum wl_pointer_axis axis;
+    double value;
+} scroll_map[] = {
+    { 8,  WL_POINTER_AXIS_VERTICAL_SCROLL,   -4.0 },  /* Scroll up */
+    { 16, WL_POINTER_AXIS_VERTICAL_SCROLL,    4.0 },  /* Scroll down */
+    { 32, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -4.0 },  /* Scroll left */
+    { 64, WL_POINTER_AXIS_HORIZONTAL_SCROLL,  4.0 },  /* Scroll right */
+};
+#define NUM_SCROLLS (sizeof(scroll_map) / sizeof(scroll_map[0]))
 
 /* ============== Keyboard Handling ============== */
 
@@ -82,6 +109,60 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
 
 /* ============== Mouse Handling ============== */
 
+/*
+ * Send button events for all changed buttons.
+ * Uses table-driven approach for cleaner code.
+ */
+static void send_button_events(struct server *s, uint32_t t, 
+                               int buttons, int changed) {
+    struct wlr_surface *surface = s->seat->pointer_state.focused_surface;
+    if (!surface || !surface->mapped) return;
+    
+    for (size_t i = 0; i < NUM_BUTTONS; i++) {
+        if (changed & button_map[i].mask) {
+            uint32_t state = (buttons & button_map[i].mask)
+                ? WL_POINTER_BUTTON_STATE_PRESSED
+                : WL_POINTER_BUTTON_STATE_RELEASED;
+            wlr_seat_pointer_notify_button(s->seat, t, button_map[i].button, state);
+        }
+    }
+}
+
+/*
+ * Send scroll events for all active scroll buttons.
+ * Uses table-driven approach for cleaner code.
+ */
+static void send_scroll_events(struct server *s, uint32_t t,
+                               int buttons, int changed) {
+    struct focus_manager *fm = &s->focus;
+    int scroll_changed = changed & 0x78;
+    int scroll_active = buttons & 0x78;
+    
+    if (!scroll_changed || !scroll_active) return;
+    
+    double sx, sy;
+    struct wlr_surface *surface = focus_surface_at_cursor(fm, &sx, &sy);
+    if (!surface || !surface->mapped) return;
+    
+    /* Ensure focus is on scroll target */
+    struct wlr_surface *current = s->seat->pointer_state.focused_surface;
+    if (surface != current) {
+        focus_pointer_set(fm, surface, sx, sy, FOCUS_REASON_POINTER_MOTION);
+    }
+    focus_pointer_motion(fm, sx, sy, t);
+    
+    /* Send scroll events */
+    for (size_t i = 0; i < NUM_SCROLLS; i++) {
+        if ((changed & scroll_map[i].mask) && (buttons & scroll_map[i].mask)) {
+            wlr_seat_pointer_notify_axis(s->seat, t, scroll_map[i].axis,
+                scroll_map[i].value, 0, WL_POINTER_AXIS_SOURCE_FINGER,
+                WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
+        }
+    }
+    
+    wlr_seat_pointer_notify_frame(s->seat);
+}
+
 void handle_mouse(struct server *s, int mx, int my, int buttons) {
     struct focus_manager *fm = &s->focus;
     
@@ -135,59 +216,9 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
         focus_pointer_set(fm, NULL, 0, 0, FOCUS_REASON_EXPLICIT);
     }
     
-    /* Button events */
-    struct wlr_surface *btn_surface = s->seat->pointer_state.focused_surface;
-    if (btn_surface && btn_surface->mapped) {
-        if (changed & 1) {
-            wlr_seat_pointer_notify_button(s->seat, t, BTN_LEFT,
-                (buttons & 1) ? WL_POINTER_BUTTON_STATE_PRESSED 
-                              : WL_POINTER_BUTTON_STATE_RELEASED);
-        }
-        if (changed & 2) {
-            wlr_seat_pointer_notify_button(s->seat, t, BTN_MIDDLE,
-                (buttons & 2) ? WL_POINTER_BUTTON_STATE_PRESSED 
-                              : WL_POINTER_BUTTON_STATE_RELEASED);
-        }
-        if (changed & 4) {
-            wlr_seat_pointer_notify_button(s->seat, t, BTN_RIGHT,
-                (buttons & 4) ? WL_POINTER_BUTTON_STATE_PRESSED 
-                              : WL_POINTER_BUTTON_STATE_RELEASED);
-        }
-    }
-    
-    /* Scroll events */
-    if ((changed & 0x78) && (buttons & 0x78)) {
-        double scroll_sx, scroll_sy;
-        struct wlr_surface *scroll_surface = focus_surface_at_cursor(fm, &scroll_sx, &scroll_sy);
-        
-        if (scroll_surface && scroll_surface->mapped) {
-            struct wlr_surface *current = s->seat->pointer_state.focused_surface;
-            if (scroll_surface != current)
-                focus_pointer_set(fm, scroll_surface, scroll_sx, scroll_sy, 
-                                  FOCUS_REASON_POINTER_MOTION);
-            
-            focus_pointer_motion(fm, scroll_sx, scroll_sy, t);
-            
-            if ((changed & 8) && (buttons & 8))
-                wlr_seat_pointer_notify_axis(s->seat, t, WL_POINTER_AXIS_VERTICAL_SCROLL,
-                    -4.0, 0, WL_POINTER_AXIS_SOURCE_FINGER, 
-                    WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-            if ((changed & 16) && (buttons & 16))
-                wlr_seat_pointer_notify_axis(s->seat, t, WL_POINTER_AXIS_VERTICAL_SCROLL,
-                    4.0, 0, WL_POINTER_AXIS_SOURCE_FINGER,
-                    WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-            if ((changed & 32) && (buttons & 32))
-                wlr_seat_pointer_notify_axis(s->seat, t, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-                    -4.0, 0, WL_POINTER_AXIS_SOURCE_FINGER,
-                    WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-            if ((changed & 64) && (buttons & 64))
-                wlr_seat_pointer_notify_axis(s->seat, t, WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-                    4.0, 0, WL_POINTER_AXIS_SOURCE_FINGER,
-                    WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
-            
-            wlr_seat_pointer_notify_frame(s->seat);
-        }
-    }
+    /* Button and scroll events */
+    send_button_events(s, t, buttons, changed);
+    send_scroll_events(s, t, buttons, changed);
     
     last_buttons = buttons;
     wlr_seat_pointer_notify_frame(s->seat);

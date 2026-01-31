@@ -1,5 +1,9 @@
 /*
  * p9.c - 9P2000 Protocol Implementation with TLS Support
+ *
+ * Refactored:
+ * - Extracted p9_walk_open() helper for common walk+open pattern
+ * - Simplified p9_read_file/p9_write_file using the helper
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -319,27 +323,44 @@ int p9_clunk(struct p9conn *p9, uint32_t fid) {
     return r >= 0 ? 0 : -1;
 }
 
-/* High-level file operations */
+/* ============== Helper: walk + open in one call ============== */
 
-int p9_read_file(struct p9conn *p9, const char *path, char *data, size_t bufsize) {
+/*
+ * Walk to a single-component path and open it.
+ * On success, returns 0 and sets *fid_out.
+ * On failure, returns -1 (fid is automatically clunked on open failure).
+ */
+static int p9_walk_open(struct p9conn *p9, const char *path, 
+                        uint8_t mode, uint32_t *fid_out) {
     uint32_t fid = p9->next_fid++;
     const char *wnames[] = { path };
-    int total = 0;
     
-    /* Walk to file */
     if (p9_walk(p9, p9->root_fid, fid, 1, wnames) < 0) {
-        wlr_log(WLR_ERROR, "p9_read_file: walk to '%s' failed", path);
+        wlr_log(WLR_ERROR, "p9_walk_open: walk to '%s' failed", path);
         return -1;
     }
     
-    /* Open for reading */
-    if (p9_open(p9, fid, OREAD, NULL) < 0) {
-        wlr_log(WLR_ERROR, "p9_read_file: open '%s' failed", path);
+    if (p9_open(p9, fid, mode, NULL) < 0) {
+        wlr_log(WLR_ERROR, "p9_walk_open: open '%s' failed", path);
         p9_clunk(p9, fid);
         return -1;
     }
     
+    *fid_out = fid;
+    return 0;
+}
+
+/* ============== High-level file operations ============== */
+
+int p9_read_file(struct p9conn *p9, const char *path, char *data, size_t bufsize) {
+    uint32_t fid;
+    
+    if (p9_walk_open(p9, path, OREAD, &fid) < 0) {
+        return -1;
+    }
+    
     /* Read contents */
+    int total = 0;
     uint64_t offset = 0;
     while ((size_t)total < bufsize - 1) {
         int n = p9_read(p9, fid, offset, bufsize - 1 - total, 
@@ -362,19 +383,9 @@ int p9_read_file(struct p9conn *p9, const char *path, char *data, size_t bufsize
 }
 
 int p9_write_file(struct p9conn *p9, const char *path, const char *data, size_t len) {
-    uint32_t fid = p9->next_fid++;
-    const char *wnames[] = { path };
+    uint32_t fid;
     
-    /* Walk to file */
-    if (p9_walk(p9, p9->root_fid, fid, 1, wnames) < 0) {
-        wlr_log(WLR_ERROR, "p9_write_file: walk to '%s' failed", path);
-        return -1;
-    }
-    
-    /* Open for writing */
-    if (p9_open(p9, fid, OWRITE, NULL) < 0) {
-        wlr_log(WLR_ERROR, "p9_write_file: open '%s' failed", path);
-        p9_clunk(p9, fid);
+    if (p9_walk_open(p9, path, OWRITE, &fid) < 0) {
         return -1;
     }
     

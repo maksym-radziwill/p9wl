@@ -5,6 +5,10 @@
  * solid colors and alpha-delta encoding.
  *
  * Uses generic thread_pool for parallel compression.
+ *
+ * Refactored:
+ * - Extracted encode_solid_tile() for solid/zero tile encoding
+ * - Added tile_dims_valid() inline helper for consistent validation
  */
 
 #include <string.h>
@@ -19,6 +23,41 @@
 
 static inline uint32_t hash3(const uint8_t *p) {
     return ((p[0] << 5) ^ (p[1] << 2) ^ p[2]) & HASH_MASK;
+}
+
+/* Validate tile dimensions */
+static inline int tile_dims_valid(int w, int h) {
+    return w > 0 && h > 0 && w <= TILE_SIZE && h <= TILE_SIZE;
+}
+
+/*
+ * Encode a solid-color tile (including all-zeros).
+ * This encoding uses a single pixel plus row-repeat references.
+ * Returns bytes written to dst.
+ */
+static int encode_solid_tile(uint8_t *dst, const uint8_t *pixel, int h) {
+    int out = 0;
+    
+    /* 4 literal bytes (the pixel value) */
+    dst[out++] = 0x83;
+    memcpy(dst + out, pixel, 4);
+    out += 4;
+    
+    /* First row: two back-references to fill from the single pixel */
+    dst[out++] = (31 << 2) | 0;  /* len=34, offset=4 */
+    dst[out++] = 3;
+    dst[out++] = (23 << 2) | 0;  /* len=26, offset=4 */
+    dst[out++] = 3;
+    
+    /* Remaining rows: back-reference to previous row */
+    for (int row = 1; row < h; row++) {
+        dst[out++] = (31 << 2) | 0;  /* len=34, offset=64 */
+        dst[out++] = 63;
+        dst[out++] = (27 << 2) | 0;  /* len=30, offset=64 */
+        dst[out++] = 63;
+    }
+    
+    return out;
 }
 
 /*
@@ -134,24 +173,8 @@ int compress_tile_data(uint8_t *dst, int dst_max,
     }
     
     if (all_zero) {
-        /* All zeros - super efficient encoding */
-        int out = 0;
-        
-        dst[out++] = 0x83;  /* 4 literal bytes */
-        dst[out++] = 0; dst[out++] = 0; dst[out++] = 0; dst[out++] = 0;
-        
-        dst[out++] = (31 << 2) | 0;
-        dst[out++] = 3;
-        dst[out++] = (23 << 2) | 0;
-        dst[out++] = 3;
-        
-        for (int row = 1; row < h; row++) {
-            dst[out++] = (31 << 2) | 0;
-            dst[out++] = 63;
-            dst[out++] = (27 << 2) | 0;
-            dst[out++] = 63;
-        }
-        return out;
+        static const uint8_t zero_pixel[4] = {0, 0, 0, 0};
+        return encode_solid_tile(dst, zero_pixel, h);
     }
     
     /* Check if solid color */
@@ -167,24 +190,10 @@ int compress_tile_data(uint8_t *dst, int dst_max,
         }
     }
     
-    int out = 0;
+    int out;
     
     if (is_solid) {
-        dst[out++] = 0x83;
-        memcpy(dst + out, raw, 4);
-        out += 4;
-        
-        dst[out++] = (31 << 2) | 0;
-        dst[out++] = 3;
-        dst[out++] = (23 << 2) | 0;
-        dst[out++] = 3;
-        
-        for (int row = 1; row < h; row++) {
-            dst[out++] = (31 << 2) | 0;
-            dst[out++] = 63;
-            dst[out++] = (27 << 2) | 0;
-            dst[out++] = 63;
-        }
+        out = encode_solid_tile(dst, raw, h);
     } else {
         out = lz77_compress_fast(dst, dst_max, raw, raw_size, bytes_per_row);
         if (out == 0) return 0;
@@ -198,8 +207,7 @@ int compress_tile_data(uint8_t *dst, int dst_max,
 int compress_tile_direct(uint8_t *dst, int dst_max, 
                          uint32_t *pixels, int stride, 
                          int x1, int y1, int w, int h) {
-    /* Validate dimensions - allow partial tiles but not invalid ones */
-    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    if (!tile_dims_valid(w, h)) return 0;
     
     int bytes_per_row = w * 4;
     
@@ -217,8 +225,7 @@ int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
                               uint32_t *pixels, int stride,
                               uint32_t *prev_pixels, int prev_stride,
                               int x1, int y1, int w, int h) {
-    /* Validate dimensions - allow partial tiles but not invalid ones */
-    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    if (!tile_dims_valid(w, h)) return 0;
     if (!prev_pixels) return 0;
     
     int bytes_per_row = w * 4;
@@ -253,8 +260,7 @@ int compress_tile_adaptive(uint8_t *dst, int dst_max,
                            uint32_t *pixels, int stride,
                            uint32_t *prev_pixels, int prev_stride,
                            int x1, int y1, int w, int h) {
-    /* Validate dimensions - allow partial tiles but not invalid ones */
-    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    if (!tile_dims_valid(w, h)) return 0;
     
     uint8_t temp[1200];
     
