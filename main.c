@@ -57,6 +57,8 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -f <fp>        SHA256 fingerprint of server certificate (hex)\n");
     fprintf(stderr, "  -k             Insecure mode: skip certificate verification (DANGEROUS)\n");
     fprintf(stderr, "  -u <user>      9P username (default: $P9USER, $USER, or 'glenda')\n");
+    fprintf(stderr, "\nInput options:\n");
+    fprintf(stderr, "  -K             Load the keymap from /dev/kbmap\n");
     fprintf(stderr, "\nDisplay options:\n");
     fprintf(stderr, "  -S <scale>     Output scale factor for HiDPI displays (1.0-4.0, default: 1.0)\n");
     fprintf(stderr, "                 Supports fractional values like 1.5, 1.25, 2.0, etc.\n");
@@ -73,52 +75,51 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -c or -f       TLS with certificate pinning (default port %d)\n", P9_TLS_PORT);
     fprintf(stderr, "  -k             TLS without verification (default port %d)\n", P9_TLS_PORT);
     fprintf(stderr, "\n");
+        fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
+    fprintf(stderr, "EXAMPLES: SETUP WITH TLS\n");
     fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "EXAMPLES\n");
-    fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "\n  Plaintext (trusted network only!):\n");
-    fprintf(stderr, "    %s 192.168.1.100\n", prog);
-    fprintf(stderr, "\n  With 2x scaling for HiDPI:\n");
-    fprintf(stderr, "    %s -S 2 192.168.1.100\n", prog);
-    fprintf(stderr, "\n  TLS with certificate file:\n");
-    fprintf(stderr, "    %s -c 9front.pem 192.168.1.100\n", prog);
-    fprintf(stderr, "\n  TLS with SHA256 fingerprint:\n");
-    fprintf(stderr, "    %s -f aa11bb22cc33... 192.168.1.100\n", prog);
-    fprintf(stderr, "\n  TLS insecure mode (logs fingerprint for later pinning):\n");
-    fprintf(stderr, "    %s -k 192.168.1.100\n", prog);
-    fprintf(stderr, "\n  Launch a Wayland application:\n");
-    fprintf(stderr, "    %s 192.168.1.100 foot\n", prog);
-    fprintf(stderr, "    %s -S 2 192.168.1.100 firefox --no-remote\n", prog);
+    fprintf(stderr, "\n  1. On 9front, generate TLS certificate (PEM format required by tlssrv):\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "9FRONT SERVER SETUP\n");
-    fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
-    fprintf(stderr, "\n  1. Generate TLS certificate (PEM format required by tlssrv):\n");
+    fprintf(stderr, "       auth/rsagen -t 'service=tls owner=*' > /sys/lib/tls/key\n");
+    fprintf(stderr, "       auth/rsa2x509 -e 3650 'CN=myhost' /sys/lib/tls/key | \\\n");
+    fprintf(stderr, "           auth/pemencode CERTIFICATE > /sys/lib/tls/cert\n");
+    fprintf(stderr, "       cat /sys/lib/tls/key > /mnt/factotum/ctl\n");
+    fprintf(stderr, "\n  2. On 9front, start TLS listener (port %d):\n", P9_TLS_PORT);
     fprintf(stderr, "\n");
-    fprintf(stderr, "     auth/rsagen -t 'service=tls owner=*' > /sys/lib/tls/key\n");
-    fprintf(stderr, "     auth/rsa2x509 -e 3650 'CN=myhost' /sys/lib/tls/key | \\\n");
-    fprintf(stderr, "         auth/pemencode CERTIFICATE > /sys/lib/tls/cert\n");
-    fprintf(stderr, "     cat /sys/lib/tls/key > /mnt/factotum/ctl\n");
-    fprintf(stderr, "\n  2. Start TLS listener (port %d):\n", P9_TLS_PORT);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "     aux/listen1 -t tcp!*!%d tlssrv -c /sys/lib/tls/cert /bin/exportfs -r /dev\n", P9_TLS_PORT);
-    fprintf(stderr, "\n  Or plaintext listener (port %d, trusted networks only!):\n", P9_PORT);
-    fprintf(stderr, "\n");
-    fprintf(stderr, "     aux/listen1 -t tcp!*!%d /bin/exportfs -r /dev\n", P9_PORT);
+    fprintf(stderr, "       aux/listen1 -t tcp!*!%d tlssrv -c /sys/lib/tls/cert /bin/exportfs -r /dev\n", P9_TLS_PORT);
     fprintf(stderr, "\n  3. Copy cert to Linux (it's already PEM format):\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "     cp /sys/lib/tls/cert /tmp/9front.pem\n");
-    fprintf(stderr, "     # Then copy via drawterm, 9pfuse, or other method\n");
-    fprintf(stderr, "\n  4. Get fingerprint (alternative to copying cert):\n");
+    fprintf(stderr, "       cp /sys/lib/tls/cert /tmp/9front.pem\n");
+    fprintf(stderr, "       #  Then copy via drawterm, 9pfuse, or other method\n");
+    fprintf(stderr, "\n  4. Alternatively, get fingerprint:\n\n"); 
+    fprintf(stderr, "       openssl x509 -in 9front.pem -noout -fingerprint -sha256\n"); 
+    fprintf(stderr, "\n  5. On the linux host, either of\n");
+    fprintf(stderr, "\n     5.1. TLS with certificate file:\n");
+    fprintf(stderr, "\n            %s -c 9front.pem 192.168.1.100:10001 librewolf\n", prog);
+    fprintf(stderr, "\n     5.2. TLS with SHA256 fingerprint:\n");
+    fprintf(stderr, "\n            %s -f aa11bb22cc33... 192.168.1.100:10001 firefox\n", prog);
+    fprintf(stderr, "\n     5.3. TLS insecure mode (logs fingerprint for later pinning):\n");
+    fprintf(stderr, "\n            %s -k 192.168.1.100:10001 chromium\n", prog);
+    fprintf(stderr, "\n"); 
+    fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
+    fprintf(stderr, "EXAMPLES: BASIC SETUP WITHOUT TLS\n");
+    fprintf(stderr, "═══════════════════════════════════════════════════════════════════\n");
+    fprintf(stderr, "\n  On 9front, start plain text listener (port %d):\n", P9_PORT);
+    fprintf(stderr, "\n    aux/listen1 -t tcp!*!%d /bin/exportfs -r /dev\n", P9_PORT);
+    fprintf(stderr, "\n  On linux\n");
+    fprintf(stderr, "\n    %s 192.168.100.1:%d foot\n", prog, P9_PORT);
+    fprintf(stderr, "\n  Additional comments: For 1.5 fractional scaling add -S 1.5, if you have a ");
+    fprintf(stderr, "\n  non-us keymap on 9front add -K. Non-integer scaling disables scroll optimization");
+    fprintf(stderr, "\n  (more bandwidth). If you don't specify an application only the compositor will be");
+    fprintf(stderr, "\n  launched. You can then launch applications with e.g WAYLAND_DISPLAY=wayland-0 foot");
     fprintf(stderr, "\n");
-    fprintf(stderr, "     openssl x509 -in 9front.pem -noout -fingerprint -sha256\n");
-    fprintf(stderr, "\n");
+
 }
 
 static int parse_args(int argc, char *argv[], const char **host, int *port,
                       const char **uname, float *scale,
                       enum wlr_log_importance *log_level,
-                      struct tls_config *tls_cfg,
+                      struct tls_config *tls_cfg, int *keymap, 
                       char ***exec_argv, int *exec_argc) {
     static char host_buf[256];
 
@@ -130,6 +131,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     memset(tls_cfg, 0, sizeof(*tls_cfg));
     *exec_argv = NULL;
     *exec_argc = 0;
+    *keymap = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
@@ -140,6 +142,8 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
             tls_cfg->insecure = 1;
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             *uname = argv[++i];
+        } else if (strcmp(argv[i], "-K") == 0 && i + 1 < argc) {
+            *keymap = 1; 
         } else if (strcmp(argv[i], "-S") == 0 && i + 1 < argc) {
             *scale = strtof(argv[++i], NULL);
             if (*scale < 1.0f) *scale = 1.0f;
@@ -372,6 +376,7 @@ static int setup_socket(struct server *s) {
         return -1;
     }
 
+    fprintf(stdout, "WAYLAND_DISPLAY=%s\n", sock);
     wlr_log(WLR_INFO, "WAYLAND_DISPLAY=%s (%dx%d)", sock, s->width, s->height);
     setenv("WAYLAND_DISPLAY", sock, 1);
 
@@ -387,9 +392,10 @@ int main(int argc, char *argv[]) {
     struct tls_config tls_cfg = {0};
     char **exec_argv = NULL;
     int exec_argc = 0;
+    int keymap = 0;
 
     /* Parse arguments */
-    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg,
+    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg, &keymap, 
                    &exec_argv, &exec_argc) < 0) {
         print_usage(argv[0]);
         return 1;
@@ -491,9 +497,10 @@ int main(int argc, char *argv[]) {
      * we fall back gracefully to the static keymap - non-fatal.
      */
 
-    if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {        
-        wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
-    }
+    if (keymap)
+        if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {        
+            wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
+        }
 
 
     /* Set dimensions from draw device */
