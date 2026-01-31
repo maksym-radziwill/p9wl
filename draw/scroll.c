@@ -1,11 +1,5 @@
 /*
- * scroll.c - Scroll detection and 9P scroll commands (refactored)
- *
- * Changes from original:
- * - Uses compute_scroll_rects() for all rectangle calculations
- * - Uses cmd_copy() for draw commands
- * - Simplified validation logic
- * - Extracted copy_tile_region() helper for repetitive tile copying
+ * scroll.c - Scroll detection and 9P scroll commands
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -17,22 +11,21 @@
 #include "scroll.h"
 #include "send.h"
 #include "compress.h"
-#include "thread_pool.h"
+#include "parallel.h"
 #include "phase_correlate.h"
 #include "draw/draw_helpers.h"
 #include "types.h"
 #include "p9/p9.h"
 #include "draw/draw.h"
 
-static struct thread_pool scroll_pool = {0};
 static struct scroll_timing timing;
 
-struct scroll_work {
+struct scroll_ctx {
     struct server *s;
     uint32_t *send_buf;
 };
 
-static struct scroll_work current_work;
+static struct scroll_ctx current_ctx;
 
 static inline double get_time_us(void) {
     struct timespec ts;
@@ -40,31 +33,13 @@ static inline double get_time_us(void) {
     return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
 }
 
-/*
- * Copy a rectangular region from src buffer to dst buffer.
- * Handles different strides for source and destination.
- */
-static void copy_tile_region(uint32_t *dst, int dst_stride,
-                             const uint32_t *src, int src_stride,
-                             int src_x, int src_y, int w, int h) {
-    for (int row = 0; row < h; row++) {
-        memcpy(&dst[row * dst_stride],
-               &src[(src_y + row) * src_stride + src_x],
-               w * sizeof(uint32_t));
-    }
-}
-
-/*
- * Process a single scroll region (called from thread pool).
- */
-static void detect_region_scroll_worker(void *user_data, int reg_idx) {
-    struct scroll_work *work = user_data;
-    struct server *s = work->s;
-    uint32_t *send_buf = work->send_buf;
+static void detect_region_scroll(void *ctx, int reg_idx) {
+    struct scroll_ctx *sc = ctx;
+    struct server *s = sc->s;
+    uint32_t *send_buf = sc->send_buf;
     uint32_t *prev_buf = s->prev_framebuf;
     int width = s->width;
     
-    /* Initialize region state */
     s->scroll_regions[reg_idx].detected = 0;
     s->scroll_regions[reg_idx].dx = 0;
     s->scroll_regions[reg_idx].dy = 0;
@@ -74,12 +49,10 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     int rx2 = s->scroll_regions[reg_idx].x2;
     int ry2 = s->scroll_regions[reg_idx].y2;
     
-    /* Compute max scroll based on region dimensions */
     int max_scroll_x = (rx2 - rx1) / 2;
     int max_scroll_y = (ry2 - ry1) / 2;
     int max_scroll = max_scroll_x < max_scroll_y ? max_scroll_x : max_scroll_y;
     
-    /* Detect scroll using phase correlation */
     struct phase_result result = phase_correlate_detect(
         send_buf, prev_buf, width, rx1, ry1, rx2, ry2, max_scroll);
     
@@ -89,17 +62,14 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
     int abs_dx = dx < 0 ? -dx : dx;
     int abs_dy = dy < 0 ? -dy : dy;
     
-    /* Reject scroll at boundaries - likely aliasing */
     if (abs_dx >= max_scroll_x || abs_dy >= max_scroll_y) return;
     
     wlr_log(WLR_INFO, "Region %d: FFT detected scroll dx=%d dy=%d", reg_idx, dx, dy);
     
-    /* Compute rectangles using helper */
     struct scroll_rects rects;
     compute_scroll_rects(rx1, ry1, rx2, ry2, dx, dy, &rects);
     if (!rects.valid) return;
     
-    /* Compare compressed sizes */
     int bytes_no_scroll = 0, bytes_with_scroll = 0;
     int tiles_identical_no = 0, tiles_identical_with = 0;
     uint8_t comp_buf[TILE_SIZE * TILE_SIZE * 4 + 256];
@@ -111,7 +81,7 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
         for (int tx = tx1; tx < tx2; tx++) {
             int x1, y1, w, h;
             tile_bounds(tx, ty, s->width, s->height, &x1, &y1, &w, &h);
-            if (w != TILE_SIZE || h != TILE_SIZE) continue;  /* Skip partial tiles */
+            if (w != TILE_SIZE || h != TILE_SIZE) continue;
             
             /* Check without scroll */
             if (!tile_changed(send_buf, prev_buf, width, x1, y1, w, h)) {
@@ -128,14 +98,12 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
             /* Check with scroll */
             int src_x1 = x1 - dx, src_y1 = y1 - dy;
             
-            /* Check if tile is in exposed region */
             int in_exposed = 0;
             if (dy != 0 && y1 >= rects.exp_y1 && y1 < rects.exp_y2) in_exposed = 1;
             if (dx != 0 && x1 >= rects.exp_x1 && x1 < rects.exp_x2) in_exposed = 1;
             
             if (!in_exposed && src_x1 >= 0 && src_y1 >= 0 &&
                 src_x1 + w <= s->width && src_y1 + h <= s->height) {
-                /* Compare against shifted previous frame */
                 int identical = 1;
                 for (int row = 0; row < h && identical; row++) {
                     if (memcmp(&send_buf[(y1 + row) * width + x1],
@@ -146,11 +114,16 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
                 if (identical) {
                     tiles_identical_with++;
                 } else {
-                    /* Copy tiles using helper */
                     uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
                     uint32_t shifted[TILE_SIZE * TILE_SIZE];
-                    copy_tile_region(curr_tile, TILE_SIZE, send_buf, width, x1, y1, w, h);
-                    copy_tile_region(shifted, TILE_SIZE, prev_buf, width, src_x1, src_y1, w, h);
+                    
+                    for (int row = 0; row < h; row++)
+                        memcpy(&curr_tile[row * TILE_SIZE],
+                               &send_buf[(y1 + row) * width + x1], w * 4);
+                    
+                    for (int row = 0; row < h; row++)
+                        memcpy(&shifted[row * TILE_SIZE],
+                               &prev_buf[(src_y1 + row) * width + src_x1], w * 4);
                     
                     int size = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
                                                        curr_tile, TILE_SIZE,
@@ -161,11 +134,16 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
                     bytes_with_scroll += size;
                 }
             } else {
-                /* Exposed area - copy using helper */
                 uint32_t curr_tile[TILE_SIZE * TILE_SIZE];
                 uint32_t prev_tile[TILE_SIZE * TILE_SIZE];
-                copy_tile_region(curr_tile, TILE_SIZE, send_buf, width, x1, y1, w, h);
-                copy_tile_region(prev_tile, TILE_SIZE, prev_buf, width, x1, y1, w, h);
+                
+                for (int row = 0; row < h; row++)
+                    memcpy(&curr_tile[row * TILE_SIZE],
+                           &send_buf[(y1 + row) * width + x1], w * 4);
+                
+                for (int row = 0; row < h; row++)
+                    memcpy(&prev_tile[row * TILE_SIZE],
+                           &prev_buf[(y1 + row) * width + x1], w * 4);
                 
                 int size = compress_tile_adaptive(comp_buf, sizeof(comp_buf),
                                                    curr_tile, TILE_SIZE,
@@ -195,20 +173,14 @@ static void detect_region_scroll_worker(void *user_data, int reg_idx) {
 }
 
 void scroll_init(void) {
-    if (!scroll_pool.initialized) {
-        pool_create(&scroll_pool, 0);
-    }
 }
 
 void detect_scroll(struct server *s, uint32_t *send_buf) {
     if (!send_buf || !s->prev_framebuf) return;
     
-    scroll_init();
-    
     double t_start = get_time_us();
     memset(&timing, 0, sizeof(timing));
     
-    /* Divide frame into grid with tile-aligned boundaries */
     int margin = TILE_SIZE;
     int cols = s->width / 256 > 0 ? s->width / 256 : 1;
     int rows = s->height / 256 > 0 ? s->height / 256 : 1;
@@ -251,15 +223,12 @@ void detect_scroll(struct server *s, uint32_t *send_buf) {
         }
     }
     
-    /* Process regions in parallel */
-    if (s->num_scroll_regions > 0 && scroll_pool.initialized) {
-        current_work.s = s;
-        current_work.send_buf = send_buf;
-        pool_process(&scroll_pool, detect_region_scroll_worker,
-                     &current_work, s->num_scroll_regions);
+    if (s->num_scroll_regions > 0) {
+        current_ctx.s = s;
+        current_ctx.send_buf = send_buf;
+        parallel_for(s->num_scroll_regions, detect_region_scroll, &current_ctx);
     }
     
-    /* Count detected scrolls */
     int detected_count = 0;
     for (int i = 0; i < s->num_scroll_regions; i++) {
         if (s->scroll_regions[i].detected) {
@@ -297,7 +266,6 @@ int apply_scroll_to_prevbuf(struct server *s) {
         int copy_w = r.dst_x2 - r.dst_x1;
         int abs_dy = dy < 0 ? -dy : dy;
         
-        /* Shift prev_framebuf to match the blit */
         if (dy < 0) {
             for (int y = r.dst_y1; y < r.dst_y2; y++) {
                 memmove(&s->prev_framebuf[y * s->width + r.dst_x1],
@@ -318,7 +286,6 @@ int apply_scroll_to_prevbuf(struct server *s) {
             }
         }
         
-        /* Mark exposed strips as dirty */
         if (r.exp_y2 > r.exp_y1) {
             for (int y = r.exp_y1; y < r.exp_y2; y++) {
                 for (int x = rx1; x < rx2; x++) {
@@ -358,7 +325,6 @@ int write_scroll_commands(struct server *s, uint8_t *batch, size_t max_size) {
         compute_scroll_rects(rx1, ry1, rx2, ry2, dx, dy, &r);
         if (!r.valid) continue;
         
-        /* Validate rectangles */
         if (r.src_y2 <= r.src_y1 || r.dst_y2 <= r.dst_y1) continue;
         if (r.src_x2 <= r.src_x1 || r.dst_x2 <= r.dst_x1) continue;
         
@@ -383,6 +349,5 @@ const struct scroll_timing *scroll_get_timing(void) {
 }
 
 void scroll_cleanup(void) {
-    pool_destroy(&scroll_pool);
     phase_correlate_cleanup();
 }

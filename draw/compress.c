@@ -3,18 +3,12 @@
  *
  * LZ77-style row matching compression with special cases for
  * solid colors and alpha-delta encoding.
- *
- * Uses generic thread_pool for parallel compression.
- *
- * Refactored:
- * - Extracted encode_solid_tile() for solid/zero tile encoding
- * - Added tile_dims_valid() inline helper for consistent validation
  */
 
 #include <string.h>
 #include <stdlib.h>
 #include "compress.h"
-#include "thread_pool.h"
+#include "parallel.h"
 
 /* Hash table for fast match finding */
 #define HASH_BITS 10
@@ -25,15 +19,9 @@ static inline uint32_t hash3(const uint8_t *p) {
     return ((p[0] << 5) ^ (p[1] << 2) ^ p[2]) & HASH_MASK;
 }
 
-/* Validate tile dimensions */
-static inline int tile_dims_valid(int w, int h) {
-    return w > 0 && h > 0 && w <= TILE_SIZE && h <= TILE_SIZE;
-}
-
 /*
  * Encode a solid-color tile (including all-zeros).
- * This encoding uses a single pixel plus row-repeat references.
- * Returns bytes written to dst.
+ * Uses a single pixel plus row-repeat references.
  */
 static int encode_solid_tile(uint8_t *dst, const uint8_t *pixel, int h) {
     int out = 0;
@@ -62,7 +50,7 @@ static int encode_solid_tile(uint8_t *dst, const uint8_t *pixel, int h) {
 
 /*
  * Fast LZ77 compression for a tile.
- * Uses hash table for O(1) match finding instead of linear search.
+ * Uses hash table for O(1) match finding.
  */
 static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, int bytes_per_row) {
     int out = 0;
@@ -70,7 +58,6 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
     uint8_t lit[128];
     int nlit = 0;
     
-    /* Hash table: maps hash -> most recent position */
     uint16_t htab[HASH_SIZE];
     memset(htab, 0, sizeof(htab));
     
@@ -79,9 +66,8 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
         int row_end = row_start + bytes_per_row;
         int pos = row_start;
         
-        /* Fast path: check if row equals previous row */
+        /* Fast path: row equals previous row */
         if (row > 0 && memcmp(raw + row_start, raw + row_start - bytes_per_row, bytes_per_row) == 0) {
-            /* Flush literals */
             if (nlit > 0) {
                 if (out + 1 + nlit > dst_max) return 0;
                 dst[out++] = 0x80 | (nlit - 1);
@@ -89,7 +75,6 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
                 out += nlit;
                 nlit = 0;
             }
-            /* Emit back-refs for entire row */
             int remaining = bytes_per_row;
             int off_code = bytes_per_row - 1;
             while (remaining > 0) {
@@ -112,7 +97,6 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
                 int candidate = htab[hv];
                 htab[hv] = pos;
                 
-                /* Check hash candidate */
                 if (candidate > 0 && pos - candidate <= 256) {
                     int off = pos - candidate;
                     int len = 0;
@@ -120,7 +104,6 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
                     if (len >= 3) { best = len; boff = off; }
                 }
                 
-                /* Check previous row offset */
                 if (best < maxlen && row > 0) {
                     int off = bytes_per_row;
                     if (pos - off >= 0) {
@@ -191,7 +174,6 @@ int compress_tile_data(uint8_t *dst, int dst_max,
     }
     
     int out;
-    
     if (is_solid) {
         out = encode_solid_tile(dst, raw, h);
     } else {
@@ -204,15 +186,13 @@ int compress_tile_data(uint8_t *dst, int dst_max,
     return out;
 }
 
-int compress_tile_direct(uint8_t *dst, int dst_max, 
-                         uint32_t *pixels, int stride, 
-                         int x1, int y1, int w, int h) {
-    if (!tile_dims_valid(w, h)) return 0;
-    
+/* Internal: no validation, caller guarantees valid inputs */
+static int compress_tile_direct_internal(uint8_t *dst, int dst_max, 
+                                         uint32_t *pixels, int stride, 
+                                         int x1, int y1, int w, int h) {
     int bytes_per_row = w * 4;
-    
-    /* Copy tile to contiguous buffer */
     uint8_t raw[TILE_SIZE * TILE_SIZE * 4];
+    
     for (int row = 0; row < h; row++) {
         memcpy(raw + row * bytes_per_row, 
                &pixels[(y1 + row) * stride + x1], bytes_per_row);
@@ -221,13 +201,11 @@ int compress_tile_direct(uint8_t *dst, int dst_max,
     return compress_tile_data(dst, dst_max, raw, bytes_per_row, h);
 }
 
-int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
-                              uint32_t *pixels, int stride,
-                              uint32_t *prev_pixels, int prev_stride,
-                              int x1, int y1, int w, int h) {
-    if (!tile_dims_valid(w, h)) return 0;
-    if (!prev_pixels) return 0;
-    
+/* Internal: no validation */
+static int compress_tile_alpha_delta_internal(uint8_t *dst, int dst_max,
+                                              uint32_t *pixels, int stride,
+                                              uint32_t *prev_pixels, int prev_stride,
+                                              int x1, int y1, int w, int h) {
     int bytes_per_row = w * 4;
     uint8_t delta[TILE_SIZE * TILE_SIZE * 4];
     int changed = 0;
@@ -256,56 +234,66 @@ int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
     return compress_tile_data(dst, dst_max, delta, bytes_per_row, h);
 }
 
+/* Public entry points with validation */
+
+int compress_tile_direct(uint8_t *dst, int dst_max, 
+                         uint32_t *pixels, int stride, 
+                         int x1, int y1, int w, int h) {
+    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    return compress_tile_direct_internal(dst, dst_max, pixels, stride, x1, y1, w, h);
+}
+
+int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
+                              uint32_t *pixels, int stride,
+                              uint32_t *prev_pixels, int prev_stride,
+                              int x1, int y1, int w, int h) {
+    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
+    if (!prev_pixels) return 0;
+    return compress_tile_alpha_delta_internal(dst, dst_max, pixels, stride,
+                                              prev_pixels, prev_stride,
+                                              x1, y1, w, h);
+}
+
 int compress_tile_adaptive(uint8_t *dst, int dst_max,
                            uint32_t *pixels, int stride,
                            uint32_t *prev_pixels, int prev_stride,
                            int x1, int y1, int w, int h) {
-    if (!tile_dims_valid(w, h)) return 0;
+    if (w <= 0 || h <= 0 || w > TILE_SIZE || h > TILE_SIZE) return 0;
     
     uint8_t temp[1200];
     
-    /* Try direct compression first */
-    int direct_size = compress_tile_direct(dst, dst_max, pixels, stride, x1, y1, w, h);
+    int direct_size = compress_tile_direct_internal(dst, dst_max, pixels, stride, x1, y1, w, h);
     
-    /* If no prev_pixels, can only do direct */
-    if (!prev_pixels) {
+    if (!prev_pixels)
         return direct_size > 0 ? -direct_size : 0;
-    }
     
-    /* Try alpha-delta compression */
-    int delta_size = compress_tile_alpha_delta(temp, sizeof(temp),
-                                               pixels, stride,
-                                               prev_pixels, prev_stride,
-                                               x1, y1, w, h);
+    int delta_size = compress_tile_alpha_delta_internal(temp, sizeof(temp),
+                                                        pixels, stride,
+                                                        prev_pixels, prev_stride,
+                                                        x1, y1, w, h);
     
-    /* Compare: delta wins if delta_size + overhead < direct_size */
     if (delta_size > 0) {
         int delta_total = delta_size + ALPHA_DELTA_OVERHEAD;
-        
         if (direct_size == 0 || delta_total < direct_size) {
             memcpy(dst, temp, delta_size);
-            return delta_size;  /* positive = delta */
+            return delta_size;
         }
     }
     
     return direct_size > 0 ? -direct_size : 0;
 }
 
-/* ============== Thread Pool Integration ============== */
+/* ============== Parallel Compression ============== */
 
-static struct thread_pool compress_pool = {0};
-
-/* Work context passed to worker function */
-struct compress_work_ctx {
+struct compress_ctx {
     struct tile_work *tiles;
     struct tile_result *results;
 };
 
-/* Worker function called by generic thread pool */
-static void compress_tile_worker(void *user_data, int idx) {
-    struct compress_work_ctx *ctx = user_data;
-    struct tile_work *w = &ctx->tiles[idx];
-    struct tile_result *r = &ctx->results[idx];
+static void compress_one_tile(void *ctx, int idx) {
+    struct compress_ctx *c = ctx;
+    struct tile_work *w = &c->tiles[idx];
+    struct tile_result *r = &c->results[idx];
     
     int result = compress_tile_adaptive(
         r->data, sizeof(r->data),
@@ -326,29 +314,21 @@ static void compress_tile_worker(void *user_data, int idx) {
     }
 }
 
-/* Initialize compression thread pool */
+/* No init/shutdown needed - parallel_for handles everything */
 int compress_pool_init(int nthreads) {
-    return pool_create(&compress_pool, nthreads);
+    (void)nthreads;
+    return 0;
 }
 
-/* Shutdown compression thread pool */
 void compress_pool_shutdown(void) {
-    pool_destroy(&compress_pool);
 }
 
-/* Compress multiple tiles in parallel */
-int compress_tiles_parallel(
-    struct tile_work *tiles, 
-    struct tile_result *results,
-    int count
-) {
-    if (!compress_pool.initialized || count == 0) return -1;
+int compress_tiles_parallel(struct tile_work *tiles, 
+                            struct tile_result *results,
+                            int count) {
+    if (count <= 0) return -1;
     
-    struct compress_work_ctx ctx = {
-        .tiles = tiles,
-        .results = results
-    };
-    
-    pool_process(&compress_pool, compress_tile_worker, &ctx, count);
+    struct compress_ctx ctx = { .tiles = tiles, .results = results };
+    parallel_for(count, compress_one_tile, &ctx);
     return 0;
 }

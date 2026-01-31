@@ -119,20 +119,16 @@ const struct key_map keymap[] = {
     {0, 0, 0, 0}
 };
 
-/* Look up a key mapping by rune (static fallback table) */
 const struct key_map *keymap_lookup(uint32_t rune) {
     for (int i = 0; keymap[i].rune || keymap[i].keycode; i++) {
-        if ((uint32_t)keymap[i].rune == rune) {
+        if ((uint32_t)keymap[i].rune == rune)
             return &keymap[i];
-        }
     }
-    if (rune >= 0x80 || rune >= KF) {
+    if (rune >= 0x80 || rune >= KF)
         wlr_log(WLR_ERROR, "keymap_lookup: NO ENTRY for rune=0x%04x (%d)", rune, rune);
-    }
     return NULL;
 }
 
-/* Dynamic lookup with kbmap fallback to static table */
 static struct key_map dynamic_result;
 
 const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune) {
@@ -149,7 +145,6 @@ const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune) {
     return keymap_lookup(rune);
 }
 
-/* Decode UTF-8 rune from buffer */
 int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune) {
     if (p >= end) return 0;
     
@@ -173,7 +168,6 @@ int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune) {
     return 0;
 }
 
-/* Get modifier mask for a rune */
 uint32_t keymapmod(int rune) {
     switch (rune) {
     case Kshift: return WLR_MODIFIER_SHIFT;
@@ -227,6 +221,12 @@ int input_queue_pop(struct input_queue *q, struct input_event *ev) {
 }
 
 /* ============== Input Threads ============== */
+
+static int key_in_set(int key, int *set, int count) {
+    for (int i = 0; i < count; i++)
+        if (set[i] == key) return 1;
+    return 0;
+}
 
 void *mouse_thread_func(void *arg) {
     struct server *s = arg;
@@ -341,7 +341,6 @@ void *kbd_thread_func(void *arg) {
         buf[n] = '\0';
         
         if (use_cons_fallback) {
-            /* /dev/cons: raw UTF-8, send as character events */
             const unsigned char *p = buf;
             const unsigned char *end = buf + n;
             while (p < end) {
@@ -362,7 +361,6 @@ void *kbd_thread_func(void *arg) {
             continue;
         }
         
-        /* /dev/kbd: process 'c', 'k', 'K' messages */
         const unsigned char *p = buf;
         const unsigned char *end = buf + n;
         
@@ -373,14 +371,9 @@ void *kbd_thread_func(void *arg) {
             char msg_type = *p++;
             
             if (msg_type == 'c') {
-                /* Character message - regular typing */
-                int ctrl_held = 0, alt_held = 0;
-                for (int i = 0; i < prev_nkeys; i++) {
-                    if (prev_keys[i] == Kctl) ctrl_held = 1;
-                    if (prev_keys[i] == Kalt) alt_held = 1;
-                }
+                int ctrl_held = key_in_set(Kctl, prev_keys, prev_nkeys);
+                int alt_held = key_in_set(Kalt, prev_keys, prev_nkeys);
                 
-                /* Skip 'c' messages when modifiers held (handled via 'k') */
                 if (ctrl_held || alt_held) {
                     p = msg_end + 1;
                     continue;
@@ -402,7 +395,6 @@ void *kbd_thread_func(void *arg) {
                     input_queue_push(&s->input_queue, &ev);
                 }
             } else if (msg_type == 'k' || msg_type == 'K') {
-                /* Key state message */
                 int curr_keys[16];
                 int curr_nkeys = 0;
                 uint32_t curr_mods = 0;
@@ -419,14 +411,9 @@ void *kbd_thread_func(void *arg) {
                 int ctrl_alt_held = (curr_mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) != 0;
                 
                 if (msg_type == 'k') {
-                    /* Find newly pressed keys */
                     for (int i = 0; i < curr_nkeys; i++) {
                         int rune = curr_keys[i];
-                        int found = 0;
-                        for (int j = 0; j < prev_nkeys; j++) {
-                            if (prev_keys[j] == rune) { found = 1; break; }
-                        }
-                        if (!found) {
+                        if (!key_in_set(rune, prev_keys, prev_nkeys)) {
                             if (rune >= KF || ctrl_alt_held) {
                                 keys_read++;
                                 struct input_event ev = {
@@ -435,52 +422,38 @@ void *kbd_thread_func(void *arg) {
                                 };
                                 input_queue_push(&s->input_queue, &ev);
                                 
-                                if (rune < KF && sent_nkeys < 16) {
+                                if (rune < KF && sent_nkeys < 16)
                                     sent_keys[sent_nkeys++] = rune;
-                                }
                             }
                         }
                     }
                 } else {
-                    /* 'K' message: find released keys */
-                    int ctrl_alt_was_held = 0;
-                    for (int i = 0; i < prev_nkeys; i++) {
-                        if (prev_keys[i] == Kctl || prev_keys[i] == Kalt) {
-                            ctrl_alt_was_held = 1;
-                            break;
-                        }
-                    }
+                    int ctrl_alt_was_held = key_in_set(Kctl, prev_keys, prev_nkeys) ||
+                                            key_in_set(Kalt, prev_keys, prev_nkeys);
                     
                     for (int i = 0; i < prev_nkeys; i++) {
                         int rune = prev_keys[i];
-                        int found = 0;
-                        for (int j = 0; j < curr_nkeys; j++) {
-                            if (curr_keys[j] == rune) { found = 1; break; }
-                        }
-                        if (!found && (rune >= KF || ctrl_alt_was_held)) {
-                            struct input_event ev = {
-                                .type = INPUT_KEY,
-                                .key = { .rune = rune, .pressed = 0 }
-                            };
-                            input_queue_push(&s->input_queue, &ev);
-                            
-                            for (int k = 0; k < sent_nkeys; k++) {
-                                if (sent_keys[k] == rune) {
-                                    sent_keys[k] = sent_keys[--sent_nkeys];
-                                    break;
+                        if (!key_in_set(rune, curr_keys, curr_nkeys)) {
+                            if (rune >= KF || ctrl_alt_was_held) {
+                                struct input_event ev = {
+                                    .type = INPUT_KEY,
+                                    .key = { .rune = rune, .pressed = 0 }
+                                };
+                                input_queue_push(&s->input_queue, &ev);
+                                
+                                for (int k = 0; k < sent_nkeys; k++) {
+                                    if (sent_keys[k] == rune) {
+                                        sent_keys[k] = sent_keys[--sent_nkeys];
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
                     
-                    /* Check sent_keys for orphaned releases */
                     for (int i = 0; i < sent_nkeys; i++) {
                         int rune = sent_keys[i];
-                        int found = 0;
-                        for (int j = 0; j < curr_nkeys; j++) {
-                            if (curr_keys[j] == rune) { found = 1; break; }
-                        }
-                        if (!found) {
+                        if (!key_in_set(rune, curr_keys, curr_nkeys)) {
                             struct input_event ev = {
                                 .type = INPUT_KEY,
                                 .key = { .rune = rune, .pressed = 0 }
@@ -543,9 +516,8 @@ void *wctl_thread_func(void *arg) {
         
         if (was_hidden && is_visible) {
             wlr_log(WLR_INFO, "Wctl: window unhidden, triggering full redraw");
-            if (s->prev_framebuf && s->width > 0 && s->height > 0) {
+            if (s->prev_framebuf && s->width > 0 && s->height > 0)
                 memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
-            }
             s->force_full_frame = 1;
             s->window_changed = 1;
             
