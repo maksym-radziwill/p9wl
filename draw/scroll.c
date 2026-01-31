@@ -349,5 +349,6 @@ const struct scroll_timing *scroll_get_timing(void) {
 }
 
 void scroll_cleanup(void) {
+    parallel_cleanup();
     phase_correlate_cleanup();
 }

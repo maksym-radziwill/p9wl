@@ -4,7 +4,7 @@
  * Detects translation (scrolling) between two image regions.
  *
  * Uses single-precision FFTW for performance.
- * Thread-local storage with automatic cleanup when threads exit.
+ * Thread-local storage for parallel execution (assumes persistent worker threads).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -46,75 +46,41 @@ struct fft_thread_resources {
     fftwf_plan plan_fwd1;
     fftwf_plan plan_fwd2;
     fftwf_plan plan_inv;
+    int initialized;
 };
 
-/* pthread key for automatic cleanup */
-static pthread_key_t tls_key;
-static pthread_once_t key_once = PTHREAD_ONCE_INIT;
+static __thread struct fft_thread_resources tls = {0};
 static pthread_mutex_t fftw_plan_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void free_thread_resources(void *arg) {
-    struct fft_thread_resources *res = arg;
-    if (!res) return;
-    
-    pthread_mutex_lock(&fftw_plan_lock);
-    if (res->plan_fwd1) fftwf_destroy_plan(res->plan_fwd1);
-    if (res->plan_fwd2) fftwf_destroy_plan(res->plan_fwd2);
-    if (res->plan_inv) fftwf_destroy_plan(res->plan_inv);
-    pthread_mutex_unlock(&fftw_plan_lock);
-    
-    if (res->fft_in1) fftwf_free(res->fft_in1);
-    if (res->fft_in2) fftwf_free(res->fft_in2);
-    if (res->fft_corr) fftwf_free(res->fft_corr);
-    if (res->fft_out1) fftwf_free(res->fft_out1);
-    if (res->fft_out2) fftwf_free(res->fft_out2);
-    if (res->fft_cross) fftwf_free(res->fft_cross);
-    
-    free(res);
-}
-
-static void create_tls_key(void) {
-    pthread_key_create(&tls_key, free_thread_resources);
-}
-
 static struct fft_thread_resources *get_thread_resources(void) {
-    pthread_once(&key_once, create_tls_key);
-    
-    struct fft_thread_resources *res = pthread_getspecific(tls_key);
-    if (res) return res;
-    
-    /* First call on this thread - allocate resources */
-    res = calloc(1, sizeof(*res));
-    if (!res) return NULL;
+    if (tls.initialized) return &tls;
     
     init_hann_lut();
     
-    res->fft_in1 = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
-    res->fft_in2 = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
-    res->fft_corr = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
-    res->fft_out1 = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
-    res->fft_out2 = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
-    res->fft_cross = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
+    tls.fft_in1 = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    tls.fft_in2 = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    tls.fft_corr = fftwf_alloc_real(FFT_SIZE * FFT_SIZE);
+    tls.fft_out1 = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
+    tls.fft_out2 = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
+    tls.fft_cross = fftwf_alloc_complex((FFT_SIZE/2 + 1) * FFT_SIZE);
     
-    if (!res->fft_in1 || !res->fft_in2 || !res->fft_corr ||
-        !res->fft_out1 || !res->fft_out2 || !res->fft_cross) {
-        free_thread_resources(res);
+    if (!tls.fft_in1 || !tls.fft_in2 || !tls.fft_corr ||
+        !tls.fft_out1 || !tls.fft_out2 || !tls.fft_cross) {
         return NULL;
     }
     
     pthread_mutex_lock(&fftw_plan_lock);
-    res->plan_fwd1 = fftwf_plan_dft_r2c_2d(FFT_SIZE, FFT_SIZE, res->fft_in1, res->fft_out1, FFTW_MEASURE);
-    res->plan_fwd2 = fftwf_plan_dft_r2c_2d(FFT_SIZE, FFT_SIZE, res->fft_in2, res->fft_out2, FFTW_MEASURE);
-    res->plan_inv = fftwf_plan_dft_c2r_2d(FFT_SIZE, FFT_SIZE, res->fft_cross, res->fft_corr, FFTW_MEASURE);
+    tls.plan_fwd1 = fftwf_plan_dft_r2c_2d(FFT_SIZE, FFT_SIZE, tls.fft_in1, tls.fft_out1, FFTW_MEASURE);
+    tls.plan_fwd2 = fftwf_plan_dft_r2c_2d(FFT_SIZE, FFT_SIZE, tls.fft_in2, tls.fft_out2, FFTW_MEASURE);
+    tls.plan_inv = fftwf_plan_dft_c2r_2d(FFT_SIZE, FFT_SIZE, tls.fft_cross, tls.fft_corr, FFTW_MEASURE);
     pthread_mutex_unlock(&fftw_plan_lock);
     
-    if (!res->plan_fwd1 || !res->plan_fwd2 || !res->plan_inv) {
-        free_thread_resources(res);
+    if (!tls.plan_fwd1 || !tls.plan_fwd2 || !tls.plan_inv) {
         return NULL;
     }
     
-    pthread_setspecific(tls_key, res);
-    return res;
+    tls.initialized = 1;
+    return &tls;
 }
 
 static inline float pixel_to_gray(uint32_t pixel) {
@@ -253,7 +219,7 @@ struct phase_result phase_correlate_detect(
 }
 
 void phase_correlate_cleanup(void) {
-    /* Resources are automatically freed when threads exit via pthread_key destructor.
-     * This just cleans up FFTW global state. */
+    /* TLS resources are not explicitly freed - OS reclaims at exit.
+     * This cleans up FFTW global state. */
     fftwf_cleanup();
 }
