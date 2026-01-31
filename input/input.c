@@ -479,6 +479,10 @@ void *kbd_thread_func(void *arg) {
     int prev_nkeys = 0;
     uint32_t prev_mods = 0;
     
+    /* Track keys we sent press events for via 'k' messages (to ensure matching releases) */
+    int sent_keys[16];
+    int sent_nkeys = 0;
+    
     /* First try /dev/kbd (kbdfs) which provides proper key messages */
     kbd_fid = p9->next_fid++;
     wnames[0] = "kbd";
@@ -678,6 +682,11 @@ void *kbd_thread_func(void *arg) {
                                 ev.key.rune = rune;
                                 ev.key.pressed = 1;
                                 input_queue_push(&s->input_queue, &ev);
+                                
+                                /* Track that we sent a press for this key (for non-special keys) */
+                                if (rune < KF && sent_nkeys < 16) {
+                                    sent_keys[sent_nkeys++] = rune;
+                                }
                             }
                         }
                     }
@@ -709,7 +718,37 @@ void *kbd_thread_func(void *arg) {
                                 ev.key.rune = rune;
                                 ev.key.pressed = 0;
                                 input_queue_push(&s->input_queue, &ev);
+                                
+                                /* Remove from sent_keys if present */
+                                for (int k = 0; k < sent_nkeys; k++) {
+                                    if (sent_keys[k] == rune) {
+                                        sent_keys[k] = sent_keys[--sent_nkeys];
+                                        break;
+                                    }
+                                }
                             }
+                        }
+                    }
+                    
+                    /* Also check sent_keys for any keys we sent press for but weren't
+                     * released above (happens when modifier released before the key) */
+                    for (int i = 0; i < sent_nkeys; i++) {
+                        int rune = sent_keys[i];
+                        int found = 0;
+                        for (int j = 0; j < curr_nkeys; j++) {
+                            if (curr_keys[j] == rune) { found = 1; break; }
+                        }
+                        if (!found) {
+                            wlr_log(WLR_INFO, "Kbd RELEASE (sent_keys): rune=0x%04x", rune);
+                            struct input_event ev;
+                            ev.type = INPUT_KEY;
+                            ev.key.rune = rune;
+                            ev.key.pressed = 0;
+                            input_queue_push(&s->input_queue, &ev);
+                            
+                            /* Remove from sent_keys */
+                            sent_keys[i] = sent_keys[--sent_nkeys];
+                            i--;
                         }
                     }
                 }
