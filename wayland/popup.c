@@ -1,8 +1,8 @@
 /*
- * popup.c - Popup management (refactored)
+ * popup.c - Popup lifecycle management
  *
- * Handles XDG popup lifecycle. Focus-related logic has been
- * consolidated into focus_manager.c
+ * Handles XDG popup creation, commit, and destruction.
+ * Focus logic is handled by focus_manager.c
  */
 
 #include <stdlib.h>
@@ -13,30 +13,7 @@
 #include <wlr/util/log.h>
 
 #include "popup.h"
-#include "../types.h"  /* Includes focus_manager.h */
-
-/* Forward declaration */
-extern uint32_t now_ms(void);
-
-/* ============== Legacy API Wrappers ============== */
-
-struct popup_data *get_topmost_popup(struct server *s) {
-    return focus_popup_get_topmost(&s->focus);
-}
-
-struct popup_data *find_popup_by_surface(struct server *s, struct wlr_surface *surface) {
-    return focus_popup_from_surface(&s->focus, surface);
-}
-
-void dismiss_all_popups(struct server *s) {
-    focus_popup_dismiss_all(&s->focus);
-}
-
-bool dismiss_topmost_grabbed_popup(struct server *s) {
-    return focus_popup_dismiss_topmost_grabbed(&s->focus);
-}
-
-/* ============== Popup Lifecycle Handlers ============== */
+#include "../types.h"
 
 static void popup_destroy(struct wl_listener *l, void *d) {
     struct popup_data *pd = wl_container_of(l, pd, destroy);
@@ -46,10 +23,8 @@ static void popup_destroy(struct wl_listener *l, void *d) {
     
     wlr_log(WLR_INFO, "Popup DESTROYED: surface=%p", pd->surface);
     
-    /* Delegate focus handling to focus_manager */
     focus_popup_unregister(&s->focus, pd);
     
-    /* Cleanup listeners */
     wl_list_remove(&pd->commit.link);
     wl_list_remove(&pd->destroy.link);
     if (!wl_list_empty(&pd->grab.link)) {
@@ -57,8 +32,6 @@ static void popup_destroy(struct wl_listener *l, void *d) {
     }
     
     free(pd);
-    
-    wlr_log(WLR_INFO, "Popup destruction complete");
 }
 
 static void popup_commit(struct wl_listener *l, void *d) {
@@ -70,7 +43,6 @@ static void popup_commit(struct wl_listener *l, void *d) {
     struct server *s = pd->server;
     
     if (popup->base->initial_commit) {
-        /* Use logical dimensions for popup constraints */
         int logical_w = focus_phys_to_logical(s->width, s->scale);
         int logical_h = focus_phys_to_logical(s->height, s->scale);
         struct wlr_box box = {
@@ -86,14 +58,11 @@ static void popup_commit(struct wl_listener *l, void *d) {
         return;
     }
     
-    if (!surface->mapped) {
-        return;
-    }
+    if (!surface->mapped) return;
     
     pd->commit_count++;
     bool has_buffer = wlr_surface_has_buffer(surface);
     
-    /* Track map/unmap state changes */
     if (has_buffer && !pd->mapped) {
         pd->mapped = true;
         wlr_log(WLR_INFO, "Popup MAPPED: surface=%p has_grab=%d", pd->surface, pd->has_grab);
@@ -103,13 +72,6 @@ static void popup_commit(struct wl_listener *l, void *d) {
         wlr_log(WLR_INFO, "Popup UNMAPPED: surface=%p", pd->surface);
         focus_popup_unmapped(&s->focus, pd);
     }
-    
-    if (pd->commit_count <= 10 || pd->commit_count % 50 == 0) {
-        struct wlr_box geo = popup->current.geometry;
-        wlr_log(WLR_DEBUG, "Popup %p commit #%d: geo=(%d,%d %dx%d) mapped=%d",
-                (void*)pd->popup, pd->commit_count, geo.x, geo.y, 
-                geo.width, geo.height, pd->mapped);
-    }
 }
 
 void new_popup(struct wl_listener *l, void *d) {
@@ -118,20 +80,13 @@ void new_popup(struct wl_listener *l, void *d) {
     
     wlr_log(WLR_INFO, "New XDG popup created, parent=%p", (void*)popup->parent);
     
-    /* Find parent scene tree */
     struct wlr_xdg_surface *parent = wlr_xdg_surface_try_from_wlr_surface(popup->parent);
-    if (!parent) {
-        wlr_log(WLR_ERROR, "Popup: wlr_xdg_surface_try_from_wlr_surface failed");
-        return;
-    }
-    if (!parent->data) {
-        wlr_log(WLR_ERROR, "Popup: parent has no scene tree data");
+    if (!parent || !parent->data) {
+        wlr_log(WLR_ERROR, "Popup: invalid parent");
         return;
     }
     
     struct wlr_scene_tree *parent_tree = parent->data;
-    
-    /* Create scene tree for popup */
     struct wlr_scene_tree *popup_tree = wlr_scene_xdg_surface_create(parent_tree, popup->base);
     if (!popup_tree) {
         wlr_log(WLR_ERROR, "Failed to create popup scene tree");
@@ -139,7 +94,6 @@ void new_popup(struct wl_listener *l, void *d) {
     }
     popup->base->data = popup_tree;
     
-    /* Allocate popup tracking data */
     struct popup_data *pd = calloc(1, sizeof(*pd));
     if (!pd) {
         wlr_log(WLR_ERROR, "Failed to allocate popup_data");
@@ -157,16 +111,13 @@ void new_popup(struct wl_listener *l, void *d) {
     wl_list_init(&pd->grab.link);
     wl_list_init(&pd->link);
     
-    /* Register with focus manager (adds to popup stack) */
     focus_popup_register(&s->focus, pd);
     
-    /* Setup listeners */
     pd->commit.notify = popup_commit;
     wl_signal_add(&popup->base->surface->events.commit, &pd->commit);
     
     pd->destroy.notify = popup_destroy;
     wl_signal_add(&popup->base->events.destroy, &pd->destroy);
     
-    wlr_log(WLR_INFO, "Popup scene tree created at %p (has_grab=%d)", 
-            (void*)popup_tree, pd->has_grab);
+    wlr_log(WLR_INFO, "Popup scene tree created (has_grab=%d)", pd->has_grab);
 }
