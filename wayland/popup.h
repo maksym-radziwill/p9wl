@@ -27,16 +27,18 @@
  *      - Removes commit, destroy, and grab listeners
  *      - Frees popup_data struct
  *
- * The popup_data struct (defined in focus_manager.h) tracks:
- *   - popup: wlr_xdg_popup pointer
- *   - surface: wlr_surface pointer for quick access
- *   - scene_tree: scene graph node for rendering
- *   - server: back-reference to server state
- *   - configured: set after initial configure sent
- *   - commit_count: number of commits received (for debugging)
- *   - mapped: true when surface has buffer and is visible
- *   - has_grab: true if popup requested keyboard grab (menus)
- *   - link: position in focus_manager's popup_stack
+ * Data Structures:
+ *
+ *   The popup_data struct (defined in focus_manager.h) tracks:
+ *     - popup: wlr_xdg_popup pointer
+ *     - surface: wlr_surface pointer for quick access
+ *     - scene_tree: scene graph node for rendering
+ *     - server: back-reference to server state
+ *     - configured: set after initial configure sent
+ *     - commit_count: number of commits received (for debugging)
+ *     - mapped: true when surface has buffer and is visible
+ *     - has_grab: true if popup requested keyboard grab (menus)
+ *     - link: position in focus_manager's popup_stack
  *
  * Usage:
  *
@@ -50,6 +52,8 @@
 #define P9WL_POPUP_H
 
 #include "../types.h"
+
+/* ============== Popup Handling ============== */
 
 /*
  * Handle new XDG popup creation.

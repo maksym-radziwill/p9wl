@@ -14,18 +14,29 @@
  *   output.h       - Output creation and frame rendering
  *   client.h       - Decoration handling and server cleanup
  *
- * For new code, prefer including only the specific headers you need
- * rather than this catch-all header.
- *
  * Focus Management:
  *
  *   The focus_manager API (via types.h -> focus_manager.h) is the
  *   primary interface for focus-related operations. The old focus.h
  *   header is deprecated and retained only for compatibility.
+ *
+ * Usage:
+ *
+ *   For source files that need multiple Wayland subsystems:
+ *
+ *     #include "wayland/wayland.h"
+ *
+ *   For new code, prefer including only the specific headers you need
+ *   rather than this catch-all header:
+ *
+ *     #include "wayland/toplevel.h"
+ *     #include "wayland/popup.h"
  */
 
 #ifndef P9WL_WAYLAND_H
 #define P9WL_WAYLAND_H
+
+/* ============== Included Headers ============== */
 
 #include "../types.h"
 #include "popup.h"

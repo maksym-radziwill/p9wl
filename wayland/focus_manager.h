@@ -8,7 +8,7 @@
  *   - Popup management: grab stack for menus and dropdowns
  *   - Surface lifecycle: focus transitions on map/unmap/destroy
  *
- * Design Notes:
+ * Design:
  *
  *   The focus manager maintains two independent focus targets. Pointer focus
  *   follows the cursor and determines where motion/button events are sent.
@@ -27,6 +27,25 @@
  *   This header is included by types.h to define struct focus_manager and
  *   struct popup_data. Do NOT include types.h here to avoid circular
  *   dependency. Use forward declarations for struct server, struct toplevel.
+ *
+ * Usage:
+ *
+ *   Initialize during server startup:
+ *
+ *     focus_manager_init(&server->focus, server);
+ *
+ *   Handle clicks with focus logic:
+ *
+ *     struct wlr_surface *target = focus_handle_click(&server->focus,
+ *         clicked_surface, sx, sy, button);
+ *
+ *   Focus a toplevel window:
+ *
+ *     focus_toplevel(&server->focus, toplevel, FOCUS_REASON_POINTER_CLICK);
+ *
+ *   Clean up during shutdown:
+ *
+ *     focus_manager_cleanup(&server->focus);
  */
 
 #ifndef FOCUS_MANAGER_H
@@ -43,6 +62,8 @@ struct wlr_surface;
 struct wlr_scene_node;
 struct wlr_scene_tree;
 struct wlr_xdg_popup;
+
+/* ============== Data Structures ============== */
 
 /*
  * Popup tracking state.
@@ -123,11 +144,16 @@ struct focus_manager {
 /*
  * Initialize the focus manager. Call once during server startup.
  * Zeroes all state and initializes the popup stack list.
+ *
+ * fm:     focus manager to initialize
+ * server: owning server instance
  */
 void focus_manager_init(struct focus_manager *fm, struct server *server);
 
 /*
  * Clean up focus manager resources. Logs statistics.
+ *
+ * fm: focus manager to clean up
  */
 void focus_manager_cleanup(struct focus_manager *fm);
 
@@ -141,7 +167,11 @@ void focus_manager_cleanup(struct focus_manager *fm);
  * Falls back to the first mapped toplevel if no surface is directly
  * under the cursor.
  *
- * Returns NULL if no surface is available.
+ * fm:     focus manager
+ * out_sx: output - surface-local X coordinate
+ * out_sy: output - surface-local Y coordinate
+ *
+ * Returns the surface under cursor, or NULL if no surface is available.
  */
 struct wlr_surface *focus_surface_at_cursor(
     struct focus_manager *fm,
@@ -153,7 +183,12 @@ struct wlr_surface *focus_surface_at_cursor(
  * Find the toplevel that owns a surface.
  *
  * If the surface is a subsurface, walks up the parent chain to find
- * the owning toplevel. Returns NULL if not found.
+ * the owning toplevel.
+ *
+ * fm:      focus manager
+ * surface: surface to look up
+ *
+ * Returns the owning toplevel, or NULL if not found.
  */
 struct toplevel *focus_toplevel_from_surface(
     struct focus_manager *fm,
@@ -165,6 +200,10 @@ struct toplevel *focus_toplevel_from_surface(
  *
  * Convenience function combining focus_surface_at_cursor and
  * focus_toplevel_from_surface.
+ *
+ * fm: focus manager
+ *
+ * Returns the toplevel under cursor, or NULL if none.
  */
 struct toplevel *focus_toplevel_at_cursor(struct focus_manager *fm);
 
@@ -181,6 +220,12 @@ struct toplevel *focus_toplevel_at_cursor(struct focus_manager *fm);
  * released. This prevents focus changes during drag operations.
  *
  * Pass NULL to clear pointer focus entirely.
+ *
+ * fm:      focus manager
+ * surface: surface to focus (or NULL to clear)
+ * sx:      surface-local X coordinate
+ * sy:      surface-local Y coordinate
+ * reason:  why focus is changing
  */
 void focus_pointer_set(
     struct focus_manager *fm,
@@ -194,6 +239,11 @@ void focus_pointer_set(
  *
  * Call this after updating the cursor position. The sx/sy coordinates
  * are surface-local. Does nothing if no surface has pointer focus.
+ *
+ * fm:       focus manager
+ * sx:       surface-local X coordinate
+ * sy:       surface-local Y coordinate
+ * time_msec: event timestamp in milliseconds
  */
 void focus_pointer_motion(
     struct focus_manager *fm,
@@ -208,6 +258,8 @@ void focus_pointer_motion(
  * hit test and updates focus if the surface under the cursor changed.
  *
  * Also processes any deferred focus changes if buttons are no longer held.
+ *
+ * fm: focus manager
  */
 void focus_pointer_recheck(struct focus_manager *fm);
 
@@ -216,6 +268,8 @@ void focus_pointer_recheck(struct focus_manager *fm);
  *
  * Currently a no-op; the seat tracks button count internally.
  * Kept for API symmetry with focus_pointer_button_released.
+ *
+ * fm: focus manager
  */
 void focus_pointer_button_pressed(struct focus_manager *fm);
 
@@ -224,6 +278,8 @@ void focus_pointer_button_pressed(struct focus_manager *fm);
  *
  * If all buttons are now released and focus was deferred, triggers
  * focus_pointer_recheck to process the deferred focus change.
+ *
+ * fm: focus manager
  */
 void focus_pointer_button_released(struct focus_manager *fm);
 
@@ -234,6 +290,10 @@ void focus_pointer_button_released(struct focus_manager *fm);
  *
  * Sends wl_keyboard.enter with the current keymap and modifier state.
  * Pass NULL to clear keyboard focus.
+ *
+ * fm:      focus manager
+ * surface: surface to focus (or NULL to clear)
+ * reason:  why focus is changing
  */
 void focus_keyboard_set(
     struct focus_manager *fm,
@@ -246,6 +306,9 @@ void focus_keyboard_set(
  *
  * Called when modifier keys (Shift, Ctrl, Alt, etc.) change state.
  * The modifiers parameter uses WLR_MODIFIER_* flags.
+ *
+ * fm:        focus manager
+ * modifiers: new modifier state (WLR_MODIFIER_* bitmask)
  */
 void focus_keyboard_set_modifiers(
     struct focus_manager *fm,
@@ -254,6 +317,10 @@ void focus_keyboard_set_modifiers(
 
 /*
  * Get the current modifier state.
+ *
+ * fm: focus manager
+ *
+ * Returns current WLR_MODIFIER_* bitmask.
  */
 uint32_t focus_keyboard_get_modifiers(struct focus_manager *fm);
 
@@ -270,6 +337,10 @@ uint32_t focus_keyboard_get_modifiers(struct focus_manager *fm);
  *   5. Sets keyboard focus to the toplevel's surface
  *
  * Does nothing if the toplevel is already focused or invalid.
+ *
+ * fm:     focus manager
+ * tl:     toplevel to focus
+ * reason: why focus is changing
  */
 void focus_toplevel(
     struct focus_manager *fm,
@@ -282,6 +353,10 @@ void focus_toplevel(
  *
  * Returns the toplevel that owns the current keyboard focus surface,
  * or NULL if keyboard focus is on a popup or cleared.
+ *
+ * fm: focus manager
+ *
+ * Returns currently focused toplevel, or NULL.
  */
 struct toplevel *focus_get_focused_toplevel(struct focus_manager *fm);
 
@@ -292,6 +367,9 @@ struct toplevel *focus_get_focused_toplevel(struct focus_manager *fm);
  *
  * Adds the popup to the grab stack. Call this when a popup is created,
  * before it maps. The popup will be at the top of the stack.
+ *
+ * fm: focus manager
+ * pd: popup data to register
  */
 void focus_popup_register(
     struct focus_manager *fm,
@@ -304,6 +382,9 @@ void focus_popup_register(
  * Removes the popup from the grab stack and restores focus to the
  * next popup in the stack or the underlying toplevel. Call this
  * when the popup is destroyed.
+ *
+ * fm: focus manager
+ * pd: popup data to unregister
  */
 void focus_popup_unregister(
     struct focus_manager *fm,
@@ -315,6 +396,9 @@ void focus_popup_unregister(
  *
  * If the popup has a grab, transfers keyboard focus to it.
  * Also rechecks pointer focus in case the popup appeared under cursor.
+ *
+ * fm: focus manager
+ * pd: popup that mapped
  */
 void focus_popup_mapped(
     struct focus_manager *fm,
@@ -326,6 +410,9 @@ void focus_popup_mapped(
  *
  * If the popup had pointer focus, transfers it to the next available
  * surface.
+ *
+ * fm: focus manager
+ * pd: popup that unmapped
  */
 void focus_popup_unmapped(
     struct focus_manager *fm,
@@ -335,7 +422,9 @@ void focus_popup_unmapped(
 /*
  * Get the topmost popup in the grab stack.
  *
- * Returns NULL if no popups are active.
+ * fm: focus manager
+ *
+ * Returns topmost popup, or NULL if no popups are active.
  */
 struct popup_data *focus_popup_get_topmost(struct focus_manager *fm);
 
@@ -343,7 +432,11 @@ struct popup_data *focus_popup_get_topmost(struct focus_manager *fm);
  * Find the popup that owns a surface.
  *
  * Checks direct ownership and subsurface chains.
- * Returns NULL if the surface is not part of any popup.
+ *
+ * fm:      focus manager
+ * surface: surface to look up
+ *
+ * Returns owning popup, or NULL if the surface is not part of any popup.
  */
 struct popup_data *focus_popup_from_surface(
     struct focus_manager *fm,
@@ -355,6 +448,8 @@ struct popup_data *focus_popup_from_surface(
  *
  * Destroys every popup in the grab stack. Called when the user clicks
  * outside the popup hierarchy.
+ *
+ * fm: focus manager
  */
 void focus_popup_dismiss_all(struct focus_manager *fm);
 
@@ -364,12 +459,18 @@ void focus_popup_dismiss_all(struct focus_manager *fm);
  * Called when the user presses Escape. Only dismisses popups that
  * have an active grab (menus, dropdowns).
  *
+ * fm: focus manager
+ *
  * Returns true if a popup was dismissed, false if no grabbed popup exists.
  */
 bool focus_popup_dismiss_topmost_grabbed(struct focus_manager *fm);
 
 /*
  * Check if the popup stack is empty.
+ *
+ * fm: focus manager
+ *
+ * Returns true if no popups are active.
  */
 bool focus_popup_stack_empty(struct focus_manager *fm);
 
@@ -380,6 +481,10 @@ bool focus_popup_stack_empty(struct focus_manager *fm);
  *
  * For toplevels, focuses the new window. For all surfaces, updates
  * pointer focus if the surface appeared under the cursor.
+ *
+ * fm:          focus manager
+ * surface:     surface that mapped
+ * is_toplevel: true if surface is a toplevel window
  */
 void focus_on_surface_map(
     struct focus_manager *fm,
@@ -392,6 +497,9 @@ void focus_on_surface_map(
  *
  * If the surface had pointer or keyboard focus, transfers focus to
  * the next available surface (popup or toplevel).
+ *
+ * fm:      focus manager
+ * surface: surface that unmapped
  */
 void focus_on_surface_unmap(
     struct focus_manager *fm,
@@ -403,6 +511,9 @@ void focus_on_surface_unmap(
  *
  * Like focus_on_surface_unmap, but also clears any deferred focus
  * references to prevent use-after-free.
+ *
+ * fm:      focus manager
+ * surface: surface being destroyed
  */
 void focus_on_surface_destroy(
     struct focus_manager *fm,
@@ -419,6 +530,12 @@ void focus_on_surface_destroy(
  *   - Click on popup: keep current focus (return the popup surface)
  *   - Click outside popups: dismiss all popups, focus clicked surface
  *   - Click on toplevel: focus that toplevel
+ *
+ * fm:              focus manager
+ * clicked_surface: surface that was clicked
+ * sx:              surface-local X coordinate
+ * sy:              surface-local Y coordinate
+ * button:          button that was clicked
  *
  * Returns the surface that should receive the button event, which may
  * differ from the clicked surface if popups were dismissed.
@@ -437,6 +554,11 @@ struct wlr_surface *focus_handle_click(
  *
  * Wayland clients work in logical coordinates; the compositor works in
  * physical pixels. This conversion is needed for HiDPI scaling.
+ *
+ * phys:  physical coordinate
+ * scale: output scale factor
+ *
+ * Returns logical coordinate.
  */
 static inline int focus_phys_to_logical(int phys, float scale) {
     return (int)(phys / scale + 0.5f);
@@ -444,6 +566,11 @@ static inline int focus_phys_to_logical(int phys, float scale) {
 
 /*
  * Convert logical (Wayland) coordinates to physical (pixel) coordinates.
+ *
+ * logical: logical coordinate
+ * scale:   output scale factor
+ *
+ * Returns physical coordinate.
  */
 static inline int focus_logical_to_phys(int logical, float scale) {
     return (int)(logical * scale + 0.5f);

@@ -105,6 +105,8 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
+/* ============== Constants ============== */
+
 /* Default port for TLS 9P connections (plaintext uses P9_PORT = 10000) */
 #define P9_TLS_PORT 10001
 

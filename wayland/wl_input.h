@@ -61,6 +61,8 @@
 #include <stdint.h>
 #include "../types.h"
 
+/* ============== Keyboard Handling ============== */
+
 /*
  * Process a keyboard event from Plan 9.
  *
@@ -73,8 +75,14 @@
  *
  * If pressed is true and rune is Escape (0x1B), attempts to dismiss
  * the topmost grabbed popup before processing as a regular key.
+ *
+ * s:       server instance
+ * rune:    Plan 9 rune (Unicode codepoint or Kxxx constant)
+ * pressed: 1 for key press, 0 for key release
  */
 void handle_key(struct server *s, uint32_t rune, int pressed);
+
+/* ============== Mouse Handling ============== */
 
 /*
  * Process a mouse event from Plan 9.
@@ -94,8 +102,15 @@ void handle_key(struct server *s, uint32_t rune, int pressed);
  * Handles focus changes (click-to-focus), button events, scroll events,
  * and pointer motion. Popup dismissal occurs when clicking outside the
  * popup stack.
+ *
+ * s:       server instance
+ * mx:      X coordinate in Plan 9 screen coordinates
+ * my:      Y coordinate in Plan 9 screen coordinates
+ * buttons: button bitmask
  */
 void handle_mouse(struct server *s, int mx, int my, int buttons);
+
+/* ============== Event Loop Integration ============== */
 
 /*
  * Main loop callback for input events.
@@ -103,6 +118,10 @@ void handle_mouse(struct server *s, int mx, int my, int buttons);
  * Called by the Wayland event loop when the input queue pipe is readable.
  * Drains the pipe and processes all queued input events by calling
  * handle_mouse() or handle_key() as appropriate.
+ *
+ * fd:   file descriptor (input_queue.pipe_fd[0])
+ * mask: event mask (WL_EVENT_READABLE)
+ * data: pointer to struct server
  *
  * Returns 0 to continue receiving events.
  */

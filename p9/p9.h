@@ -224,6 +224,8 @@ void p9_disconnect(struct p9conn *p9);
  * the rio window was closed and the compositor should exit.
  *
  * p9: connection to check
+ *
+ * Returns non-zero if shutdown requested, 0 otherwise.
  */
 int p9_should_shutdown(struct p9conn *p9);
 
@@ -412,7 +414,7 @@ int p9_write_file(struct p9conn *p9, const char *path, const char *data, size_t 
  * Twrite messages can be sent before collecting responses.
  * Call p9_write_recv() to collect each response.
  *
- * NOTE: Caller must ensure proper ordering and not exceed
+ * Note: Caller must ensure proper ordering and not exceed
  * server's request queue. Does not acquire connection lock.
  *
  * p9:     connection

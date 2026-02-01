@@ -2,8 +2,8 @@
  * clipboard.h - Wayland clipboard <-> Plan 9 /dev/snarf integration
  *
  * Provides bidirectional clipboard synchronization:
- *   - Wayland client copies (Ctrl+C) → writes to /dev/snarf
- *   - Wayland client pastes (Ctrl+V) → reads from /dev/snarf
+ *   - Wayland client copies (Ctrl+C) -> writes to /dev/snarf
+ *   - Wayland client pastes (Ctrl+V) -> reads from /dev/snarf
  *
  * Design:
  *
@@ -18,7 +18,7 @@
  *
  *   Maximum clipboard size: 1MB (SNARF_MAX_SIZE)
  *
- * Wayland → Snarf (Copy):
+ * Wayland -> Snarf (Copy):
  *
  *   When a Wayland client sets the selection (copies):
  *     1. on_wayland_copy() handler is called
@@ -28,7 +28,7 @@
  *     5. Compositor reclaims selection ownership
  *     6. Future pastes (even Wayland-to-Wayland) go through snarf
  *
- * Snarf → Wayland (Paste):
+ * Snarf -> Wayland (Paste):
  *
  *   The compositor registers as selection owner, so paste requests
  *   come to us:
@@ -46,23 +46,25 @@
  *   on every text highlight, which would overwrite the clipboard
  *   unexpectedly. Only explicit Ctrl+C copies go to snarf.
  *
- * Internal Data Structures:
+ * Usage:
  *
- *   wayland_to_snarf_state: async transfer state for copy operations
- *     - server, event_source, fd, buf, len, capacity
+ *   Initialize during server setup (after seat and p9_snarf are ready):
  *
- *   snarf_to_wayland_source: wlr_data_source for paste operations
- *     - Implements send() and destroy() callbacks
- *     - Registered as selection owner
+ *     if (clipboard_init(server) < 0) {
+ *         // handle error
+ *     }
  *
- *   snarf_read_thread_args: passed to detached paste thread
- *     - p9 connection, fd to write to
+ *   Clean up during shutdown:
+ *
+ *     clipboard_cleanup(server);
  */
 
 #ifndef P9WL_CLIPBOARD_H
 #define P9WL_CLIPBOARD_H
 
 struct server;
+
+/* ============== Initialization ============== */
 
 /*
  * Initialize clipboard handling.

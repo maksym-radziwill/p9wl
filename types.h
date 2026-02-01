@@ -10,9 +10,16 @@
  * Include this header (directly or indirectly) before any draw/compress headers.
  *
  * Dependency Notes:
+ *
  *   - This header includes p9.h, focus_manager.h, and kbmap.h
  *   - Do not include input.h from here (would create circular dependency)
  *   - Input-related code should include input.h which includes this file
+ *
+ * Usage:
+ *
+ *   Most source files should include this header indirectly through
+ *   other headers (e.g., wayland/wayland.h). Direct inclusion is
+ *   appropriate for core infrastructure code.
  */
 
 #ifndef P9WL_TYPES_H
@@ -92,7 +99,7 @@
 struct server;
 struct draw_state;
 struct toplevel;
-/* NOTE: struct popup_data is defined in focus_manager.h */
+/* Note: struct popup_data is defined in focus_manager.h */
 
 /* ============== Input Event Types ============== */
 
@@ -340,7 +347,7 @@ struct server {
  * Uses CLOCK_MONOTONIC for consistent timing unaffected by
  * system time changes.
  *
- * @return  Milliseconds since arbitrary epoch
+ * Returns milliseconds since arbitrary epoch.
  */
 static inline uint32_t now_ms(void) {
     struct timespec ts;
@@ -353,7 +360,7 @@ static inline uint32_t now_ms(void) {
  *
  * Higher precision version of now_ms() for timing-sensitive code.
  *
- * @return  Microseconds since arbitrary epoch
+ * Returns microseconds since arbitrary epoch.
  */
 static inline uint64_t now_us(void) {
     struct timespec ts;

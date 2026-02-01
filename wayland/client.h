@@ -51,6 +51,8 @@
 #include <stdbool.h>
 #include "../types.h"
 
+/* ============== Decoration Handling ============== */
+
 /*
  * Handle new XDG toplevel decoration request.
  *
@@ -66,6 +68,8 @@
  * data:     wlr_xdg_toplevel_decoration_v1 pointer
  */
 void handle_new_decoration(struct wl_listener *listener, void *data);
+
+/* ============== Server Cleanup ============== */
 
 /*
  * Clean up server resources during shutdown.

@@ -46,6 +46,7 @@
  *   the surface's subsurface lists on each commit.
  *
  *   The FOR_EACH_SUBSURFACE macro iterates both below and above lists:
+ *
  *     FOR_EACH_SUBSURFACE(surface, sub) { ... }
  *
  *   subsurface_track contains:
@@ -68,6 +69,8 @@
 #define P9WL_TOPLEVEL_H
 
 #include "../types.h"
+
+/* ============== Toplevel Handling ============== */
 
 /*
  * Handle new XDG toplevel creation.

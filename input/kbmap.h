@@ -5,21 +5,29 @@
  * providing a robust solution that works with any keyboard layout.
  *
  * /dev/kbmap Format:
+ *
  *   layer  scancode  rune
  *
- * Where:
- *   layer:    none, shift, ctl, altgr, mod4, etc.
- *   scancode: PC/AT scancode (0-127)
- *   rune:     'x (literal), ^X (control), 0xNNNN (hex), or decimal
+ *   Where:
+ *     layer:    none, shift, ctl, altgr, mod4, etc.
+ *     scancode: PC/AT scancode (0-127)
+ *     rune:     'x (literal), ^X (control), 0xNNNN (hex), or decimal
  *
- * This module builds an INVERSE mapping: given a rune, find the
- * keycode and modifiers needed to produce it. This is needed because
- * Plan 9 sends characters (runes) but Wayland expects physical keys.
+ * Inverse Mapping:
+ *
+ *   This module builds an INVERSE mapping: given a rune, find the
+ *   keycode and modifiers needed to produce it. This is needed because
+ *   Plan 9 sends characters (runes) but Wayland expects physical keys.
  *
  * Usage:
+ *
  *   struct kbmap km;
- *   if (kbmap_load(&km, p9conn) == 0) {
+ *   if (kbmap_load(&km, &p9conn) == 0) {
  *       // Use km for lookups
+ *       const struct kbmap_entry *e = kbmap_lookup(&km, 'a');
+ *       if (e) {
+ *           // Use e->keycode, e->shift, e->ctrl
+ *       }
  *   }
  *   // Falls back to static table if load fails
  *   kbmap_cleanup(&km);
@@ -31,8 +39,12 @@
 #include <stdint.h>
 #include "../p9/p9.h"
 
+/* ============== Constants ============== */
+
 /* Maximum entries in dynamic keymap */
 #define KBMAP_MAX_ENTRIES 512
+
+/* ============== Data Structures ============== */
 
 /*
  * Keyboard map entry: maps Plan 9 rune to Linux keycode.
@@ -59,6 +71,8 @@ struct kbmap {
     int loaded;         /* 1 if successfully loaded from /dev/kbmap, 0 otherwise */
 };
 
+/* ============== Functions ============== */
+
 /*
  * Load keyboard map from /dev/kbmap via 9P connection.
  *
@@ -68,9 +82,10 @@ struct kbmap {
  *
  * For duplicate runes, prefers the unshifted version.
  *
- * @param km  Keymap structure to populate (will be zeroed first)
- * @param p9  9P connection to use for reading /dev/kbmap
- * @return    0 on success, -1 on failure (file not found, read error, etc.)
+ * km: keymap structure to populate (will be zeroed first)
+ * p9: 9P connection to use for reading /dev/kbmap
+ *
+ * Returns 0 on success, -1 on failure (file not found, read error, etc.).
  *
  * On failure, km->loaded will be 0 and the static fallback keymap
  * in input.c should be used instead.
@@ -80,9 +95,10 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9);
 /*
  * Look up a rune in the dynamic keymap.
  *
- * @param km    Keymap to search (must not be NULL)
- * @param rune  Plan 9 rune value to look up
- * @return      Pointer to entry if found, NULL if not found or km not loaded
+ * km:   keymap to search (must not be NULL)
+ * rune: Plan 9 rune value to look up
+ *
+ * Returns pointer to entry if found, NULL if not found or km not loaded.
  *
  * Note: Modifier keys (runes >= 0xF000) are not stored in the dynamic
  * keymap and will always return NULL. Use the static keymap for those.
@@ -95,7 +111,7 @@ const struct kbmap_entry *kbmap_lookup(struct kbmap *km, uint32_t rune);
  * Currently just zeros the structure. Safe to call multiple times
  * or on an uninitialized structure.
  *
- * @param km  Keymap to clean up (may be NULL)
+ * km: keymap to clean up (may be NULL)
  */
 void kbmap_cleanup(struct kbmap *km);
 

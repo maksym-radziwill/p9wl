@@ -9,9 +9,29 @@
  *   - Input queue: Thread-safe queue for passing events to main loop
  *
  * Key Translation:
+ *
  *   Plan 9 sends UTF-8 runes (characters) while Wayland/Linux expects
  *   keycodes (physical keys). This module provides both static and
  *   dynamic (via /dev/kbmap) translation tables.
+ *
+ * Usage:
+ *
+ *   Initialize the input queue before starting threads:
+ *
+ *     input_queue_init(&server->input_queue);
+ *
+ *   Start input threads:
+ *
+ *     pthread_create(&server->mouse_thread, NULL, mouse_thread_func, server);
+ *     pthread_create(&server->kbd_thread, NULL, kbd_thread_func, server);
+ *     pthread_create(&server->wctl_thread, NULL, wctl_thread_func, server);
+ *
+ *   Key lookup with dynamic kbmap fallback:
+ *
+ *     const struct key_map *km = keymap_lookup_dynamic(&server->kbmap, rune);
+ *     if (km) {
+ *         // Use km->keycode, km->shift, km->ctrl
+ *     }
  */
 
 #ifndef P9WL_INPUT_H
@@ -60,9 +80,10 @@ extern const struct key_map keymap[];
  * This is the fallback when dynamic kbmap is unavailable.
  * For production use, prefer keymap_lookup_dynamic().
  *
- * @param rune  Plan 9 rune value to look up
- * @return      Pointer to static key_map entry, or NULL if not found.
- *              Logs error for unmapped runes >= 0x80 or special keys.
+ * rune: Plan 9 rune value to look up
+ *
+ * Returns pointer to static key_map entry, or NULL if not found.
+ * Logs error for unmapped runes >= 0x80 or special keys.
  */
 const struct key_map *keymap_lookup(uint32_t rune);
 
@@ -73,9 +94,10 @@ const struct key_map *keymap_lookup(uint32_t rune);
  * falls back to the static keymap table if not found or if kbmap
  * is not loaded.
  *
- * @param km    Pointer to dynamic kbmap (may be NULL)
- * @param rune  Plan 9 rune value to look up
- * @return      Pointer to key_map entry, or NULL if not found.
+ * km:   pointer to dynamic kbmap (may be NULL)
+ * rune: Plan 9 rune value to look up
+ *
+ * Returns pointer to key_map entry, or NULL if not found.
  *
  * Note: For dynamic lookups, returns pointer to static internal
  * storage that is overwritten on each call. Copy if needed.
@@ -87,8 +109,9 @@ const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune);
  *
  * Used to track which modifiers are currently held down.
  *
- * @param rune  Plan 9 modifier rune (Kshift, Kctl, Kalt, etc.)
- * @return      WLR_MODIFIER_* mask, or 0 if not a modifier
+ * rune: Plan 9 modifier rune (Kshift, Kctl, Kalt, etc.)
+ *
+ * Returns WLR_MODIFIER_* mask, or 0 if not a modifier.
  */
 uint32_t keymapmod(int rune);
 
@@ -97,10 +120,11 @@ uint32_t keymapmod(int rune);
 /*
  * Decode a single UTF-8 rune from a byte buffer.
  *
- * @param p     Pointer to start of UTF-8 sequence
- * @param end   Pointer past end of buffer (for bounds checking)
- * @param rune  Output: decoded Unicode codepoint
- * @return      Number of bytes consumed (1-4), or 0 on error/truncation
+ * p:    pointer to start of UTF-8 sequence
+ * end:  pointer past end of buffer (for bounds checking)
+ * rune: output - decoded Unicode codepoint
+ *
+ * Returns number of bytes consumed (1-4), or 0 on error/truncation.
  */
 int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune);
 
@@ -112,7 +136,7 @@ int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune);
  * Creates the internal pipe for waking the main event loop and
  * initializes the mutex. Must be called before any push/pop.
  *
- * @param q  Queue to initialize
+ * q: queue to initialize
  */
 void input_queue_init(struct input_queue *q);
 
@@ -122,8 +146,8 @@ void input_queue_init(struct input_queue *q);
  * Thread-safe. Writes a byte to the notification pipe to wake
  * the main event loop. Events are silently dropped if queue is full.
  *
- * @param q   Queue to push to
- * @param ev  Event to copy into queue
+ * q:  queue to push to
+ * ev: event to copy into queue
  */
 void input_queue_push(struct input_queue *q, struct input_event *ev);
 
@@ -132,9 +156,10 @@ void input_queue_push(struct input_queue *q, struct input_event *ev);
  *
  * Thread-safe. Non-blocking - returns immediately if empty.
  *
- * @param q   Queue to pop from
- * @param ev  Output: event copied from queue
- * @return    1 if event was popped, 0 if queue was empty
+ * q:  queue to pop from
+ * ev: output - event copied from queue
+ *
+ * Returns 1 if event was popped, 0 if queue was empty.
  */
 int input_queue_pop(struct input_queue *q, struct input_event *ev);
 
@@ -146,8 +171,9 @@ int input_queue_pop(struct input_queue *q, struct input_event *ev);
  * Reads from /dev/mouse in a loop, parses Plan 9 mouse format,
  * and pushes INPUT_MOUSE events to the queue.
  *
- * @param arg  Pointer to struct server
- * @return     NULL (runs until server->running becomes false)
+ * arg: pointer to struct server
+ *
+ * Returns NULL (runs until server->running becomes false).
  */
 void *mouse_thread_func(void *arg);
 
@@ -160,8 +186,9 @@ void *mouse_thread_func(void *arg);
  * Handles modifier tracking to avoid duplicate events when both
  * 'c' (cooked) and 'k'/'K' (raw) messages arrive.
  *
- * @param arg  Pointer to struct server
- * @return     NULL (runs until server->running becomes false)
+ * arg: pointer to struct server
+ *
+ * Returns NULL (runs until server->running becomes false).
  */
 void *kbd_thread_func(void *arg);
 
@@ -172,10 +199,11 @@ void *kbd_thread_func(void *arg);
  * or moved, sets server->window_changed flag and signals the send
  * condition variable.
  *
- * Also detects hidden→visible transitions to trigger full redraws.
+ * Also detects hidden->visible transitions to trigger full redraws.
  *
- * @param arg  Pointer to struct server
- * @return     NULL (runs until server->running becomes false)
+ * arg: pointer to struct server
+ *
+ * Returns NULL (runs until server->running becomes false).
  */
 void *wctl_thread_func(void *arg);
 

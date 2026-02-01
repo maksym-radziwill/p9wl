@@ -14,6 +14,16 @@
  *
  * Regular printable characters use their standard Unicode codepoints.
  * Control characters (Ctrl+A = 0x01, etc.) use ASCII values 0x00-0x1F.
+ *
+ * Usage:
+ *
+ *   #include "plan9_keys.h"
+ *
+ *   if (rune == Kshift) {
+ *       // Handle shift key
+ *   } else if (rune >= KF1 && rune <= KF12) {
+ *       // Handle function keys
+ *   }
  */
 
 #ifndef PLAN9_KEYS_H

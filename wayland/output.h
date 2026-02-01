@@ -61,6 +61,8 @@
 
 #include "../types.h"
 
+/* ============== Output Handling ============== */
+
 /*
  * Handle new output creation.
  *
@@ -77,6 +79,8 @@
  * d: wlr_output pointer
  */
 void new_output(struct wl_listener *l, void *d);
+
+/* ============== Input Device Handling ============== */
 
 /*
  * Handle new input device.
