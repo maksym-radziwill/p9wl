@@ -78,7 +78,7 @@ static int drain_recv_one(void) {
         return -1;
     }
     
-    return (type == Rwrite) ? GET32(buf + 7) : -1;
+    return (type == Rwrite) ? (int)GET32(buf + 7) : -1;
 }
 
 static void *drain_thread_func(void *arg) {

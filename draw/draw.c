@@ -117,7 +117,7 @@ int relookup_window(struct server *s) {
             if (strcmp(newname, draw->winname) != 0) {
                 wlr_log(WLR_INFO, "Window name changed: '%s' -> '%s'", draw->winname, newname);
             }
-            strncpy(draw->winname, newname, sizeof(draw->winname) - 1);
+            snprintf(draw->winname, sizeof(draw->winname), "%s", newname);
         } else {
             wlr_log(WLR_ERROR, "relookup_window: failed to re-read /dev/winname");
             return -1;
@@ -298,7 +298,7 @@ int init_draw(struct server *s) {
             if (n > 0) {
                 winname[n] = '\0';
                 if (n > 0 && winname[n-1] == '\n') winname[n-1] = '\0';
-                strncpy(draw->winname, winname, sizeof(draw->winname) - 1);
+                snprintf(draw->winname, sizeof(draw->winname), "%s", winname);
                 wlr_log(WLR_INFO, "Window name: '%s'", draw->winname);
             }
         }

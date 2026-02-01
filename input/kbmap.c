@@ -115,7 +115,7 @@ static int scancode_to_keycode[128] = {
 };
 
 /* Add entry if not already present (prefer unshifted) */
-static void kbmap_add(struct kbmap *km, int rune, int keycode, int shift, int ctrl) {
+static void kbmap_add(struct kbmap *km, uint32_t rune, int keycode, int shift, int ctrl) {
     if (rune == 0 || keycode == 0) return;
     if (km->count >= KBMAP_MAX_ENTRIES) return;
     
