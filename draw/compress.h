@@ -5,41 +5,63 @@
  * device. Supports direct XRGB32 compression and alpha-delta encoding
  * for efficient sparse updates.
  *
- * Compression Methods:
+ * Architecture Overview:
+ *
+ *   compress_tile_adaptive() selects between two encoding paths:
+ *
+ *     Direct Path:
+ *       raw pixels → LZ77 compress → output
+ *
+ *     Alpha-Delta Path:
+ *       raw pixels + prev frame → delta buffer → LZ77 compress → output
+ *
+ *   Both paths feed into the same LZ77 compression stage. The adaptive
+ *   function picks whichever produces smaller output (accounting for
+ *   the 45-byte ALPHA_DELTA_OVERHEAD of the composite command).
+ *
+ * Encoding Paths:
  *
  *   Direct (XRGB32):
- *     Compresses tile pixels directly using LZ77 row matching.
+ *     Extracts tile pixels and compresses them directly with LZ77.
  *     Best for tiles with significant content changes.
  *
  *   Alpha-Delta (ARGB32):
- *     Creates an alpha-channel delta between current and previous frame.
- *     Unchanged pixels have alpha=0, changed pixels have alpha=FF.
- *     Best for sparse updates (cursors, small UI changes).
- *     Requires additional 45-byte composite command (ALPHA_DELTA_OVERHEAD).
+ *     Preprocessing step that creates a sparse delta buffer:
+ *       - Unchanged pixels → 0x00000000 (transparent)
+ *       - Changed pixels   → 0xFF000000 | RGB (opaque)
+ *     The delta buffer is then compressed with LZ77. Sparse updates
+ *     produce long zero runs that compress extremely well.
+ *     Best for small changes (cursors, blinking carets, UI highlights).
+ *     Requires additional 45-byte composite command on the server side.
  *
- *   Solid Color:
- *     Special fast path for tiles with a single color (including black).
- *     Uses one literal pixel plus row-repeat back-references.
+ * LZ77 Compression (compress_tile_data):
  *
- * Adaptive Selection:
- *
- *   compress_tile_adaptive() tries both methods and picks the smaller:
- *     - Returns positive size if delta encoding is smaller
- *     - Returns negative size if direct encoding is smaller
- *     - Returns 0 if neither achieves 25% compression
- *
- * LZ77 Implementation:
- *
- *   Uses hash table for O(1) match finding:
+ *   Both encoding paths call compress_tile_data() for final compression.
+ *   Uses a hash table for O(1) match finding:
  *     - HASH_SIZE = 1024 entries
  *     - Matches 3+ bytes against hash and previous row
  *     - Back-reference: (len-3) << 2 | (offset-1) >> 8, (offset-1) & 0xFF
  *     - Literal: 0x80 | (count-1), followed by bytes
  *
- *   Fast path: entire row matching previous row uses pre-computed
- *   back-references without per-byte scanning.
+ *   Internal optimizations:
+ *     - Solid color: tiles with a single color (including all-black)
+ *       use a compact encoding with one literal pixel plus row-repeat
+ *       back-references, skipping hash-table scanning entirely.
+ *     - Row matching: when an entire row equals the previous row,
+ *       emits pre-computed back-references without per-byte scanning.
  *
- * Thread Pool:
+ *   Compression is rejected if it doesn't achieve at least 25% reduction.
+ *
+ * Adaptive Selection (compress_tile_adaptive):
+ *
+ *   Tries both encoding paths and returns the smaller result:
+ *     - Returns positive size if alpha-delta is smaller
+ *     - Returns negative size if direct is smaller
+ *     - Returns 0 if neither achieves 25% compression
+ *
+ *   When prev_pixels is NULL, only the direct path is attempted.
+ *
+ * Parallel Compression:
  *
  *   compress_tiles_parallel() uses the parallel_for() infrastructure
  *   to compress multiple tiles concurrently. No explicit pool init
@@ -98,9 +120,12 @@ struct tile_work {
 /*
  * Compress raw tile data using LZ77.
  *
+ * This is the shared compression stage used by both encoding paths.
+ * Automatically detects and optimizes solid-color tiles.
+ *
  * dst:           output buffer for compressed data
  * dst_max:       maximum bytes to write
- * raw:           raw pixel data (row-major, XRGB32/ARGB32)
+ * raw:           raw pixel data (row-major, XRGB32 or ARGB32 delta)
  * bytes_per_row: bytes per row in raw buffer
  * h:             number of rows
  *
@@ -111,9 +136,9 @@ int compress_tile_data(uint8_t *dst, int dst_max,
                        uint8_t *raw, int bytes_per_row, int h);
 
 /*
- * Compress a tile using direct XRGB32 encoding.
+ * Compress a tile using the direct encoding path.
  *
- * Extracts tile pixels from frame buffer and compresses.
+ * Extracts tile pixels from frame buffer and compresses with LZ77.
  *
  * dst:     output buffer
  * dst_max: maximum bytes to write
@@ -129,10 +154,12 @@ int compress_tile_direct(uint8_t *dst, int dst_max,
                          int x1, int y1, int w, int h);
 
 /*
- * Compress a tile using alpha-delta encoding.
+ * Compress a tile using the alpha-delta encoding path.
  *
- * Creates ARGB32 delta: unchanged pixels have alpha=0 (transparent),
- * changed pixels have alpha=FF with new color.
+ * Creates an ARGB32 delta buffer where unchanged pixels are
+ * transparent (0x00000000) and changed pixels are opaque with
+ * the new color (0xFF000000 | RGB). The delta buffer is then
+ * compressed with LZ77.
  *
  * dst:         output buffer
  * dst_max:     maximum bytes to write
@@ -145,8 +172,8 @@ int compress_tile_direct(uint8_t *dst, int dst_max,
  *
  * Returns compressed size, or 0 if:
  *   - No pixels changed (delta is empty)
- *   - More than 75% of pixels changed (direct is better)
- *   - Compression failed
+ *   - More than 75% of pixels changed (direct likely better)
+ *   - LZ77 compression failed or didn't achieve 25% reduction
  */
 int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
                               uint32_t *pixels, int stride,
@@ -154,24 +181,24 @@ int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
                               int x1, int y1, int w, int h);
 
 /*
- * Adaptively compress a tile using best method.
+ * Adaptively compress a tile using the best encoding path.
  *
- * Tries both direct and alpha-delta compression, returns the smaller.
- * Accounts for ALPHA_DELTA_OVERHEAD when comparing.
+ * Tries both direct and alpha-delta paths, returns the smaller.
+ * Accounts for ALPHA_DELTA_OVERHEAD when comparing sizes.
  *
  * dst:         output buffer
  * dst_max:     maximum bytes to write
  * pixels:      current frame buffer (XRGB32)
  * stride:      current frame stride in pixels
- * prev_pixels: previous frame buffer (may be NULL for direct-only)
+ * prev_pixels: previous frame buffer (NULL for direct-only mode)
  * prev_stride: previous frame stride in pixels
  * x1, y1:      tile top-left corner
  * w, h:        tile dimensions
  *
  * Returns:
- *   > 0: delta encoding size (copy dst, use alpha composite)
- *   < 0: negated direct encoding size (copy dst, use direct draw)
- *   = 0: compression failed or not worthwhile
+ *   > 0: alpha-delta size (use alpha composite to draw)
+ *   < 0: negated direct size (use direct draw)
+ *   = 0: compression failed or not worthwhile for either path
  */
 int compress_tile_adaptive(uint8_t *dst, int dst_max,
                            uint32_t *pixels, int stride,
