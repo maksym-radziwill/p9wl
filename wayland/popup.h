@@ -1,35 +1,42 @@
 /*
- * popup.h - Popup management and handlers
+ * popup.h - XDG popup lifecycle management
  *
- * NOTE: struct popup_data is now defined in focus_manager.h
- * This header provides the legacy API for popup management.
- * New code should use the focus_manager API directly.
+ * This module handles the creation and destruction of XDG popups (menus,
+ * dropdowns, tooltips). Focus management for popups is handled by the
+ * focus_manager module.
+ *
+ * Popup Lifecycle:
+ *
+ *   1. new_popup() - Called when client creates xdg_popup
+ *   2. popup_commit() - Called on each surface commit
+ *      - Initial commit: unconstrain popup to screen bounds
+ *      - Subsequent commits: track map/unmap state
+ *   3. popup_destroy() - Called when popup is destroyed
+ *
+ * The popup_data struct (defined in focus_manager.h) tracks each popup's
+ * state and position in the focus manager's grab stack.
+ *
+ * Usage:
+ *
+ *   Wire up new_popup as the handler for xdg_shell's new_popup event:
+ *
+ *     server->new_xdg_popup.notify = new_popup;
+ *     wl_signal_add(&xdg_shell->events.new_popup, &server->new_xdg_popup);
  */
 
 #ifndef P9WL_POPUP_H
 #define P9WL_POPUP_H
 
-#include <stdbool.h>
-#include "../types.h"  /* Includes focus_manager.h which defines struct popup_data */
+#include "../types.h"
 
 /*
- * Legacy API - these functions delegate to focus_manager.
- * Kept for backward compatibility.
+ * Handle new XDG popup creation.
+ *
+ * Creates scene graph nodes, allocates popup_data, registers with the
+ * focus manager, and sets up commit/destroy listeners.
+ *
+ * The popup's parent must be a valid XDG surface with data set.
  */
-
-/* Get topmost popup from stack */
-struct popup_data *get_topmost_popup(struct server *s);
-
-/* Find popup containing a surface */
-struct popup_data *find_popup_by_surface(struct server *s, struct wlr_surface *surface);
-
-/* Dismiss all popups */
-void dismiss_all_popups(struct server *s);
-
-/* Dismiss topmost grabbed popup (e.g., on Escape key) */
-bool dismiss_topmost_grabbed_popup(struct server *s);
-
-/* Handler for new popup creation */
 void new_popup(struct wl_listener *l, void *d);
 
 #endif /* P9WL_POPUP_H */
