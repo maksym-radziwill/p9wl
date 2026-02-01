@@ -331,7 +331,7 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9) {
     return 0;
 }
 
-const struct kbmap_entry *kbmap_lookup(struct kbmap *km, int rune) {
+const struct kbmap_entry *kbmap_lookup(struct kbmap *km, uint32_t rune) {
     if (!km || !km->loaded) return NULL;
     
     for (int i = 0; i < km->count; i++) {

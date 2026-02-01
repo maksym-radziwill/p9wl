@@ -3,6 +3,26 @@
  *
  * Reads the keyboard mapping from the Plan 9 system at runtime,
  * providing a robust solution that works with any keyboard layout.
+ *
+ * /dev/kbmap Format:
+ *   layer  scancode  rune
+ *
+ * Where:
+ *   layer:    none, shift, ctl, altgr, mod4, etc.
+ *   scancode: PC/AT scancode (0-127)
+ *   rune:     'x (literal), ^X (control), 0xNNNN (hex), or decimal
+ *
+ * This module builds an INVERSE mapping: given a rune, find the
+ * keycode and modifiers needed to produce it. This is needed because
+ * Plan 9 sends characters (runes) but Wayland expects physical keys.
+ *
+ * Usage:
+ *   struct kbmap km;
+ *   if (kbmap_load(&km, p9conn) == 0) {
+ *       // Use km for lookups
+ *   }
+ *   // Falls back to static table if load fails
+ *   kbmap_cleanup(&km);
  */
 
 #ifndef P9WL_KBMAP_H
@@ -14,36 +34,68 @@
 /* Maximum entries in dynamic keymap */
 #define KBMAP_MAX_ENTRIES 512
 
-/* Keyboard map entry: maps Plan 9 rune to Linux keycode */
+/*
+ * Keyboard map entry: maps Plan 9 rune to Linux keycode.
+ *
+ * This is similar to struct key_map in input.h but used for
+ * dynamically loaded mappings from /dev/kbmap.
+ */
 struct kbmap_entry {
-    int rune;           /* Plan 9 rune value */
-    int keycode;        /* Linux keycode (KEY_*) */
-    int shift;          /* Requires shift modifier */
-    int ctrl;           /* Requires ctrl modifier */
+    uint32_t rune;      /* Plan 9 rune value (Unicode codepoint) */
+    int keycode;        /* Linux keycode (KEY_* from input-event-codes.h) */
+    int shift;          /* 1 if shift modifier required */
+    int ctrl;           /* 1 if ctrl modifier required */
 };
 
-/* Dynamic keyboard map state */
+/*
+ * Dynamic keyboard map state.
+ *
+ * Contains the mapping table loaded from /dev/kbmap.
+ * The 'loaded' flag indicates whether the table is valid.
+ */
 struct kbmap {
     struct kbmap_entry entries[KBMAP_MAX_ENTRIES];
-    int count;
-    int loaded;         /* Successfully loaded from /dev/kbmap? */
+    int count;          /* Number of valid entries */
+    int loaded;         /* 1 if successfully loaded from /dev/kbmap, 0 otherwise */
 };
 
 /*
  * Load keyboard map from /dev/kbmap via 9P connection.
- * Returns 0 on success, -1 on failure.
- * On failure, the static fallback keymap should be used.
+ *
+ * Reads the entire /dev/kbmap file and parses it to build the
+ * inverse mapping table. Only processes 'none', 'shift', and 'ctl'
+ * layers; other layers (altgr, mod4, etc.) are skipped.
+ *
+ * For duplicate runes, prefers the unshifted version.
+ *
+ * @param km  Keymap structure to populate (will be zeroed first)
+ * @param p9  9P connection to use for reading /dev/kbmap
+ * @return    0 on success, -1 on failure (file not found, read error, etc.)
+ *
+ * On failure, km->loaded will be 0 and the static fallback keymap
+ * in input.c should be used instead.
  */
 int kbmap_load(struct kbmap *km, struct p9conn *p9);
 
 /*
  * Look up a rune in the dynamic keymap.
- * Returns pointer to entry, or NULL if not found.
+ *
+ * @param km    Keymap to search (must not be NULL)
+ * @param rune  Plan 9 rune value to look up
+ * @return      Pointer to entry if found, NULL if not found or km not loaded
+ *
+ * Note: Modifier keys (runes >= 0xF000) are not stored in the dynamic
+ * keymap and will always return NULL. Use the static keymap for those.
  */
-const struct kbmap_entry *kbmap_lookup(struct kbmap *km, int rune);
+const struct kbmap_entry *kbmap_lookup(struct kbmap *km, uint32_t rune);
 
 /*
  * Free resources associated with keymap.
+ *
+ * Currently just zeros the structure. Safe to call multiple times
+ * or on an uninitialized structure.
+ *
+ * @param km  Keymap to clean up (may be NULL)
  */
 void kbmap_cleanup(struct kbmap *km);
 
