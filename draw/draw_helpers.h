@@ -2,6 +2,9 @@
  * draw_helpers.h - Common helpers for Plan 9 draw protocol
  *
  * Inline functions for building draw commands and common patterns.
+ *
+ * IMPORTANT: This header requires TILE_SIZE to be defined before inclusion.
+ * Include types.h first, or define TILE_SIZE explicitly.
  */
 
 #ifndef DRAW_HELPERS_H
@@ -9,6 +12,11 @@
 
 #include <stdint.h>
 #include <string.h>
+
+/* Require TILE_SIZE to be defined (typically via types.h) */
+#ifndef TILE_SIZE
+#error "TILE_SIZE must be defined before including draw_helpers.h - include types.h first"
+#endif
 
 /* Byte order macros (assuming these exist elsewhere, included for completeness) */
 #ifndef PUT32
@@ -18,10 +26,6 @@
     (p)[2] = ((v) >> 16) & 0xFF; \
     (p)[3] = ((v) >> 24) & 0xFF; \
 } while(0)
-#endif
-
-#ifndef TILE_SIZE
-#define TILE_SIZE 64
 #endif
 
 /* ============== Draw Command Builders ============== */
@@ -116,6 +120,11 @@ static inline int cmd_flush(uint8_t *buf) {
 
 /*
  * Compute tile bounds, clamped to frame dimensions.
+ *
+ * tx, ty:    tile coordinates (0-indexed)
+ * frame_w, frame_h: frame dimensions in pixels
+ * x1, y1:    output - top-left pixel coordinate
+ * w, h:      output - tile width and height (may be < TILE_SIZE at edges)
  */
 static inline void tile_bounds(int tx, int ty, int frame_w, int frame_h,
                                int *x1, int *y1, int *w, int *h) {
@@ -131,6 +140,13 @@ static inline void tile_bounds(int tx, int ty, int frame_w, int frame_h,
 
 /*
  * Check if a tile has changed between two buffers.
+ *
+ * curr, prev: pixel buffers to compare (XRGB32 format)
+ * stride:     buffer stride in pixels
+ * x1, y1:     top-left corner of tile
+ * w, h:       tile dimensions
+ *
+ * Returns non-zero if any pixel differs.
  */
 static inline int tile_changed(uint32_t *curr, uint32_t *prev, int stride,
                                int x1, int y1, int w, int h) {
@@ -145,17 +161,30 @@ static inline int tile_changed(uint32_t *curr, uint32_t *prev, int stride,
 
 /* ============== Scroll Rectangle Calculation ============== */
 
+/*
+ * Scroll rectangle geometry for copy operations.
+ *
+ * When scrolling, we need three rectangles:
+ * - src: where pixels come from in the source buffer
+ * - dst: where pixels land in the destination buffer
+ * - exp: exposed region that needs fresh content (tile-aligned)
+ */
 struct scroll_rects {
-    int src_x1, src_y1, src_x2, src_y2;
-    int dst_x1, dst_y1, dst_x2, dst_y2;
+    int src_x1, src_y1, src_x2, src_y2;  /* Source rectangle */
+    int dst_x1, dst_y1, dst_x2, dst_y2;  /* Destination rectangle */
     int exp_x1, exp_y1, exp_x2, exp_y2;  /* Exposed region (tile-aligned) */
     int valid;  /* Set to 0 if scroll is degenerate */
 };
 
 /*
  * Compute source, destination, and exposed rectangles for a scroll.
+ *
  * rx1,ry1,rx2,ry2: region bounds
  * dx,dy: scroll delta (positive = content moves right/down)
+ * r: output structure with computed rectangles
+ *
+ * Sets r->valid to 0 if the scroll is degenerate (region too small
+ * or scroll distance exceeds region size).
  */
 static inline void compute_scroll_rects(int rx1, int ry1, int rx2, int ry2,
                                         int dx, int dy, struct scroll_rects *r) {
