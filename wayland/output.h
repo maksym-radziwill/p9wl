@@ -11,18 +11,33 @@
  *   window. The output is configured with:
  *
  *     - Custom mode matching the Plan 9 window dimensions
- *     - Optional HiDPI scale factor
+ *     - 60Hz refresh rate (60000 mHz)
+ *     - Optional HiDPI scale factor (if s->scale > 1.0)
  *     - Scene graph output for rendering
  *
  * Frame Loop:
  *
  *   The output_frame handler (internal) runs the compositor's render loop:
  *
- *     1. Check for pending resize from wctl thread
- *     2. Reallocate framebuffers and Plan 9 images if resized
- *     3. Build scene output state via wlroots
- *     4. Copy rendered pixels to the framebuffer
- *     5. Trigger send_frame() to transmit to Plan 9
+ *     1. Check for pending resize from wctl thread (s->resize_pending)
+ *     2. If resize pending:
+ *        a. Reallocate host buffers (framebuf, prev_framebuf, send_buf)
+ *        b. Update s->width, s->height, s->tiles_x, s->tiles_y
+ *        c. Reallocate Plan 9 images via reallocate_draw_images()
+ *        d. Resize wlroots output and reconfigure all toplevels
+ *        e. Set force_full_frame flag
+ *     3. Throttle frames based on FRAME_INTERVAL_MS if defined
+ *     4. Build scene output state via wlr_scene_output_build_state()
+ *     5. Copy rendered pixels from buffer to s->framebuf
+ *     6. Commit output state and send frame done
+ *     7. Trigger send_frame() to transmit to Plan 9
+ *
+ * Image Reallocation:
+ *
+ *   reallocate_draw_images() (internal) handles Plan 9 image resize:
+ *     - Frees old framebuffer and delta images via 'f' command
+ *     - Allocates new images at new dimensions via 'b' command
+ *     - Uses alloc_image_cmd/free_image_cmd helpers from draw_cmd.h
  *
  * Input Device Handling:
  *
@@ -55,17 +70,26 @@
  *
  * For HiDPI displays (scale > 1.0), configures the output scale and
  * logs both physical and logical dimensions.
+ *
+ * Stores output reference in s->output and creates s->scene_output.
+ *
+ * l: wl_listener from server->new_output
+ * d: wlr_output pointer
  */
 void new_output(struct wl_listener *l, void *d);
 
 /*
  * Handle new input device.
  *
- * For pointer devices, attaches them to the server's cursor so that
+ * For pointer devices (WLR_INPUT_DEVICE_POINTER), attaches them to
+ * the server's cursor via wlr_cursor_attach_input_device() so that
  * cursor motion events are properly aggregated.
  *
  * Keyboard and other device types are currently ignored since input
  * comes from Plan 9 rather than local devices.
+ *
+ * l: wl_listener from server->new_input
+ * d: wlr_input_device pointer
  */
 void new_input(struct wl_listener *l, void *d);
 
