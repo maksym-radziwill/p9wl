@@ -2,8 +2,8 @@
  * input.h - Input handling for Plan 9 to Wayland bridge
  *
  * This module handles:
- *   - Keyboard input: Reading from /dev/cons, translating Plan 9 runes
- *     to Linux keycodes, and injecting into Wayland
+ *   - Keyboard input: Reading from /dev/kbd (/dev/cons as fallback), translating
+ *     Plan 9 runes to Linux keycodes, and injecting into Wayland
  *   - Mouse input: Reading from /dev/mouse and forwarding to Wayland
  *   - Window control: Monitoring /dev/wctl for geometry changes
  *   - Input queue: Thread-safe queue for passing events to main loop
