@@ -124,8 +124,7 @@ const struct key_map *keymap_lookup(uint32_t rune) {
         if ((uint32_t)keymap[i].rune == rune)
             return &keymap[i];
     }
-    if (rune >= 0x80 || rune >= KF)
-        wlr_log(WLR_ERROR, "keymap_lookup: NO ENTRY for rune=0x%04x (%d)", rune, rune);
+    wlr_log(WLR_ERROR, "keymap_lookup: NO ENTRY for rune=0x%04x (%d)", rune, rune);
     return NULL;
 }
 
@@ -186,14 +185,6 @@ uint32_t keymapmod(int rune) {
 void input_queue_init(struct input_queue *q) {
     q->head = q->tail = 0;
     pthread_mutex_init(&q->lock, NULL);
-    if (pipe(q->pipe_fd) < 0) {
-        wlr_log(WLR_ERROR, "pipe failed: %s", strerror(errno));
-        q->pipe_fd[0] = q->pipe_fd[1] = -1;
-    }
-    fcntl(q->pipe_fd[0], F_SETFL, O_NONBLOCK);
-    
-    wlr_log(WLR_INFO, "Arrow key rune values: Up=0x%04x Down=0x%04x Left=0x%04x Right=0x%04x",
-            Kup, Kdown, Kleft, Kright);
 }
 
 void input_queue_push(struct input_queue *q, struct input_event *ev) {
@@ -202,9 +193,8 @@ void input_queue_push(struct input_queue *q, struct input_event *ev) {
     if (next != q->head) {
         q->events[q->tail] = *ev;
         q->tail = next;
-        char c = 1;
-        if (write(q->pipe_fd[1], &c, 1) < 0) { /* ignore */ }
     }
+    /* Drop the event if the ring buffer is full */
     pthread_mutex_unlock(&q->lock);
 }
 

@@ -78,7 +78,7 @@ extern const struct key_map keymap[];
  * Look up a key mapping by rune using the static table.
  *
  * This is the fallback when dynamic kbmap is unavailable.
- * For production use, prefer keymap_lookup_dynamic().
+ * Prefer keymap_lookup_dynamic().
  *
  * rune: Plan 9 rune value to look up
  *

@@ -140,7 +140,6 @@ struct input_queue {
     struct input_event events[INPUT_QUEUE_SIZE];
     int head, tail;         /* Ring buffer indices */
     pthread_mutex_t lock;   /* Protects head/tail */
-    int pipe_fd[2];         /* [0]=read, [1]=write; for waking main loop */
 };
 
 /* ============== Draw State ============== */
