@@ -133,8 +133,7 @@ int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune);
 /*
  * Initialize an input queue.
  *
- * Creates the internal pipe for waking the main event loop and
- * initializes the mutex. Must be called before any push/pop.
+ * Initializes the mutex. Must be called before any push/pop.
  *
  * q: queue to initialize
  */
@@ -143,8 +142,7 @@ void input_queue_init(struct input_queue *q);
 /*
  * Push an event onto the input queue.
  *
- * Thread-safe. Writes a byte to the notification pipe to wake
- * the main event loop. Events are silently dropped if queue is full.
+ * Thread-safe. Events are silently dropped if queue is full.
  *
  * q:  queue to push to
  * ev: event to copy into queue

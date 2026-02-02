@@ -259,6 +259,13 @@ void *mouse_thread_func(void *arg) {
             }
         } else if (buf[0] == 'r') {
             wlr_log(WLR_INFO, "Mouse: resize notification");
+            s->force_full_frame = 1;
+            s->window_changed = 1;
+            
+            pthread_mutex_lock(&s->send_lock);
+            pthread_cond_signal(&s->send_cond);
+            pthread_mutex_unlock(&s->send_lock);
+            
         }
     }
     
