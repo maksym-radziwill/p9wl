@@ -287,8 +287,7 @@ void *kbd_thread_func(void *arg) {
     uint32_t kbd_fid;
     const char *wnames[2];
     uint8_t buf[256];
-    int keys_read = 0;
-    int use_cons_fallback = 0;
+    int keys_read = 0; 
     
     int prev_keys[16];
     int prev_nkeys = 0;
@@ -300,39 +299,10 @@ void *kbd_thread_func(void *arg) {
     wnames[0] = "kbd";
     if (p9_walk(p9, p9->root_fid, kbd_fid, 1, wnames) < 0) {
         wlr_log(WLR_INFO, "Kbd thread: /dev/kbd not found, trying /dev/cons fallback");
-        use_cons_fallback = 1;
+        return NULL;
     } else if (p9_open(p9, kbd_fid, OREAD, NULL) < 0) {
         wlr_log(WLR_INFO, "Kbd thread: failed to open /dev/kbd, trying /dev/cons fallback");
-        use_cons_fallback = 1;
-    }
-    
-    if (use_cons_fallback) {
-        uint32_t consctl_fid;
-        wnames[0] = "consctl";
-        consctl_fid = p9->next_fid++;
-        if (p9_walk(p9, p9->root_fid, consctl_fid, 1, wnames) < 0) {
-            wlr_log(WLR_ERROR, "Kbd thread: failed to walk to /dev/consctl");
-            return NULL;
-        }
-        if (p9_open(p9, consctl_fid, OWRITE, NULL) < 0) {
-            wlr_log(WLR_ERROR, "Kbd thread: failed to open /dev/consctl");
-            return NULL;
-        }
-        p9_write(p9, consctl_fid, 0, (const uint8_t*)"rawon", 5);
-        
-        wnames[0] = "cons";
-        kbd_fid = p9->next_fid++;
-        if (p9_walk(p9, p9->root_fid, kbd_fid, 1, wnames) < 0) {
-            wlr_log(WLR_ERROR, "Kbd thread: failed to walk to /dev/cons");
-            return NULL;
-        }
-        if (p9_open(p9, kbd_fid, OREAD, NULL) < 0) {
-            wlr_log(WLR_ERROR, "Kbd thread: failed to open /dev/cons");
-            return NULL;
-        }
-        wlr_log(WLR_INFO, "Kbd thread: using /dev/cons in raw mode");
-    } else {
-        wlr_log(WLR_INFO, "Kbd thread: using /dev/kbd (kbdfs)");
+        return NULL;
     }
     
     wlr_log(WLR_INFO, "Keyboard thread started");
@@ -344,27 +314,6 @@ void *kbd_thread_func(void *arg) {
             break;
         }
         buf[n] = '\0';
-        
-        if (use_cons_fallback) {
-            const unsigned char *p = buf;
-            const unsigned char *end = buf + n;
-            while (p < end) {
-                int rune;
-                int len = utf8_decode(p, end, &rune);
-                if (len <= 0) { p++; continue; }
-                p += len;
-                
-                keys_read++;
-                struct input_event ev = {
-                    .type = INPUT_KEY,
-                    .key = { .rune = rune, .pressed = 1 }
-                };
-                input_queue_push(&s->input_queue, &ev);
-                ev.key.pressed = 0;
-                input_queue_push(&s->input_queue, &ev);
-            }
-            continue;
-        }
         
         const unsigned char *p = buf;
         const unsigned char *end = buf + n;
