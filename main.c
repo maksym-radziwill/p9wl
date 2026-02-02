@@ -548,8 +548,7 @@ int main(int argc, char *argv[]) {
 
     /* Start background threads */
     pthread_create(&s.mouse_thread, NULL, mouse_thread_func, &s);
-    pthread_create(&s.kbd_thread, NULL, kbd_thread_func, &s);
-    pthread_create(&s.wctl_thread, NULL, wctl_thread_func, &s);
+    pthread_create(&s.kbd_thread, NULL, kbd_thread_func, &s); 
     pthread_create(&s.send_thread, NULL, send_thread_func, &s);
 
     /* Initialize Wayland/wlroots */

@@ -188,21 +188,6 @@ void *mouse_thread_func(void *arg);
 void *kbd_thread_func(void *arg);
 
 /*
- * Window control monitoring thread function.
- *
- * Polls /dev/wctl for geometry changes. When the window is resized
- * or moved, sets server->window_changed flag and signals the send
- * condition variable.
- *
- * Also detects hidden->visible transitions to trigger full redraws.
- *
- * arg: pointer to struct server
- *
- * Returns NULL (runs until server->running becomes false).
- */
-void *wctl_thread_func(void *arg);
-
-/*
  * Note: Time utility functions now_ms() and now_us() are defined
  * as static inline in types.h to avoid multiple definition issues.
  */

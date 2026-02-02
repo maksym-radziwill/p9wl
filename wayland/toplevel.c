@@ -201,12 +201,6 @@ static void toplevel_destroy(struct wl_listener *l, void *d) {
             s->send_thread = 0;
         }
         
-        if (s->wctl_thread) {
-            pthread_cancel(s->wctl_thread);
-            pthread_join(s->wctl_thread, NULL);
-            s->wctl_thread = 0;
-        }
-        
         wlr_log(WLR_INFO, "Deleting rio window...");
         delete_rio_window(&s->p9_draw);
         

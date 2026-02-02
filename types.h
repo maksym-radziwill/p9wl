@@ -272,7 +272,6 @@ struct server {
     struct draw_state draw;
 
     /* ---- Window change detection ---- */
-    pthread_t wctl_thread;
     volatile int window_changed;    /* Set by wctl thread on geometry change */
     volatile int resize_pending;    /* Need to resize wlroots output */
     volatile int pending_width, pending_height;

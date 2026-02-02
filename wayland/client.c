@@ -122,7 +122,6 @@ void server_cleanup(struct server *s) {
     
     pthread_join(s->mouse_thread, NULL);
     pthread_join(s->kbd_thread, NULL);
-    pthread_join(s->wctl_thread, NULL);
     pthread_join(s->send_thread, NULL);
     
     wlr_keyboard_finish(&s->virtual_kb);
