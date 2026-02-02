@@ -300,7 +300,9 @@ void *kbd_thread_func(void *arg) {
     if (p9_walk(p9, p9->root_fid, kbd_fid, 1, wnames) < 0) {
         wlr_log(WLR_INFO, "Kbd thread: /dev/kbd not found, trying /dev/cons fallback");
         return NULL;
-    } else if (p9_open(p9, kbd_fid, OREAD, NULL) < 0) {
+    } 
+    
+    if (p9_open(p9, kbd_fid, OREAD, NULL) < 0) {
         wlr_log(WLR_INFO, "Kbd thread: failed to open /dev/kbd, trying /dev/cons fallback");
         return NULL;
     }
