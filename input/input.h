@@ -134,7 +134,7 @@ int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune);
  * Initialize an input queue.
  *
  * Initializes the mutex. Must be called before any push/pop.
- *
+ * Initializes pipe read by wl_event_loop_add_fd  
  * q: queue to initialize
  */
 void input_queue_init(struct input_queue *q);

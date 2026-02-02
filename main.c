@@ -543,7 +543,7 @@ int main(int argc, char *argv[]) {
     s.resize_pending = 0;
     s.pending_winname[0] = '\0';
 
-    /* Initialize input queue */
+    /* Initialize input queue, including s.input_queue.pipe_fd[0] */
     input_queue_init(&s.input_queue);
 
     /* Start background threads */
@@ -600,7 +600,7 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Add input event handler to main loop */
+    /* Add input event handler to main loop, called when we write in pipe */
     s.input_event = wl_event_loop_add_fd(wl_display_get_event_loop(s.display),
                                           s.input_queue.pipe_fd[0],
                                           WL_EVENT_READABLE,

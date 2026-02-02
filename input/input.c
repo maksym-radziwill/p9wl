@@ -185,6 +185,12 @@ uint32_t keymapmod(int rune) {
 void input_queue_init(struct input_queue *q) {
     q->head = q->tail = 0;
     pthread_mutex_init(&q->lock, NULL);
+    if (pipe(q->pipe_fd) < 0) {
+        wlr_log(WLR_ERROR, "pipe failed: %s", strerror(errno));
+        q->pipe_fd[0] = q->pipe_fd[1] = -1;
+    }
+    fcntl(q->pipe_fd[0], F_SETFL, O_NONBLOCK);
+    
 }
 
 void input_queue_push(struct input_queue *q, struct input_event *ev) {
@@ -193,6 +199,8 @@ void input_queue_push(struct input_queue *q, struct input_event *ev) {
     if (next != q->head) {
         q->events[q->tail] = *ev;
         q->tail = next;
+        char c = 1;
+        if (write(q->pipe_fd[1], &c, 1) < 0) { /* ignore */ }
     }
     /* Drop the event if the ring buffer is full */
     pthread_mutex_unlock(&q->lock);
@@ -259,8 +267,8 @@ void *mouse_thread_func(void *arg) {
             }
         } else if (buf[0] == 'r') {
             wlr_log(WLR_INFO, "Mouse: resize notification");
-            s->force_full_frame = 1;
             s->window_changed = 1;
+            s->force_full_frame = 1; 
             
             pthread_mutex_lock(&s->send_lock);
             pthread_cond_signal(&s->send_cond);
@@ -539,11 +547,7 @@ void *wctl_thread_func(void *arg) {
                         last_x0, last_y0, last_x1, last_y1, x0, y0, x1, y1);
                 last_x0 = x0; last_y0 = y0;
                 last_x1 = x1; last_y1 = y1;
-                s->window_changed = 1;
                 
-                pthread_mutex_lock(&s->send_lock);
-                pthread_cond_signal(&s->send_cond);
-                pthread_mutex_unlock(&s->send_lock);
             }
         }
         
