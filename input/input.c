@@ -385,6 +385,9 @@ void *kbd_thread_func(void *arg) {
                     if (len <= 0) { p++; continue; }
                     p += len;
                     
+                    /* Skip special keys - handled by 'k'/'K' messages */
+                    if (rune >= KF) continue;
+                    
                     keys_read++;
                     struct input_event ev = {
                         .type = INPUT_KEY,
