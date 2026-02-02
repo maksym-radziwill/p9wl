@@ -285,30 +285,26 @@ void *kbd_thread_func(void *arg) {
     struct server *s = arg;
     struct p9conn *p9 = &s->p9_kbd;
     uint32_t kbd_fid;
-    const char *wnames[2];
+    const char *wnames[1];
     uint8_t buf[256];
-    int keys_read = 0; 
-    
+    int keys_read = 0;
+
     int prev_keys[16];
     int prev_nkeys = 0;
-    uint32_t prev_mods = 0;
-    int sent_keys[16];
-    int sent_nkeys = 0;
-    
+
     kbd_fid = p9->next_fid++;
     wnames[0] = "kbd";
     if (p9_walk(p9, p9->root_fid, kbd_fid, 1, wnames) < 0) {
-        wlr_log(WLR_INFO, "Kbd thread: /dev/kbd not found, trying /dev/cons fallback");
-        return NULL;
-    } 
-    
-    if (p9_open(p9, kbd_fid, OREAD, NULL) < 0) {
-        wlr_log(WLR_INFO, "Kbd thread: failed to open /dev/kbd, trying /dev/cons fallback");
+        wlr_log(WLR_INFO, "Kbd thread: /dev/kbd not found");
         return NULL;
     }
-    
+    if (p9_open(p9, kbd_fid, OREAD, NULL) < 0) {
+        wlr_log(WLR_INFO, "Kbd thread: failed to open /dev/kbd");
+        return NULL;
+    }
+
     wlr_log(WLR_INFO, "Keyboard thread started");
-    
+
     while (s->running) {
         int n = p9_read(p9, kbd_fid, 0, sizeof(buf) - 1, buf);
         if (n <= 0) {
@@ -316,122 +312,57 @@ void *kbd_thread_func(void *arg) {
             break;
         }
         buf[n] = '\0';
-        
+
         const unsigned char *p = buf;
         const unsigned char *end = buf + n;
-        
+
         while (p < end) {
             const unsigned char *msg_end = memchr(p, '\0', end - p);
             if (!msg_end) break;
-            
+
             char msg_type = *p++;
-            
-            if (msg_type == 'c') {
-                int ctrl_held = key_in_set(Kctl, prev_keys, prev_nkeys);
-                int alt_held = key_in_set(Kalt, prev_keys, prev_nkeys);
-                
-                if (ctrl_held || alt_held) {
-                    p = msg_end + 1;
-                    continue;
-                }
-                
-                while (p < msg_end) {
-                    int rune;
-                    int len = utf8_decode(p, msg_end, &rune);
-                    if (len <= 0) { p++; continue; }
-                    p += len;
-                    
-                    /* Skip special keys - handled by 'k'/'K' messages */
-                    if (rune >= KF) continue;
-                    
-                    keys_read++;
-                    struct input_event ev = {
-                        .type = INPUT_KEY,
-                        .key = { .rune = rune, .pressed = 1 }
-                    };
-                    input_queue_push(&s->input_queue, &ev);
-                    ev.key.pressed = 0;
-                    input_queue_push(&s->input_queue, &ev);
-                }
-            } else if (msg_type == 'k' || msg_type == 'K') {
+
+            if (msg_type == 'k' || msg_type == 'K') {
                 int curr_keys[16];
                 int curr_nkeys = 0;
-                uint32_t curr_mods = 0;
-                
+
                 while (p < msg_end && curr_nkeys < 16) {
                     int rune;
                     int len = utf8_decode(p, msg_end, &rune);
                     if (len <= 0) { p++; continue; }
                     p += len;
                     curr_keys[curr_nkeys++] = rune;
-                    curr_mods |= keymapmod(rune);
                 }
-                
-                int ctrl_alt_held = (curr_mods & (WLR_MODIFIER_CTRL | WLR_MODIFIER_ALT)) != 0;
-                
-                if (msg_type == 'k') {
-                    for (int i = 0; i < curr_nkeys; i++) {
-                        int rune = curr_keys[i];
-                        if (!key_in_set(rune, prev_keys, prev_nkeys)) {
-                            if (rune >= KF || ctrl_alt_held) {
-                                keys_read++;
-                                struct input_event ev = {
-                                    .type = INPUT_KEY,
-                                    .key = { .rune = rune, .pressed = 1 }
-                                };
-                                input_queue_push(&s->input_queue, &ev);
-                                
-                                if (rune < KF && sent_nkeys < 16)
-                                    sent_keys[sent_nkeys++] = rune;
-                            }
-                        }
-                    }
-                } else {
-                    int ctrl_alt_was_held = key_in_set(Kctl, prev_keys, prev_nkeys) ||
-                                            key_in_set(Kalt, prev_keys, prev_nkeys);
-                    
-                    for (int i = 0; i < prev_nkeys; i++) {
-                        int rune = prev_keys[i];
-                        if (!key_in_set(rune, curr_keys, curr_nkeys)) {
-                            if (rune >= KF || ctrl_alt_was_held) {
-                                struct input_event ev = {
-                                    .type = INPUT_KEY,
-                                    .key = { .rune = rune, .pressed = 0 }
-                                };
-                                input_queue_push(&s->input_queue, &ev);
-                                
-                                for (int k = 0; k < sent_nkeys; k++) {
-                                    if (sent_keys[k] == rune) {
-                                        sent_keys[k] = sent_keys[--sent_nkeys];
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    for (int i = 0; i < sent_nkeys; i++) {
-                        int rune = sent_keys[i];
-                        if (!key_in_set(rune, curr_keys, curr_nkeys)) {
-                            struct input_event ev = {
-                                .type = INPUT_KEY,
-                                .key = { .rune = rune, .pressed = 0 }
-                            };
-                            input_queue_push(&s->input_queue, &ev);
-                            sent_keys[i] = sent_keys[--sent_nkeys];
-                            i--;
-                        }
+
+                for (int i = 0; i < curr_nkeys; i++) {
+                    if (!key_in_set(curr_keys[i], prev_keys, prev_nkeys)) {
+                        keys_read++;
+                        struct input_event ev = {
+                            .type = INPUT_KEY,
+                            .key = { .rune = curr_keys[i], .pressed = 1 }
+                        };
+                        input_queue_push(&s->input_queue, &ev);
                     }
                 }
-                
-                if (curr_mods != prev_mods) prev_mods = curr_mods;
+
+                for (int i = 0; i < prev_nkeys; i++) {
+                    if (!key_in_set(prev_keys[i], curr_keys, curr_nkeys)) {
+                        struct input_event ev = {
+                            .type = INPUT_KEY,
+                            .key = { .rune = prev_keys[i], .pressed = 0 }
+                        };
+                        input_queue_push(&s->input_queue, &ev);
+                    }
+                }
+
                 memcpy(prev_keys, curr_keys, curr_nkeys * sizeof(int));
                 prev_nkeys = curr_nkeys;
             }
+
             p = msg_end + 1;
         }
     }
-    
+
     wlr_log(WLR_INFO, "Keyboard thread exiting (read %d keys)", keys_read);
     return NULL;
 }
@@ -440,9 +371,10 @@ void *wctl_thread_func(void *arg) {
     struct server *s = arg;
     struct p9conn *p9 = &s->p9_wctl;
     char buf[128];
-    int last_x0 = -1, last_y0 = -1, last_x1 = -1, last_y1 = -1;
     int was_hidden = 0;
     uint32_t wctl_fid = p9->next_fid++;
+
+    return NULL;
     
     wlr_log(WLR_INFO, "Wctl thread started");
     
@@ -475,8 +407,7 @@ void *wctl_thread_func(void *arg) {
         
         if (was_hidden && is_visible) {
             wlr_log(WLR_INFO, "Wctl: window unhidden, triggering full redraw");
-            if (s->prev_framebuf && s->width > 0 && s->height > 0)
-                memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+            
             s->force_full_frame = 1;
             s->window_changed = 1;
             
@@ -486,21 +417,6 @@ void *wctl_thread_func(void *arg) {
         }
         
         was_hidden = is_hidden ? 1 : (is_visible ? 0 : was_hidden);
-        
-        int x0, y0, x1, y1;
-        if (sscanf(buf, "%d %d %d %d", &x0, &y0, &x1, &y1) == 4) {
-            if (last_x0 < 0) {
-                last_x0 = x0; last_y0 = y0;
-                last_x1 = x1; last_y1 = y1;
-                wlr_log(WLR_INFO, "Wctl initial geometry: (%d,%d)-(%d,%d)", x0, y0, x1, y1);
-            } else if (x0 != last_x0 || y0 != last_y0 || x1 != last_x1 || y1 != last_y1) {
-                wlr_log(WLR_INFO, "Wctl geometry changed: (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d)",
-                        last_x0, last_y0, last_x1, last_y1, x0, y0, x1, y1);
-                last_x0 = x0; last_y0 = y0;
-                last_x1 = x1; last_y1 = y1;
-                
-            }
-        }
         
         usleep(500000);
     }

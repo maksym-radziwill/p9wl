@@ -167,7 +167,7 @@ int input_queue_pop(struct input_queue *q, struct input_event *ev);
  * Mouse input thread function.
  *
  * Reads from /dev/mouse in a loop, parses Plan 9 mouse format,
- * and pushes INPUT_MOUSE events to the queue.
+ * and pushes INPUT_MOUSE events to the queue. Triggers resize on reading 'r'. 
  *
  * arg: pointer to struct server
  *
@@ -178,11 +178,8 @@ void *mouse_thread_func(void *arg);
 /*
  * Keyboard input thread function.
  *
- * Reads from /dev/cons in a loop, handles 'c', 'k', and 'K' message
- * types, and pushes INPUT_KEY events to the queue.
- *
- * Handles modifier tracking to avoid duplicate events when both
- * 'c' (cooked) and 'k'/'K' (raw) messages arrive.
+ * Handle 'k', and 'K' message
+ * types, and pushes INPUT_KEY events to the queue. 
  *
  * arg: pointer to struct server
  *
