@@ -7,8 +7,7 @@
  *
  * Design:
  *
- *   All 9P I/O is performed asynchronously to avoid blocking the Wayland
- *   event loop. Snarf is treated as the single source of truth for
+ *   Snarf is treated as the single source of truth for
  *   clipboard contents.
  *
  *   Supported MIME types for text:

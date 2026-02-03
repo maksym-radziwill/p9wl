@@ -41,8 +41,8 @@ static void snarf_to_wayland_register(struct server *s);
  * ───────────────────────────────────────────────────────────────────────────── */
 
 static const char *text_mime_types[] = {
-    "text/plain;charset=utf-8",
     "text/plain",
+    "text/plain;charset=utf-8",
     "UTF8_STRING",
     "STRING",
     "TEXT",
@@ -54,13 +54,8 @@ static const char *text_mime_types[] = {
 static bool is_text_mime_type(const char *mime) {
     if (!mime) return false;
     
-    /* Handle text/plain with any charset variant */
-    if (strncmp(mime, "text/plain", 10) == 0) {
-        return true;
-    }
-    
     /* Check exact matches for X11-style types */
-    for (size_t i = 2; i < NUM_TEXT_MIME_TYPES; i++) {
+    for (size_t i = 0; i < NUM_TEXT_MIME_TYPES; i++) {
         if (strcmp(mime, text_mime_types[i]) == 0) {
             return true;
         }
