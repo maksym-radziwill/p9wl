@@ -34,6 +34,7 @@
 #include "draw_helpers.h"
 #include "p9/p9.h"
 #include "types.h"
+#include "input/input.h"
 
 /* ============== Drain Thread ============== */
 
@@ -366,9 +367,8 @@ void *send_thread_func(void *arg) {
             relookup_window(s);
             drain_resume();
             if (s->resize_pending) {
-                /* Wake main event loop so output_frame picks up resize */
-                char c = 1;
-                if (write(s->input_queue.pipe_fd[1], &c, 1) < 0) { /* ignore */ }
+                struct input_event ev = { .type = INPUT_WAKEUP };
+                input_queue_push(&s->input_queue, &ev);
                 continue;
             }
             do_full = 1;
@@ -380,8 +380,8 @@ void *send_thread_func(void *arg) {
             relookup_window(s);
             drain_resume();
             if (s->resize_pending) {
-                char c = 1;
-                if (write(s->input_queue.pipe_fd[1], &c, 1) < 0) { /* ignore */ }
+                struct input_event ev = { .type = INPUT_WAKEUP };
+                input_queue_push(&s->input_queue, &ev);
                 continue;
             }
             do_full = 1;

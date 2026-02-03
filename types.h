@@ -108,7 +108,8 @@ struct toplevel;
  */
 enum input_type {
     INPUT_MOUSE,    /* Mouse movement or button event */
-    INPUT_KEY       /* Keyboard press or release */
+    INPUT_KEY,      /* Keyboard press or release */
+    INPUT_WAKEUP    /* Wake main loop and schedule a frame (resize, etc.) */
 };
 
 /*
@@ -301,11 +302,13 @@ struct server {
     int active_buf;                 /* Buffer send thread is using */
     int send_full;                  /* Force full frame flag */
 
+
     /* ---- Damage-based dirty tile tracking ---- */
     uint8_t *dirty_staging;          /* Tile bitmap written by output thread */
     int dirty_staging_valid;         /* 1 if dirty_staging has valid data */
     uint8_t *dirty_tiles[2];         /* Per-send-buffer tile bitmaps */
     int dirty_valid[2];              /* Whether bitmap is valid per buffer */
+
 
     /* ---- Per-region scroll detection ---- */
     struct {

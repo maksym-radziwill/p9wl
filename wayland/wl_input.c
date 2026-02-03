@@ -14,6 +14,7 @@
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_compositor.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
 
 #include "wl_input.h"
@@ -244,6 +245,9 @@ int handle_input_events(int fd, uint32_t mask, void *data) {
             break;
         case INPUT_KEY:
             handle_key(s, ev.key.rune, ev.key.pressed);
+            break;
+        case INPUT_WAKEUP:
+            wlr_output_schedule_frame(s->output);
             break;
         }
     }
