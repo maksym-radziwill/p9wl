@@ -366,11 +366,17 @@ void *send_thread_func(void *arg) {
             drain_pause();
             relookup_window(s);
             drain_resume();
-            if (s->resize_pending) {
-                struct input_event ev = { .type = INPUT_WAKEUP };
-                input_queue_push(&s->input_queue, &ev);
-                continue;
-            }
+            /*
+             * Wake main loop so output_frame fires.  For resize,
+             * output_frame consumes resize_pending.  For move,
+             * output_frame renders a frame that the send thread
+             * can send with updated win_minx/miny coordinates.
+             * Without this, the idle scene_dirty gate prevents
+             * output_frame from running.
+             */
+            struct input_event wakeup = { .type = INPUT_WAKEUP };
+            input_queue_push(&s->input_queue, &wakeup);
+            if (s->resize_pending) continue;
             do_full = 1;
         }
         
@@ -379,11 +385,9 @@ void *send_thread_func(void *arg) {
             drain_pause();
             relookup_window(s);
             drain_resume();
-            if (s->resize_pending) {
-                struct input_event ev = { .type = INPUT_WAKEUP };
-                input_queue_push(&s->input_queue, &ev);
-                continue;
-            }
+            struct input_event wakeup = { .type = INPUT_WAKEUP };
+            input_queue_push(&s->input_queue, &wakeup);
+            if (s->resize_pending) continue;
             do_full = 1;
         }
         
