@@ -217,6 +217,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
     }
     
     s->dirty_staging_valid = 0;  /* Reset; set below if damage extracted */
+    int has_dirty = 0;           /* Set if any damage rects found */
     
     struct wlr_buffer *buffer = ostate.buffer;
     if (buffer) {
@@ -266,31 +267,38 @@ static void output_frame(struct wl_listener *listener, void *data) {
                  * Must happen before wlr_output_state_finish() frees
                  * the damage region.  Lazy-allocate staging buffer on
                  * first use.
+                 *
+                 * We read ostate.damage unconditionally rather than
+                 * checking ostate.committed & WLR_OUTPUT_STATE_DAMAGE.
+                 * The committed flag tracks fields set by the caller,
+                 * not fields populated by wlr_scene_output_build_state().
+                 * wlr_output_state_init() initializes damage empty, and
+                 * the scene builder fills it with actual changed regions.
+                 * If nothing changed, nrects will be 0.
                  */
                 if (!s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0)
                     s->dirty_staging = calloc(1, s->tiles_x * s->tiles_y);
                 if (s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0) {
                     int ntiles = s->tiles_x * s->tiles_y;
                     memset(s->dirty_staging, 0, ntiles);
-                    if (ostate.committed & WLR_OUTPUT_STATE_DAMAGE) {
-                        int nrects = 0;
-                        pixman_box32_t *rects = pixman_region32_rectangles(
-                            &ostate.damage, &nrects);
-                        for (int r = 0; r < nrects; r++) {
-                            int tx0 = rects[r].x1 / TILE_SIZE;
-                            int ty0 = rects[r].y1 / TILE_SIZE;
-                            int tx1 = (rects[r].x2 + TILE_SIZE - 1) / TILE_SIZE;
-                            int ty1 = (rects[r].y2 + TILE_SIZE - 1) / TILE_SIZE;
-                            if (tx0 < 0) tx0 = 0;
-                            if (ty0 < 0) ty0 = 0;
-                            if (tx1 > s->tiles_x) tx1 = s->tiles_x;
-                            if (ty1 > s->tiles_y) ty1 = s->tiles_y;
-                            for (int ty = ty0; ty < ty1; ty++)
-                                for (int tx = tx0; tx < tx1; tx++)
-                                    s->dirty_staging[ty * s->tiles_x + tx] = 1;
-                        }
-                        s->dirty_staging_valid = 1;
+                    int nrects = 0;
+                    pixman_box32_t *rects = pixman_region32_rectangles(
+                        &ostate.damage, &nrects);
+                    for (int r = 0; r < nrects; r++) {
+                        int tx0 = rects[r].x1 / TILE_SIZE;
+                        int ty0 = rects[r].y1 / TILE_SIZE;
+                        int tx1 = (rects[r].x2 + TILE_SIZE - 1) / TILE_SIZE;
+                        int ty1 = (rects[r].y2 + TILE_SIZE - 1) / TILE_SIZE;
+                        if (tx0 < 0) tx0 = 0;
+                        if (ty0 < 0) ty0 = 0;
+                        if (tx1 > s->tiles_x) tx1 = s->tiles_x;
+                        if (ty1 > s->tiles_y) ty1 = s->tiles_y;
+                        for (int ty = ty0; ty < ty1; ty++)
+                            for (int tx = tx0; tx < tx1; tx++)
+                                s->dirty_staging[ty * s->tiles_x + tx] = 1;
                     }
+                    s->dirty_staging_valid = 1;
+                    has_dirty = (nrects > 0);
                 }
             }
         } else {
@@ -309,7 +317,16 @@ static void output_frame(struct wl_listener *listener, void *data) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     wlr_scene_output_send_frame_done(so, &ts);
     
-    send_frame(s);
+    /*
+     * Only wake the send thread when there's actual work:
+     *   - force_full_frame: resize/error recovery needs full resend
+     *   - has_dirty: compositor reported pixel changes
+     *   - !dirty_staging_valid: damage extraction failed (alloc error),
+     *     send thread must fall back to pixel scanning
+     */
+    if (s->force_full_frame || has_dirty || !s->dirty_staging_valid) {
+        send_frame(s);
+    }
 }
 
 void new_output(struct wl_listener *l, void *d) {

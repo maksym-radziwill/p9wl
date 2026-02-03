@@ -404,15 +404,17 @@ void *send_thread_func(void *arg) {
         int can_delta = draw->xor_enabled && !do_full && s->prev_framebuf;
         
         /*
-         * Use damage-based dirty map when available.  This lets us skip
-         * tiles outside the compositor's damage region entirely —
-         * avoiding memory reads for the vast majority of tiles on a
-         * typical frame.  Within the damaged region we still call
-         * tile_changed() because damage is a conservative over-
-         * approximation (a surface repaint may produce identical pixels).
-         * Falls back to scanning all tiles when scroll happened
-         * (prev_framebuf was modified) or when no damage info is
-         * available.
+         * Use damage-based dirty map when available.  Tiles outside the
+         * damage region are skipped entirely (no memory read).  Tiles
+         * inside the damage region are assumed changed — the compositor
+         * determined these regions were re-rendered, and since we now
+         * read ostate.damage unconditionally (not gated on the committed
+         * flag), the damage is accurate.  This eliminates the expensive
+         * tile_changed() memcmp that was previously the main CPU cost.
+         *
+         * Falls back to tile_changed() pixel scanning only when no
+         * damage info is available (scroll modified prev_framebuf,
+         * errors, or allocation failure).
          */
         uint8_t *dirty_map = NULL;
         if (!do_full && scrolled_regions == 0 &&
@@ -430,11 +432,10 @@ void *send_thread_func(void *arg) {
                 
                 int changed;
                 if (dirty_map) {
-                    /* Fast path: skip undamaged tiles, verify damaged ones */
+                    /* Fast path: trust damage, skip undamaged tiles */
                     if (!dirty_map[ty * s->tiles_x + tx])
                         continue;
-                    changed = tile_changed(send_buf, s->prev_framebuf,
-                                           s->width, x1, y1, w, h);
+                    changed = 1;
                 } else {
                     /* Fallback: check every tile */
                     changed = do_full || tile_changed(send_buf, s->prev_framebuf,
@@ -475,7 +476,7 @@ void *send_thread_func(void *arg) {
             compress_tiles_parallel(work, results, work_count);
         }
         
-        drain_throttle(32);
+        drain_throttle(2);
         
         /* Build and send batches */
         for (int i = 0; i < work_count; i++) {

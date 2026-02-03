@@ -41,18 +41,22 @@
  *
  * Damage-Based Dirty Tile Tracking:
  *
- *   wlr_scene_output_build_state() already tracks which pixels changed
- *   via ostate.damage (a pixman region). Rather than having the send
- *   thread do an expensive full-frame pixel comparison via tile_changed(),
- *   the output_frame handler extracts the damage rectangles into a
- *   per-tile bitmap (s->dirty_staging). send_frame() then copies this
- *   bitmap into the per-send-buffer slot (s->dirty_tiles[buf]) under
- *   the send lock, so the send thread can skip clean tiles without
- *   touching their memory at all.
+ *   wlr_scene_output_build_state() tracks which pixels changed via
+ *   ostate.damage (a pixman region). The output_frame handler reads
+ *   this damage unconditionally (not gated on the WLR_OUTPUT_STATE_DAMAGE
+ *   committed flag, which tracks caller-set fields, not scene builder
+ *   output). The damage rectangles are converted to a per-tile bitmap
+ *   (s->dirty_staging). send_frame() copies this bitmap into the
+ *   per-send-buffer slot (s->dirty_tiles[buf]) under the send lock.
  *
- *   Fallback: if no damage info is available (WLR_OUTPUT_STATE_DAMAGE
- *   not set in ostate.committed), dirty_staging_valid remains 0 and
- *   the send thread falls back to pixel comparison.
+ *   The send thread trusts the damage bitmap as ground truth: undamaged
+ *   tiles are skipped without any pixel comparison, and damaged tiles
+ *   are assumed changed. When damage reports zero rects (idle screen),
+ *   send_frame() is not called and the send thread stays asleep.
+ *
+ *   Fallback: if damage extraction fails (allocation error),
+ *   dirty_staging_valid remains 0 and the send thread falls back to
+ *   pixel comparison via tile_changed().
  *
  * Image Reallocation:
  *

@@ -54,21 +54,24 @@
  *     s->dirty_valid[N]:      Whether bitmap is valid for buffer N
  *
  *   Flow:
- *     1. output_frame() extracts ostate.damage into dirty_staging
- *     2. output_frame() skips send_frame() entirely when damage is
+ *     1. output_frame() reads ostate.damage unconditionally after
+ *        wlr_scene_output_build_state() (not gated on committed flag)
+ *     2. Damage rects are converted to tile indices in dirty_staging
+ *     3. output_frame() skips send_frame() entirely when damage is
  *        empty and force_full_frame is not set (idle screen)
- *     3. send_frame() copies dirty_staging into dirty_tiles[buf]
- *     4. Send thread uses dirty_tiles[current_buf] to skip clean tiles
+ *     4. send_frame() copies dirty_staging into dirty_tiles[buf]
+ *     5. Send thread trusts dirty_tiles as ground truth and skips
+ *        undamaged tiles without any pixel comparison
  *
- *   Fallback: when no damage info is available, or after scroll
- *   detection modifies prev_framebuf, the send thread falls back to
- *   tile_changed() pixel comparison for all tiles.
+ *   Fallback: when no damage info is available (scroll modified
+ *   prev_framebuf, errors, or allocation failure), the send thread
+ *   falls back to tile_changed() pixel comparison for all tiles.
  *
- *   Important: damage is a conservative over-approximation — it means
- *   "the compositor re-rendered these pixels", not "these pixels
- *   changed."  The send thread therefore still calls tile_changed()
- *   on damaged tiles to find the actual minimal set.  The saving comes
- *   from skipping undamaged tiles entirely (no memory read at all).
+ *   Note: ostate.damage is read unconditionally because the
+ *   WLR_OUTPUT_STATE_DAMAGE bit in ostate.committed tracks fields
+ *   set by the caller, not fields populated by the scene builder.
+ *   wlr_output_state_init() initializes the damage region empty,
+ *   and wlr_scene_output_build_state() fills it with actual changes.
  *
  * Pipelined I/O:
  *
@@ -107,10 +110,10 @@
  *
  *     4. Tile Change Detection:
  *        - If dirty tile bitmap is available and no scroll occurred,
- *          skip tiles outside the damage region entirely, then verify
- *          damaged tiles with tile_changed() (damage is conservative)
+ *          trust damage as ground truth: skip undamaged tiles, mark
+ *          damaged tiles as changed without pixel comparison
  *        - Otherwise fall back to comparing send_buf vs prev_framebuf
- *          for every tile
+ *          for every tile via tile_changed()
  *        - Build list of changed tiles (struct tile_work)
  *        - Skip tiles in scroll-exposed regions for delta encoding
  *
