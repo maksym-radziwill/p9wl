@@ -300,6 +300,12 @@ struct server {
     int active_buf;                 /* Buffer send thread is using */
     int send_full;                  /* Force full frame flag */
 
+    /* ---- Damage-based dirty tile tracking ---- */
+    uint8_t *dirty_tiles[2];       /* Per-send-buffer dirty tile bitmaps */
+    int dirty_valid[2];            /* Whether bitmap is valid for this buf */
+    uint8_t *dirty_staging;        /* Staging area (written by output thread) */
+    int dirty_staging_valid;       /* Whether staging has valid data */
+
     /* ---- Per-region scroll detection ---- */
     struct {
         int x1, y1, x2, y2;         /* Region bounds */

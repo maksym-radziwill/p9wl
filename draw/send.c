@@ -10,7 +10,8 @@
  * - Extracted drain_wake() helper
  * - Simplified tile bounds with tile_bounds()
  * - Replaced full-frame memcpy in send_frame() with pointer swap
- *   (requires framebuf and send_buf[] to be identically allocated)
+ * - Added damage-based dirty tile tracking to skip unchanged tiles
+ *   without pixel scanning (falls back to tile_changed on scroll/errors)
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -206,7 +207,24 @@ void send_frame(struct server *s) {
     uint32_t *tmp     = s->send_buf[buf];
     s->send_buf[buf]  = s->framebuf;
     s->framebuf       = tmp;
-    s->pending_buf    = buf;
+
+    /* Copy dirty tile bitmap from staging area if available */
+    if (s->dirty_staging_valid) {
+        int ntiles = s->tiles_x * s->tiles_y;
+        if (!s->dirty_tiles[buf] && ntiles > 0)
+            s->dirty_tiles[buf] = calloc(1, ntiles);
+        if (s->dirty_tiles[buf] && ntiles > 0) {
+            memcpy(s->dirty_tiles[buf], s->dirty_staging, ntiles);
+            s->dirty_valid[buf] = 1;
+        } else {
+            s->dirty_valid[buf] = 0;
+        }
+        s->dirty_staging_valid = 0;
+    } else {
+        s->dirty_valid[buf] = 0;
+    }
+
+    s->pending_buf = buf;
     if (s->force_full_frame) s->send_full = 1;
     pthread_cond_signal(&s->send_cond);
     pthread_mutex_unlock(&s->send_lock);
@@ -332,6 +350,7 @@ void *send_thread_func(void *arg) {
         int drain_errs = atomic_exchange(&drain.errors, 0);
         if (drain_errs > 0) {
             memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+            do_full = 1;
         }
         
         if (s->window_changed) {
@@ -377,6 +396,19 @@ void *send_thread_func(void *arg) {
         size_t bytes_raw = 0, bytes_sent = 0;
         int can_delta = draw->xor_enabled && !do_full && s->prev_framebuf;
         
+        /*
+         * Use damage-based dirty map when available.  This lets us skip
+         * tile_changed() entirely for clean tiles — avoiding two
+         * full-frame memory reads per frame.  Falls back to pixel
+         * comparison when scroll happened (prev_framebuf was modified)
+         * or when no damage info is available.
+         */
+        uint8_t *dirty_map = NULL;
+        if (!do_full && scrolled_regions == 0 &&
+            s->dirty_valid[current_buf] && s->dirty_tiles[current_buf]) {
+            dirty_map = s->dirty_tiles[current_buf];
+        }
+        
         /* Collect changed tiles */
         int work_count = 0;
         for (int ty = 0; ty < s->tiles_y; ty++) {
@@ -385,8 +417,15 @@ void *send_thread_func(void *arg) {
                 tile_bounds(tx, ty, s->width, s->height, &x1, &y1, &w, &h);
                 if (w <= 0 || h <= 0) continue;
                 
-                int changed = do_full || tile_changed(send_buf, s->prev_framebuf,
+                int changed;
+                if (dirty_map) {
+                    /* Fast path: use compositor damage bitmap */
+                    changed = dirty_map[ty * s->tiles_x + tx];
+                } else {
+                    /* Fallback: pixel-by-pixel comparison */
+                    changed = do_full || tile_changed(send_buf, s->prev_framebuf,
                                                        s->width, x1, y1, w, h);
+                }
                 if (!changed) continue;
                 
                 if (work_count >= max_tiles) break;
@@ -453,6 +492,7 @@ void *send_thread_func(void *arg) {
             if (off + tile_size > max_batch && off > 0) {
                 if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
                     memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+                    s->send_full = 1;
                 }
                 drain_notify();
                 batch_count++;
@@ -500,6 +540,7 @@ void *send_thread_func(void *arg) {
             if (off + footer_size > max_batch && off > 0) {
                 if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
                     memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+                    s->send_full = 1;
                 }
                 drain_notify();
                 batch_count++;
@@ -522,6 +563,7 @@ void *send_thread_func(void *arg) {
             
             if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
                 memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);
+                s->send_full = 1;
             }
             drain_notify();
             batch_count++;

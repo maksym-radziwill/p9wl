@@ -122,6 +122,16 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 s->height = new_h;
                 s->tiles_x = (new_w + TILE_SIZE - 1) / TILE_SIZE;
                 s->tiles_y = (new_h + TILE_SIZE - 1) / TILE_SIZE;
+                
+                /* Reallocate dirty tile bitmaps */
+                uint8_t *old_dirty0 = s->dirty_tiles[0];
+                uint8_t *old_dirty1 = s->dirty_tiles[1];
+                int ntiles = s->tiles_x * s->tiles_y;
+                s->dirty_tiles[0] = ntiles > 0 ? calloc(1, ntiles) : NULL;
+                s->dirty_tiles[1] = ntiles > 0 ? calloc(1, ntiles) : NULL;
+                s->dirty_valid[0] = 0;
+                s->dirty_valid[1] = 0;
+                
                 draw->width = new_w;
                 draw->height = new_h;
                 draw->win_minx = new_minx;
@@ -132,6 +142,13 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 free(old_prev_framebuf);
                 free(old_send_buf0);
                 free(old_send_buf1);
+                free(old_dirty0);
+                free(old_dirty1);
+                
+                /* Reallocate staging buffer (output thread only, no lock) */
+                free(s->dirty_staging);
+                s->dirty_staging = ntiles > 0 ? calloc(1, ntiles) : NULL;
+                s->dirty_staging_valid = 0;
                 
                 /* Reallocate Plan 9 images using helper */
                 reallocate_draw_images(draw, new_w, new_h);
@@ -199,6 +216,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
         return;
     }
     
+    s->dirty_staging_valid = 0;  /* Reset; set below if damage extracted */
+    
     struct wlr_buffer *buffer = ostate.buffer;
     if (buffer) {
         void *data_ptr;
@@ -240,6 +259,38 @@ static void output_frame(struct wl_listener *listener, void *data) {
                     wlr_log(WLR_INFO, "Frame %d: first=0x%08x mid=0x%08x (changed=%d)", 
                             frame_count, first_pix, mid_pix, first_pix != last_first_pixel);
                     last_first_pixel = first_pix;
+                }
+                
+                /*
+                 * Extract compositor damage into dirty tile bitmap.
+                 * Must happen before wlr_output_state_finish() frees
+                 * the damage region.  Lazy-allocate staging buffer on
+                 * first use.
+                 */
+                if (!s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0)
+                    s->dirty_staging = calloc(1, s->tiles_x * s->tiles_y);
+                if (s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0) {
+                    int ntiles = s->tiles_x * s->tiles_y;
+                    memset(s->dirty_staging, 0, ntiles);
+                    if (ostate.committed & WLR_OUTPUT_STATE_DAMAGE) {
+                        int nrects = 0;
+                        pixman_box32_t *rects = pixman_region32_rectangles(
+                            &ostate.damage, &nrects);
+                        for (int r = 0; r < nrects; r++) {
+                            int tx0 = rects[r].x1 / TILE_SIZE;
+                            int ty0 = rects[r].y1 / TILE_SIZE;
+                            int tx1 = (rects[r].x2 + TILE_SIZE - 1) / TILE_SIZE;
+                            int ty1 = (rects[r].y2 + TILE_SIZE - 1) / TILE_SIZE;
+                            if (tx0 < 0) tx0 = 0;
+                            if (ty0 < 0) ty0 = 0;
+                            if (tx1 > s->tiles_x) tx1 = s->tiles_x;
+                            if (ty1 > s->tiles_y) ty1 = s->tiles_y;
+                            for (int ty = ty0; ty < ty1; ty++)
+                                for (int tx = tx0; tx < tx1; tx++)
+                                    s->dirty_staging[ty * s->tiles_x + tx] = 1;
+                        }
+                        s->dirty_staging_valid = 1;
+                    }
                 }
             }
         } else {
