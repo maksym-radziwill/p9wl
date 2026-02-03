@@ -10,7 +10,10 @@
 #include "compress.h"
 #include "parallel.h"
 
-/* Hash table for fast match finding */
+/* Hash table for fast match finding — uses generation counter to avoid
+ * per-tile memset.  Each compression thread gets its own copy via
+ * __thread, and the generation is bumped once per tile instead of
+ * clearing the 2KB+ table. */
 #define HASH_BITS 10
 #define HASH_SIZE (1 << HASH_BITS)
 #define HASH_MASK (HASH_SIZE - 1)
@@ -18,6 +21,10 @@
 static inline uint32_t hash3(const uint8_t *p) {
     return ((p[0] << 5) ^ (p[1] << 2) ^ p[2]) & HASH_MASK;
 }
+
+static __thread uint16_t htab_pos[HASH_SIZE];
+static __thread uint16_t htab_gen[HASH_SIZE];
+static __thread uint16_t current_gen;
 
 /*
  * Encode a solid-color tile (including all-zeros).
@@ -50,7 +57,7 @@ static int encode_solid_tile(uint8_t *dst, const uint8_t *pixel, int h) {
 
 /*
  * Fast LZ77 compression for a tile.
- * Uses hash table for O(1) match finding.
+ * Uses hash table with generation counter (no per-tile memset).
  */
 static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_size, int bytes_per_row) {
     int out = 0;
@@ -58,8 +65,12 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
     uint8_t lit[128];
     int nlit = 0;
     
-    uint16_t htab[HASH_SIZE];
-    memset(htab, 0, sizeof(htab));
+    /* Bump generation instead of memset — wraps every 65535 tiles */
+    current_gen++;
+    if (current_gen == 0) {
+        memset(htab_gen, 0, sizeof(htab_gen));
+        current_gen = 1;
+    }
     
     for (int row = 0; row < h; row++) {
         int row_start = row * bytes_per_row;
@@ -94,10 +105,13 @@ static int lz77_compress_fast(uint8_t *dst, int dst_max, uint8_t *raw, int raw_s
             
             if (maxlen >= 3 && pos >= 3) {
                 uint32_t hv = hash3(raw + pos);
-                int candidate = htab[hv];
-                htab[hv] = pos;
+                int candidate = htab_pos[hv];
+                int valid = (htab_gen[hv] == current_gen) &&
+                            candidate > 0 && pos - candidate <= 256;
+                htab_gen[hv] = current_gen;
+                htab_pos[hv] = pos;
                 
-                if (candidate > 0 && pos - candidate <= 256) {
+                if (valid) {
                     int off = pos - candidate;
                     int len = 0;
                     while (len < maxlen && raw[pos - off + len] == raw[pos + len]) len++;
