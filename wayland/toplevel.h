@@ -25,7 +25,7 @@
  *      - On map: calls focus_on_surface_map(), updates pointer focus
  *      - On unmap: calls focus_on_surface_unmap()
  *      - Scans for new subsurfaces via check_new_subsurfaces()
- *      - Rechecks pointer focus and schedules output frame
+ *      - Sets scene_dirty flag and schedules output frame
  *
  *   3. toplevel_destroy() - Called when toplevel is destroyed
  *      - Calls focus_on_surface_destroy() to clean up focus state
@@ -34,7 +34,6 @@
  *      - Frees toplevel struct
  *      - If last toplevel (s->had_toplevel && list empty):
  *        * Sets s->running = 0 and joins send_thread
- *        * Cancels and joins wctl_thread
  *        * Deletes rio window via delete_rio_window()
  *        * Disconnects p9_draw and calls exit(0)
  *

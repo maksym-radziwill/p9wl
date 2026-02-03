@@ -26,33 +26,36 @@
  *        c. Update s->width, s->height, s->tiles_x, s->tiles_y
  *        d. Reallocate Plan 9 images via reallocate_draw_images()
  *        e. Resize wlroots output and reconfigure all toplevels
- *        f. Set force_full_frame flag
+ *        f. Set force_full_frame and scene_dirty flags
  *     3. Throttle frames based on FRAME_INTERVAL_MS if defined
- *     4. Build scene output state via wlr_scene_output_build_state()
- *     5. Copy rendered pixels from buffer to s->framebuf
- *     6. Extract compositor damage (ostate.damage) into dirty tile
- *        staging bitmap (s->dirty_staging) for the send thread
- *     7. Commit output state and send frame done
- *     8. Trigger send_frame() only when there is actual work:
- *        damage rects found, force_full_frame set, or no damage
- *        info available (fallback).  When the screen is idle and
- *        damage tracking reports zero rects, send_frame() is
- *        skipped entirely so the send thread stays asleep.
+ *     4. Check scene_dirty flag (set by toplevel/subsurface commit).
+ *        If scene is clean and no force_full_frame, send frame_done
+ *        and return immediately — skipping build_state, buffer copy,
+ *        and send_frame entirely.  This is the primary idle-screen
+ *        optimization: the headless backend reports full-screen damage
+ *        on every frame, so ostate.damage cannot be used to detect
+ *        idle; instead we track content changes explicitly.
+ *     5. Build scene output state via wlr_scene_output_build_state()
+ *     6. Extract compositor damage into dirty tile staging bitmap
+ *     7. Copy only damaged rows from rendered buffer to s->framebuf
+ *        (full copy on force_full_frame or damage extraction failure)
+ *     8. Commit output state and send frame done
+ *     9. Trigger send_frame() when there is actual work
  *
  * Damage-Based Dirty Tile Tracking:
  *
- *   wlr_scene_output_build_state() tracks which pixels changed via
- *   ostate.damage (a pixman region). The output_frame handler reads
- *   this damage unconditionally (not gated on the WLR_OUTPUT_STATE_DAMAGE
- *   committed flag, which tracks caller-set fields, not scene builder
- *   output). The damage rectangles are converted to a per-tile bitmap
- *   (s->dirty_staging). send_frame() copies this bitmap into the
- *   per-send-buffer slot (s->dirty_tiles[buf]) under the send lock.
+ *   The headless backend reports full-screen damage on every frame,
+ *   making ostate.damage useless for idle detection.  Instead, idle
+ *   frames are skipped via the scene_dirty flag (step 4 above).
+ *
+ *   When rendering does occur, ostate.damage is still extracted into
+ *   a per-tile bitmap (s->dirty_staging) and used to:
+ *     - Copy only damaged rows from the wlroots buffer to framebuf
+ *     - Tell the send thread which tiles to compress and transmit
  *
  *   The send thread trusts the damage bitmap as ground truth: undamaged
- *   tiles are skipped without any pixel comparison, and damaged tiles
- *   are assumed changed. When damage reports zero rects (idle screen),
- *   send_frame() is not called and the send thread stays asleep.
+ *   tiles are skipped without pixel comparison, damaged tiles are
+ *   assumed changed.
  *
  *   Fallback: if damage extraction fails (allocation error),
  *   dirty_staging_valid remains 0 and the send thread falls back to

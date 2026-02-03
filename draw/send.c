@@ -407,10 +407,10 @@ void *send_thread_func(void *arg) {
          * Use damage-based dirty map when available.  Tiles outside the
          * damage region are skipped entirely (no memory read).  Tiles
          * inside the damage region are assumed changed — the compositor
-         * determined these regions were re-rendered, and since we now
-         * read ostate.damage unconditionally (not gated on the committed
-         * flag), the damage is accurate.  This eliminates the expensive
-         * tile_changed() memcmp that was previously the main CPU cost.
+         * determined these regions were re-rendered, and we track actual
+         * content changes via scene_dirty in output_frame so the damage
+         * is reliable.  This eliminates the expensive tile_changed()
+         * memcmp that was previously the main CPU cost.
          *
          * Falls back to tile_changed() pixel scanning only when no
          * damage info is available (scroll modified prev_framebuf,

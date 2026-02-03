@@ -54,24 +54,23 @@
  *     s->dirty_valid[N]:      Whether bitmap is valid for buffer N
  *
  *   Flow:
- *     1. output_frame() reads ostate.damage unconditionally after
- *        wlr_scene_output_build_state() (not gated on committed flag)
- *     2. Damage rects are converted to tile indices in dirty_staging
- *     3. output_frame() skips send_frame() entirely when damage is
- *        empty and force_full_frame is not set (idle screen)
+ *     1. output_frame() checks scene_dirty flag — if scene hasn't
+ *        changed, skips rendering entirely (no build_state, no copy)
+ *     2. When rendering occurs, extracts ostate.damage into dirty_staging
+ *     3. Copies only damaged rows from wlroots buffer to framebuf
  *     4. send_frame() copies dirty_staging into dirty_tiles[buf]
- *     5. Send thread trusts dirty_tiles as ground truth and skips
- *        undamaged tiles without any pixel comparison
+ *     5. Send thread trusts dirty_tiles as ground truth: undamaged tiles
+ *        are skipped, damaged tiles are assumed changed (no tile_changed)
+ *
+ *   The headless backend reports full-screen damage on every frame, so
+ *   ostate.damage alone cannot detect idle screens.  The scene_dirty flag
+ *   (set by toplevel/subsurface commit handlers) provides the actual
+ *   idle detection, ensuring output_frame returns early when no client
+ *   has submitted new content.
  *
  *   Fallback: when no damage info is available (scroll modified
  *   prev_framebuf, errors, or allocation failure), the send thread
  *   falls back to tile_changed() pixel comparison for all tiles.
- *
- *   Note: ostate.damage is read unconditionally because the
- *   WLR_OUTPUT_STATE_DAMAGE bit in ostate.committed tracks fields
- *   set by the caller, not fields populated by the scene builder.
- *   wlr_output_state_init() initializes the damage region empty,
- *   and wlr_scene_output_build_state() fills it with actual changes.
  *
  * Pipelined I/O:
  *

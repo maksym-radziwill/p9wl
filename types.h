@@ -286,6 +286,7 @@ struct server {
     /* ---- Tile-based rendering ---- */
     int tiles_x, tiles_y;           /* Number of tiles in each dimension */
     int force_full_frame;           /* Force complete redraw */
+    int scene_dirty;                /* Scene content changed, needs render */
     int frame_dirty;                /* Frame has changes to send */
     int timer_armed;                /* Send timer is active */
     uint32_t last_frame_ms;         /* Timestamp of last frame */
@@ -301,10 +302,10 @@ struct server {
     int send_full;                  /* Force full frame flag */
 
     /* ---- Damage-based dirty tile tracking ---- */
-    uint8_t *dirty_tiles[2];       /* Per-send-buffer dirty tile bitmaps */
-    int dirty_valid[2];            /* Whether bitmap is valid for this buf */
-    uint8_t *dirty_staging;        /* Staging area (written by output thread) */
-    int dirty_staging_valid;       /* Whether staging has valid data */
+    uint8_t *dirty_staging;          /* Tile bitmap written by output thread */
+    int dirty_staging_valid;         /* 1 if dirty_staging has valid data */
+    uint8_t *dirty_tiles[2];         /* Per-send-buffer tile bitmaps */
+    int dirty_valid[2];              /* Whether bitmap is valid per buffer */
 
     /* ---- Per-region scroll detection ---- */
     struct {

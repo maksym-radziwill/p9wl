@@ -64,7 +64,6 @@ static void output_frame(struct wl_listener *listener, void *data) {
     struct server *s = wl_container_of(listener, s, output_frame);
     struct wlr_scene_output *so = s->scene_output;
     static int frame_count = 0;
-    static uint32_t last_first_pixel = 0;
     (void)data;
     
     /* Check if window was resized - read atomically under lock */
@@ -182,6 +181,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 
                 draw->xor_enabled = 0;
                 s->force_full_frame = 1;
+                s->scene_dirty = 1;
                 
                 wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical at (%d,%d)", 
                         new_w, new_h, logical_w, logical_h, new_minx, new_miny);
@@ -200,6 +200,22 @@ static void output_frame(struct wl_listener *listener, void *data) {
 #endif
     s->last_frame_ms = now;
     frame_count++;
+    
+    /*
+     * Skip rendering entirely when the scene hasn't changed.
+     * scene_dirty is set by toplevel_commit/subsurface_commit when a
+     * client submits new content, and by resize handling.  On an idle
+     * screen this avoids wlr_scene_output_build_state() (which renders
+     * into a buffer) and the subsequent memcpy into framebuf — the
+     * dominant source of idle CPU usage.
+     */
+    if (!s->scene_dirty && !s->force_full_frame) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        wlr_scene_output_send_frame_done(so, &ts);
+        return;
+    }
+    s->scene_dirty = 0;
     
     struct wlr_output_state ostate;
     wlr_output_state_init(&ostate);
@@ -227,80 +243,104 @@ static void output_frame(struct wl_listener *listener, void *data) {
         
         if (wlr_buffer_begin_data_ptr_access(buffer, WLR_BUFFER_DATA_PTR_ACCESS_READ,
                                               &data_ptr, &format, &stride)) {
-            pthread_mutex_lock(&s->send_lock);
-            
             int w = s->width;
             int h = s->height;
             uint32_t *fb = s->framebuf;
-            uint32_t first_pix = 0, mid_pix = 0;
-            int valid_fb = 0;
+            int valid_fb = (fb && w > 0 && h > 0 && w <= 4096 && h <= 4096);
             
-            if (fb && w > 0 && h > 0 && w <= 4096 && h <= 4096) {
-                valid_fb = 1;
+            /*
+             * Extract damage BEFORE copying pixels.  This lets us skip
+             * the buffer copy entirely on idle frames (nrects == 0) and
+             * copy only damaged rows on active frames.
+             *
+             * We read ostate.damage unconditionally rather than checking
+             * ostate.committed & WLR_OUTPUT_STATE_DAMAGE.  The committed
+             * flag tracks fields set by the caller, not fields populated
+             * by wlr_scene_output_build_state().  wlr_output_state_init()
+             * initializes damage empty, and the scene builder fills it
+             * with actual changed regions.
+             */
+            int nrects = 0;
+            pixman_box32_t *rects = pixman_region32_rectangles(
+                &ostate.damage, &nrects);
+            
+            /* Build dirty tile bitmap */
+            if (!s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0)
+                s->dirty_staging = calloc(1, s->tiles_x * s->tiles_y);
+            if (s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0) {
+                int ntiles = s->tiles_x * s->tiles_y;
+                memset(s->dirty_staging, 0, ntiles);
+                for (int r = 0; r < nrects; r++) {
+                    int tx0 = rects[r].x1 / TILE_SIZE;
+                    int ty0 = rects[r].y1 / TILE_SIZE;
+                    int tx1 = (rects[r].x2 + TILE_SIZE - 1) / TILE_SIZE;
+                    int ty1 = (rects[r].y2 + TILE_SIZE - 1) / TILE_SIZE;
+                    if (tx0 < 0) tx0 = 0;
+                    if (ty0 < 0) ty0 = 0;
+                    if (tx1 > s->tiles_x) tx1 = s->tiles_x;
+                    if (ty1 > s->tiles_y) ty1 = s->tiles_y;
+                    for (int ty = ty0; ty < ty1; ty++)
+                        for (int tx = tx0; tx < tx1; tx++)
+                            s->dirty_staging[ty * s->tiles_x + tx] = 1;
+                }
+                s->dirty_staging_valid = 1;
+                has_dirty = (nrects > 0);
+            }
+            
+            /*
+             * Copy pixels from rendered buffer to framebuf.
+             *
+             * When damage info is available and there are no damaged
+             * rects, skip the copy entirely — the framebuf already has
+             * the correct content from the previous frame.
+             *
+             * When there is damage, copy only the rows spanned by
+             * damage rects rather than the full frame.  On a typical
+             * frame with a blinking cursor, this copies ~16 rows
+             * instead of the full height.
+             *
+             * Falls back to full-frame copy when force_full_frame is
+             * set or damage extraction failed.
+             */
+            if (valid_fb && (has_dirty || s->force_full_frame || !s->dirty_staging_valid)) {
                 int buf_w = buffer->width;
                 int buf_h = buffer->height;
                 int copy_w = (buf_w < w) ? buf_w : w;
                 int copy_h = (buf_h < h) ? buf_h : h;
                 
-                for (int y = 0; y < copy_h; y++) {
-                    memcpy(&fb[y * w],
-                           (uint8_t*)data_ptr + y * stride,
-                           copy_w * 4);
-                }
-                
-                first_pix = fb[0];
-                mid_pix = fb[(h/2) * w + w/2];
-            }
-            
-            pthread_mutex_unlock(&s->send_lock);
-            wlr_buffer_end_data_ptr_access(buffer);
-            
-            if (valid_fb) {
-                if (first_pix != last_first_pixel || frame_count <= 10 || frame_count % 60 == 0) {
-                    wlr_log(WLR_INFO, "Frame %d: first=0x%08x mid=0x%08x (changed=%d)", 
-                            frame_count, first_pix, mid_pix, first_pix != last_first_pixel);
-                    last_first_pixel = first_pix;
-                }
-                
-                /*
-                 * Extract compositor damage into dirty tile bitmap.
-                 * Must happen before wlr_output_state_finish() frees
-                 * the damage region.  Lazy-allocate staging buffer on
-                 * first use.
-                 *
-                 * We read ostate.damage unconditionally rather than
-                 * checking ostate.committed & WLR_OUTPUT_STATE_DAMAGE.
-                 * The committed flag tracks fields set by the caller,
-                 * not fields populated by wlr_scene_output_build_state().
-                 * wlr_output_state_init() initializes damage empty, and
-                 * the scene builder fills it with actual changed regions.
-                 * If nothing changed, nrects will be 0.
-                 */
-                if (!s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0)
-                    s->dirty_staging = calloc(1, s->tiles_x * s->tiles_y);
-                if (s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0) {
-                    int ntiles = s->tiles_x * s->tiles_y;
-                    memset(s->dirty_staging, 0, ntiles);
-                    int nrects = 0;
-                    pixman_box32_t *rects = pixman_region32_rectangles(
-                        &ostate.damage, &nrects);
+                pthread_mutex_lock(&s->send_lock);
+                if (has_dirty && s->dirty_staging_valid && !s->force_full_frame) {
+                    /*
+                     * Partial copy: only rows that overlap damage rects.
+                     * Compute the union of all damage rect Y ranges to
+                     * find min/max rows, then copy that row span.
+                     */
+                    int min_y = copy_h, max_y = 0;
                     for (int r = 0; r < nrects; r++) {
-                        int tx0 = rects[r].x1 / TILE_SIZE;
-                        int ty0 = rects[r].y1 / TILE_SIZE;
-                        int tx1 = (rects[r].x2 + TILE_SIZE - 1) / TILE_SIZE;
-                        int ty1 = (rects[r].y2 + TILE_SIZE - 1) / TILE_SIZE;
-                        if (tx0 < 0) tx0 = 0;
-                        if (ty0 < 0) ty0 = 0;
-                        if (tx1 > s->tiles_x) tx1 = s->tiles_x;
-                        if (ty1 > s->tiles_y) ty1 = s->tiles_y;
-                        for (int ty = ty0; ty < ty1; ty++)
-                            for (int tx = tx0; tx < tx1; tx++)
-                                s->dirty_staging[ty * s->tiles_x + tx] = 1;
+                        int y0 = rects[r].y1;
+                        int y1 = rects[r].y2;
+                        if (y0 < 0) y0 = 0;
+                        if (y1 > copy_h) y1 = copy_h;
+                        if (y0 < min_y) min_y = y0;
+                        if (y1 > max_y) max_y = y1;
                     }
-                    s->dirty_staging_valid = 1;
-                    has_dirty = (nrects > 0);
+                    for (int y = min_y; y < max_y; y++) {
+                        memcpy(&fb[y * w],
+                               (uint8_t*)data_ptr + y * stride,
+                               copy_w * 4);
+                    }
+                } else {
+                    /* Full copy: force_full_frame or no damage info */
+                    for (int y = 0; y < copy_h; y++) {
+                        memcpy(&fb[y * w],
+                               (uint8_t*)data_ptr + y * stride,
+                               copy_w * 4);
+                    }
                 }
+                pthread_mutex_unlock(&s->send_lock);
             }
+            
+            wlr_buffer_end_data_ptr_access(buffer);
         } else {
             if (frame_count <= 10 || frame_count % 60 == 0)
                 wlr_log(WLR_ERROR, "Frame %d: buffer access failed", frame_count);

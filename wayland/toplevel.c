@@ -60,6 +60,7 @@ static void subsurface_commit(struct wl_listener *l, void *d) {
     }
     
     wlr_output_schedule_frame(st->server->output);
+    st->server->scene_dirty = 1;
 }
 
 static void subsurface_destroy(struct wl_listener *l, void *d) {
@@ -161,6 +162,7 @@ static void toplevel_commit(struct wl_listener *l, void *d) {
     
     check_new_subsurfaces(tl);
     focus_pointer_recheck(&s->focus);
+    s->scene_dirty = 1;
     wlr_output_schedule_frame(s->output);
 }
 
