@@ -204,10 +204,11 @@ static void output_frame(struct wl_listener *listener, void *data) {
     /*
      * Skip rendering entirely when the scene hasn't changed.
      * scene_dirty is set by toplevel_commit/subsurface_commit when a
-     * client submits new content, and by resize handling.  On an idle
-     * screen this avoids wlr_scene_output_build_state() (which renders
-     * into a buffer) and the subsequent memcpy into framebuf — the
-     * dominant source of idle CPU usage.
+     * client submits new content.  force_full_frame is set by resize
+     * handling (above) and error recovery.  On an idle screen this
+     * avoids wlr_scene_output_build_state() (which renders into a
+     * buffer) and the subsequent memcpy into framebuf — the dominant
+     * source of idle CPU usage.
      */
     if (!s->scene_dirty && !s->force_full_frame) {
         struct timespec ts;

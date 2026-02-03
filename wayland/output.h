@@ -28,13 +28,12 @@
  *        e. Resize wlroots output and reconfigure all toplevels
  *        f. Set force_full_frame and scene_dirty flags
  *     3. Throttle frames based on FRAME_INTERVAL_MS if defined
- *     4. Check scene_dirty flag (set by toplevel/subsurface commit).
- *        If scene is clean and no force_full_frame, send frame_done
- *        and return immediately — skipping build_state, buffer copy,
- *        and send_frame entirely.  This is the primary idle-screen
- *        optimization: the headless backend reports full-screen damage
- *        on every frame, so ostate.damage cannot be used to detect
- *        idle; instead we track content changes explicitly.
+ *     4. Check scene_dirty and force_full_frame flags.  If both are
+ *        clear, send frame_done and return immediately — skipping
+ *        build_state, buffer copy, and send_frame.  This is the
+ *        primary idle-screen optimization.  scene_dirty is set by
+ *        client commits; force_full_frame is set by resize handling
+ *        (step 2) and error recovery.
  *     5. Build scene output state via wlr_scene_output_build_state()
  *     6. Extract compositor damage into dirty tile staging bitmap
  *     7. Full-frame copy from rendered buffer to s->framebuf.
