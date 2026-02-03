@@ -275,10 +275,6 @@ void *mouse_thread_func(void *arg) {
             pthread_cond_signal(&s->send_cond);
             pthread_mutex_unlock(&s->send_lock);
             
-            /* Wake main event loop so output_frame picks up resize */
-            char c = 1;
-            if (write(s->input_queue.pipe_fd[1], &c, 1) < 0) { /* ignore */ }
-            
         }
     }
     
