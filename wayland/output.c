@@ -288,54 +288,40 @@ static void output_frame(struct wl_listener *listener, void *data) {
             }
             
             /*
-             * Copy pixels from rendered buffer to framebuf.
+             * Copy rendered pixels from wlroots buffer to framebuf.
              *
-             * When damage info is available and there are no damaged
-             * rects, skip the copy entirely — the framebuf already has
-             * the correct content from the previous frame.
+             * This runs only when scene_dirty was set (a client committed
+             * new content), so on an idle screen this code never executes.
+             * We always do a full-frame copy because:
              *
-             * When there is damage, copy only the rows spanned by
-             * damage rects rather than the full frame.  On a typical
-             * frame with a blinking cursor, this copies ~16 rows
-             * instead of the full height.
+             *   - send_frame() swaps framebuf with a recycled send_buf,
+             *     so the new framebuf has stale data from ~2 frames ago.
+             *     A partial copy would leave stale rows in the buffer.
              *
-             * Falls back to full-frame copy when force_full_frame is
-             * set or damage extraction failed.
+             *   - The send thread copies per-tile data from send_buf
+             *     into prev_framebuf (line ~544). If send_buf has stale
+             *     rows from incomplete copy, prev_framebuf gets corrupted,
+             *     breaking XOR delta encoding.
+             *
+             *   - Damage rects are pixel-precise but tiles are 16x16.
+             *     Copying only damaged rows can leave stale data within
+             *     a tile that the send thread reads in full.
+             *
+             * The scene_dirty check above already ensures we skip idle
+             * frames entirely, so the full copy only runs when content
+             * actually changed — not 60 times per second.
              */
-            if (valid_fb && (has_dirty || s->force_full_frame || !s->dirty_staging_valid)) {
+            if (valid_fb) {
                 int buf_w = buffer->width;
                 int buf_h = buffer->height;
                 int copy_w = (buf_w < w) ? buf_w : w;
                 int copy_h = (buf_h < h) ? buf_h : h;
                 
                 pthread_mutex_lock(&s->send_lock);
-                if (has_dirty && s->dirty_staging_valid && !s->force_full_frame) {
-                    /*
-                     * Partial copy: only rows that overlap damage rects.
-                     * Compute the union of all damage rect Y ranges to
-                     * find min/max rows, then copy that row span.
-                     */
-                    int min_y = copy_h, max_y = 0;
-                    for (int r = 0; r < nrects; r++) {
-                        int y0 = rects[r].y1;
-                        int y1 = rects[r].y2;
-                        if (y0 < 0) y0 = 0;
-                        if (y1 > copy_h) y1 = copy_h;
-                        if (y0 < min_y) min_y = y0;
-                        if (y1 > max_y) max_y = y1;
-                    }
-                    for (int y = min_y; y < max_y; y++) {
-                        memcpy(&fb[y * w],
-                               (uint8_t*)data_ptr + y * stride,
-                               copy_w * 4);
-                    }
-                } else {
-                    /* Full copy: force_full_frame or no damage info */
-                    for (int y = 0; y < copy_h; y++) {
-                        memcpy(&fb[y * w],
-                               (uint8_t*)data_ptr + y * stride,
-                               copy_w * 4);
-                    }
+                for (int y = 0; y < copy_h; y++) {
+                    memcpy(&fb[y * w],
+                           (uint8_t*)data_ptr + y * stride,
+                           copy_w * 4);
                 }
                 pthread_mutex_unlock(&s->send_lock);
             }

@@ -57,8 +57,10 @@
  *     1. output_frame() checks scene_dirty flag — if scene hasn't
  *        changed, skips rendering entirely (no build_state, no copy)
  *     2. When rendering occurs, extracts ostate.damage into dirty_staging
- *     3. Copies only damaged rows from wlroots buffer to framebuf
- *     4. send_frame() copies dirty_staging into dirty_tiles[buf]
+ *     3. Full-frame copy from wlroots buffer to framebuf (always full
+ *        because pointer swap recycles buffers with stale data)
+ *     4. send_frame() swaps framebuf pointer with send_buf, copies
+ *        dirty_staging into dirty_tiles[buf]
  *     5. Send thread trusts dirty_tiles as ground truth: undamaged tiles
  *        are skipped, damaged tiles are assumed changed (no tile_changed)
  *

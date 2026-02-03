@@ -37,8 +37,11 @@
  *        idle; instead we track content changes explicitly.
  *     5. Build scene output state via wlr_scene_output_build_state()
  *     6. Extract compositor damage into dirty tile staging bitmap
- *     7. Copy only damaged rows from rendered buffer to s->framebuf
- *        (full copy on force_full_frame or damage extraction failure)
+ *     7. Full-frame copy from rendered buffer to s->framebuf.
+ *        (Partial copy was removed: pointer swap between framebuf and
+ *        send_buf means the recycled buffer has stale data, so all
+ *        rows must be written.  The scene_dirty gate in step 4
+ *        ensures this only runs when content actually changed.)
  *     8. Commit output state and send frame done
  *     9. Trigger send_frame() when there is actual work
  *
@@ -49,9 +52,10 @@
  *   frames are skipped via the scene_dirty flag (step 4 above).
  *
  *   When rendering does occur, ostate.damage is still extracted into
- *   a per-tile bitmap (s->dirty_staging) and used to:
- *     - Copy only damaged rows from the wlroots buffer to framebuf
- *     - Tell the send thread which tiles to compress and transmit
+ *   a per-tile bitmap (s->dirty_staging) and used to tell the send
+ *   thread which tiles to compress and transmit.  The framebuf copy
+ *   is always full-frame (required because pointer swap between
+ *   framebuf and send_buf leaves the recycled buffer with stale data).
  *
  *   The send thread trusts the damage bitmap as ground truth: undamaged
  *   tiles are skipped without pixel comparison, damaged tiles are
