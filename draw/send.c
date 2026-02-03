@@ -325,22 +325,10 @@ void *send_thread_func(void *arg) {
     uint8_t *comp_buf = malloc(comp_buf_size);
     
     while (s->running) {
-        /*
-         * Wait for work.  send_frame() signals send_cond when a new
-         * frame is queued.  window_changed is set by the wctl thread;
-         * if it also signals send_cond the wake is instant, otherwise
-         * the 100ms timeout catches it.
-         */
+        /* Wait for work — woken by send_frame() or mouse thread (resize) */
         pthread_mutex_lock(&s->send_lock);
         while (s->pending_buf < 0 && !s->window_changed && s->running) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 100000000;  /* 100ms timeout for window_changed */
-            if (ts.tv_nsec >= 1000000000) {
-                ts.tv_sec += 1;
-                ts.tv_nsec -= 1000000000;
-            }
-            pthread_cond_timedwait(&s->send_cond, &s->send_lock, &ts);
+            pthread_cond_wait(&s->send_cond, &s->send_lock);
         }
         pthread_mutex_unlock(&s->send_lock);
         if (!s->running) break;
@@ -487,7 +475,7 @@ void *send_thread_func(void *arg) {
             compress_tiles_parallel(work, results, work_count);
         }
         
-        drain_throttle(2);
+        drain_throttle(32);
         
         /* Build and send batches */
         for (int i = 0; i < work_count; i++) {

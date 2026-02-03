@@ -19,7 +19,7 @@
  *
  *   The output_frame handler (internal) runs the compositor's render loop:
  *
- *     1. Check for pending resize from wctl thread (s->resize_pending)
+ *     1. Check for pending resize from mouse thread (s->resize_pending)
  *     2. If resize pending:
  *        a. Reallocate host buffers (framebuf, prev_framebuf, send_buf)
  *        b. Reallocate dirty tile bitmaps (dirty_tiles, dirty_staging)
@@ -33,7 +33,11 @@
  *     6. Extract compositor damage (ostate.damage) into dirty tile
  *        staging bitmap (s->dirty_staging) for the send thread
  *     7. Commit output state and send frame done
- *     8. Trigger send_frame() to transmit to Plan 9
+ *     8. Trigger send_frame() only when there is actual work:
+ *        damage rects found, force_full_frame set, or no damage
+ *        info available (fallback).  When the screen is idle and
+ *        damage tracking reports zero rects, send_frame() is
+ *        skipped entirely so the send thread stays asleep.
  *
  * Damage-Based Dirty Tile Tracking:
  *

@@ -25,6 +25,8 @@
  *       - Reads 9P Rwrite responses asynchronously
  *       - Allows pipelined writes without blocking
  *       - Handles error detection and recovery
+ *       - Signals done_cond after each completed response to wake
+ *         drain_throttle() and drain_pause() without polling
  *
  * Double Buffering:
  *
@@ -53,8 +55,10 @@
  *
  *   Flow:
  *     1. output_frame() extracts ostate.damage into dirty_staging
- *     2. send_frame() copies dirty_staging into dirty_tiles[buf]
- *     3. Send thread uses dirty_tiles[current_buf] to skip clean tiles
+ *     2. output_frame() skips send_frame() entirely when damage is
+ *        empty and force_full_frame is not set (idle screen)
+ *     3. send_frame() copies dirty_staging into dirty_tiles[buf]
+ *     4. Send thread uses dirty_tiles[current_buf] to skip clean tiles
  *
  *   Fallback: when no damage info is available, or after scroll
  *   detection modifies prev_framebuf, the send thread falls back to
@@ -73,10 +77,14 @@
  *     1. Send thread calls p9_write_send() (non-blocking)
  *     2. drain_notify() signals drain thread
  *     3. Drain thread reads Rwrite response asynchronously
- *     4. Send thread continues with next batch
+ *     4. Drain thread signals done_cond after decrementing pending
+ *     5. Send thread continues with next batch
  *
  *   The drain_throttle() function prevents unbounded pipelining
- *   by waiting when too many responses are pending.
+ *   by waiting on done_cond when too many responses are pending.
+ *   Similarly, drain_pause() waits on done_cond until all pending
+ *   responses are drained. Both use condvar waits rather than
+ *   polling, so they consume zero CPU while blocked.
  *
  * Frame Processing Pipeline:
  *
@@ -172,11 +180,23 @@
  *     - s->dirty_tiles[], s->dirty_valid[] (per-buffer bitmaps)
  *     - s->dirty_staging_valid (read and cleared by send_frame)
  *
+ *   s->send_cond is signaled by send_frame() (new frame) and by the
+ *   mouse thread on resize notification ('r' from /dev/mouse) to wake
+ *   the send thread immediately.
+ *
  *   s->dirty_staging is written only by the output thread and read
  *   only under s->send_lock in send_frame(), so no additional
  *   synchronization is needed for the staging buffer itself.
  *
- *   The drain thread uses atomic operations for its counters.
+ *   drain.lock protects drain.cond and drain.done_cond:
+ *     - drain.cond: signaled by drain_notify/drain_wake to wake the
+ *       drain thread when work is available
+ *     - drain.done_cond: broadcast by the drain thread after each
+ *       completed response; waited on by drain_throttle() and
+ *       drain_pause() to sleep until pending count drops
+ *
+ *   The drain thread uses atomic operations for its counters
+ *   (pending, errors, running, paused).
  */
 
 #ifndef SEND_H
@@ -255,6 +275,7 @@ int send_timer_callback(void *data);
  * Main loop behavior:
  *
  *   1. Wait for frame via pthread_cond_wait on s->send_cond
+ *      (signaled by send_frame and mouse thread on resize)
  *   2. Handle errors (draw_error, unknown_id_error, drain errors)
  *   3. Handle window changes (relookup, resize detection)
  *   4. Detect and apply scroll transformations
