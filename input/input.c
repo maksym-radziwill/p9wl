@@ -131,7 +131,7 @@ const struct key_map *keymap_lookup(uint32_t rune) {
 static struct key_map dynamic_result;
 
 const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune) {
-    if (km && km->loaded) {
+    if (km) {
         const struct kbmap_entry *entry = kbmap_lookup(km, (int)rune);
         if (entry) {
             dynamic_result.rune = entry->rune;
