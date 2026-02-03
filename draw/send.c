@@ -9,6 +9,8 @@
  * - Consolidated border drawing into loop
  * - Extracted drain_wake() helper
  * - Simplified tile bounds with tile_bounds()
+ * - Replaced full-frame memcpy in send_frame() with pointer swap
+ *   (requires framebuf and send_buf[] to be identically allocated)
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -193,8 +195,18 @@ void send_frame(struct server *s) {
         return;
     }
     
-    memcpy(s->send_buf[buf], s->framebuf, s->width * s->height * 4);
-    s->pending_buf = buf;
+    /*
+     * Swap the framebuffer pointer with the free send buffer instead of
+     * copying.  After the swap the send thread owns what was framebuf
+     * (the just-rendered frame) and the compositor gets a recycled
+     * buffer to render the next frame into.  All three buffers
+     * (framebuf, send_buf[0], send_buf[1]) must be allocated with the
+     * same size and alignment for this to be safe.
+     */
+    uint32_t *tmp     = s->send_buf[buf];
+    s->send_buf[buf]  = s->framebuf;
+    s->framebuf       = tmp;
+    s->pending_buf    = buf;
     if (s->force_full_frame) s->send_full = 1;
     pthread_cond_signal(&s->send_cond);
     pthread_mutex_unlock(&s->send_lock);
