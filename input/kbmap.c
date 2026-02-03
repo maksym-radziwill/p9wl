@@ -209,6 +209,7 @@ int kbmap_load(struct kbmap *km, struct p9conn *p9) {
 	}
 
 	free(data); 
+	km->loaded = 1; 
 	wlr_log(WLR_INFO, "kbmap: loaded %d mappings", km->count);
 	return 0;
 
@@ -220,11 +221,16 @@ fail:
 }
 
 const struct kbmap_entry *kbmap_lookup(struct kbmap *km, uint32_t rune) {
-	if (!km) return NULL;
+	if (!km || !km->loaded) return NULL;
 
-	for (int i = 0; i < km->count; i++)
-		if (km->entries[i].rune == rune)
+	for (int i = 0; i < km->count; i++){
+		if (km->entries[i].rune == rune){
+		    wlr_log(WLR_DEBUG, "kbmap_lookup: rune=%d -> keycode=%d shift=%d ctrl=%d",
+                	rune, km->entries[i].keycode, km->entries[i].shift, km->entries[i].ctrl);
 			return &km->entries[i];
+		}
+		
+	}
 	return NULL;
 }
 

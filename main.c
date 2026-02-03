@@ -119,7 +119,7 @@ static void print_usage(const char *prog) {
 static int parse_args(int argc, char *argv[], const char **host, int *port,
                       const char **uname, float *scale,
                       enum wlr_log_importance *log_level,
-                      struct tls_config *tls_cfg, int *keymap, 
+                      struct tls_config *tls_cfg,  
                       char ***exec_argv, int *exec_argc) {
     static char host_buf[256];
 
@@ -131,7 +131,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     memset(tls_cfg, 0, sizeof(*tls_cfg));
     *exec_argv = NULL;
     *exec_argc = 0;
-    *keymap = 0;
+     
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
@@ -142,8 +142,6 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
             tls_cfg->insecure = 1;
         } else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) {
             *uname = argv[++i];
-        } else if (strcmp(argv[i], "-K") == 0 && i + 1 < argc) {
-            *keymap = 1; 
         } else if (strcmp(argv[i], "-S") == 0 && i + 1 < argc) {
             *scale = strtof(argv[++i], NULL);
             if (*scale < 1.0f) *scale = 1.0f;
@@ -391,11 +389,10 @@ int main(int argc, char *argv[]) {
     enum wlr_log_importance log_level = WLR_ERROR;
     struct tls_config tls_cfg = {0};
     char **exec_argv = NULL;
-    int exec_argc = 0;
-    int keymap = 0;
+    int exec_argc = 0; 
 
     /* Parse arguments */
-    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg, &keymap, 
+    if (parse_args(argc, argv, &host, &port, &uname, &scale, &log_level, &tls_cfg, 
                    &exec_argv, &exec_argc) < 0) {
         print_usage(argv[0]);
         return 1;
@@ -485,24 +482,7 @@ int main(int argc, char *argv[]) {
         if (using_tls) tls_cleanup();
         return 1;
     }
-
-    /*
-     * Load dynamic keyboard map from /dev/kbmap.
-     *
-     * This reads the 9front keyboard layout and builds a rune→keycode
-     * mapping. Without this, keymap_lookup_dynamic() always falls back
-     * to the static US-layout keymap table.
-     *
-     * We use p9_draw since it's already connected to /dev. If this fails,
-     * we fall back gracefully to the static keymap - non-fatal.
-     */
-
-    if (keymap)
-        if (kbmap_load(&s.kbmap, &s.p9_draw) < 0) {        
-            wlr_log(WLR_INFO, "Dynamic kbmap not available, using static keymap");
-        }
-
-
+    
     /* Set dimensions from draw device */
     s.width = s.draw.width;
     s.height = s.draw.height;

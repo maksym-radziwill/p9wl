@@ -77,6 +77,7 @@ struct kbmap_entry {
 struct kbmap {
     struct kbmap_entry entries[KBMAP_MAX_ENTRIES];
     int count;          /* Number of valid entries */
+    int loaded;         /* 1 if used /dev/kbmap */ 
 };
 
 /* ============== Functions ============== */
