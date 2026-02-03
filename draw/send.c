@@ -45,7 +45,8 @@ struct drain_ctx {
     atomic_int paused;
     pthread_t thread;
     pthread_mutex_t lock;
-    pthread_cond_t cond;
+    pthread_cond_t cond;        /* Wakes drain thread when work available */
+    pthread_cond_t done_cond;   /* Signaled when pending decreases (for throttle/pause) */
     uint8_t *recv_buf;
 };
 
@@ -91,10 +92,7 @@ static void *drain_thread_func(void *arg) {
     while (atomic_load(&drain.running)) {
         pthread_mutex_lock(&drain.lock);
         while (atomic_load(&drain.pending) == 0 && atomic_load(&drain.running)) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 10000000;  /* 10ms timeout */
-            pthread_cond_timedwait(&drain.cond, &drain.lock, &ts);
+            pthread_cond_wait(&drain.cond, &drain.lock);
         }
         pthread_mutex_unlock(&drain.lock);
         
@@ -104,6 +102,10 @@ static void *drain_thread_func(void *arg) {
         if (atomic_load(&drain.pending) > 0) {
             if (drain_recv_one() < 0) atomic_fetch_add(&drain.errors, 1);
             atomic_fetch_sub(&drain.pending, 1);
+            /* Wake drain_throttle / drain_pause */
+            pthread_mutex_lock(&drain.lock);
+            pthread_cond_broadcast(&drain.done_cond);
+            pthread_mutex_unlock(&drain.lock);
         }
     }
     
@@ -119,6 +121,7 @@ static int drain_start(struct p9conn *p9) {
     drain.p9 = p9;
     pthread_mutex_init(&drain.lock, NULL);
     pthread_cond_init(&drain.cond, NULL);
+    pthread_cond_init(&drain.done_cond, NULL);
     
     drain.recv_buf = malloc(p9->msize);
     if (!drain.recv_buf) return -1;
@@ -144,15 +147,17 @@ static void drain_stop(void) {
     drain.recv_buf = NULL;
     pthread_mutex_destroy(&drain.lock);
     pthread_cond_destroy(&drain.cond);
+    pthread_cond_destroy(&drain.done_cond);
 }
 
 static void drain_pause(void) {
     atomic_store(&drain.paused, 1);
     drain_wake();
+    pthread_mutex_lock(&drain.lock);
     while (atomic_load(&drain.pending) > 0) {
-        struct timespec ts = {0, 1000000};
-        nanosleep(&ts, NULL);
+        pthread_cond_wait(&drain.done_cond, &drain.lock);
     }
+    pthread_mutex_unlock(&drain.lock);
 }
 
 static void drain_resume(void) {
@@ -166,10 +171,11 @@ static void drain_notify(void) {
 }
 
 static void drain_throttle(int max_pending) {
+    pthread_mutex_lock(&drain.lock);
     while (atomic_load(&drain.pending) > max_pending) {
-        struct timespec ts = {0, 1000000};
-        nanosleep(&ts, NULL);
+        pthread_cond_wait(&drain.done_cond, &drain.lock);
     }
+    pthread_mutex_unlock(&drain.lock);
 }
 
 /* ============== Frame Sending ============== */
@@ -319,11 +325,24 @@ void *send_thread_func(void *arg) {
     uint8_t *comp_buf = malloc(comp_buf_size);
     
     while (s->running) {
-        /* Wait for work */
+        /*
+         * Wait for work.  send_frame() signals send_cond when a new
+         * frame is queued.  window_changed is set by the wctl thread;
+         * if it also signals send_cond the wake is instant, otherwise
+         * the 100ms timeout catches it.
+         */
+        pthread_mutex_lock(&s->send_lock);
         while (s->pending_buf < 0 && !s->window_changed && s->running) {
-            struct timespec ts = {0, 100000};
-            nanosleep(&ts, NULL);
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 100000000;  /* 100ms timeout for window_changed */
+            if (ts.tv_nsec >= 1000000000) {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1000000000;
+            }
+            pthread_cond_timedwait(&s->send_cond, &s->send_lock, &ts);
         }
+        pthread_mutex_unlock(&s->send_lock);
         if (!s->running) break;
 
         pthread_mutex_lock(&s->send_lock);
