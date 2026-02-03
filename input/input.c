@@ -20,7 +20,6 @@
 #include <wlr/types/wlr_keyboard.h>
 
 #include "input.h"
-#include "kbmap.h"
 #include "plan9_keys.h"
 #include "../p9/p9.h"
 
@@ -126,13 +125,6 @@ const struct key_map *keymap_lookup(uint32_t rune) {
     }
     wlr_log(WLR_ERROR, "keymap_lookup: NO ENTRY for rune=0x%04x (%d)", rune, rune);
     return NULL;
-}
-
-static struct key_map dynamic_result;
-
-const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune) {
-
-    return keymap_lookup(rune);
 }
 
 int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune) {

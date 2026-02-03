@@ -57,8 +57,6 @@ static void print_usage(const char *prog) {
     fprintf(stderr, "  -f <fp>        SHA256 fingerprint of server certificate (hex)\n");
     fprintf(stderr, "  -k             Insecure mode: skip certificate verification (DANGEROUS)\n");
     fprintf(stderr, "  -u <user>      9P username (default: $P9USER, $USER, or 'glenda')\n");
-    fprintf(stderr, "\nInput options:\n");
-    fprintf(stderr, "  -K             Load the keymap from /dev/kbmap\n");
     fprintf(stderr, "\nDisplay options:\n");
     fprintf(stderr, "  -S <scale>     Output scale factor for HiDPI displays (1.0-4.0, default: 1.0)\n");
     fprintf(stderr, "                 Supports fractional values like 1.5, 1.25, 2.0, etc.\n");

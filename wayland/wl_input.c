@@ -75,7 +75,7 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
     }
     
     /* Look up key mapping */
-    const struct key_map *km = keymap_lookup_dynamic(&s->kbmap, rune);
+    const struct key_map *km = keymap_lookup(rune);
     if (!km) {
         if (rune >= 0x80)
             wlr_log(WLR_ERROR, "No keymap entry for rune=0x%04x", rune);
