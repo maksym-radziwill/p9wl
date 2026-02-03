@@ -35,7 +35,36 @@
  *     s->active_buf:  Buffer currently being transmitted
  *
  *   send_frame() finds a free buffer (neither pending nor active),
- *   copies the framebuffer, and signals the send thread.
+ *   swaps the framebuffer pointer with the free send buffer (zero-copy),
+ *   copies the dirty tile bitmap from staging, and signals the send
+ *   thread. All three buffers (framebuf, send_buf[0], send_buf[1])
+ *   must be allocated with the same size and alignment since their
+ *   pointers are swapped.
+ *
+ * Damage-Based Dirty Tile Tracking:
+ *
+ *   To avoid expensive full-frame pixel comparisons, the output thread
+ *   extracts compositor damage into a per-tile bitmap:
+ *
+ *     s->dirty_staging:       Written by output thread (no lock needed)
+ *     s->dirty_staging_valid: Set when staging has valid damage data
+ *     s->dirty_tiles[N]:      Per-send-buffer bitmap (copied under lock)
+ *     s->dirty_valid[N]:      Whether bitmap is valid for buffer N
+ *
+ *   Flow:
+ *     1. output_frame() extracts ostate.damage into dirty_staging
+ *     2. send_frame() copies dirty_staging into dirty_tiles[buf]
+ *     3. Send thread uses dirty_tiles[current_buf] to skip clean tiles
+ *
+ *   Fallback: when no damage info is available, or after scroll
+ *   detection modifies prev_framebuf, the send thread falls back to
+ *   tile_changed() pixel comparison for all tiles.
+ *
+ *   Important: damage is a conservative over-approximation — it means
+ *   "the compositor re-rendered these pixels", not "these pixels
+ *   changed."  The send thread therefore still calls tile_changed()
+ *   on damaged tiles to find the actual minimal set.  The saving comes
+ *   from skipping undamaged tiles entirely (no memory read at all).
  *
  * Pipelined I/O:
  *
@@ -69,7 +98,11 @@
  *        - Generate scroll 'd' commands
  *
  *     4. Tile Change Detection:
- *        - Compare send_buf against prev_framebuf
+ *        - If dirty tile bitmap is available and no scroll occurred,
+ *          skip tiles outside the damage region entirely, then verify
+ *          damaged tiles with tile_changed() (damage is conservative)
+ *        - Otherwise fall back to comparing send_buf vs prev_framebuf
+ *          for every tile
  *        - Build list of changed tiles (struct tile_work)
  *        - Skip tiles in scroll-exposed regions for delta encoding
  *
@@ -135,6 +168,13 @@
  *     - s->pending_buf, s->active_buf
  *     - s->send_full, s->force_full_frame
  *     - s->resize_pending
+ *     - s->framebuf, s->send_buf[] pointer swaps
+ *     - s->dirty_tiles[], s->dirty_valid[] (per-buffer bitmaps)
+ *     - s->dirty_staging_valid (read and cleared by send_frame)
+ *
+ *   s->dirty_staging is written only by the output thread and read
+ *   only under s->send_lock in send_frame(), so no additional
+ *   synchronization is needed for the staging buffer itself.
  *
  *   The drain thread uses atomic operations for its counters.
  */
@@ -157,9 +197,12 @@ struct server;
 /*
  * Queue a frame for sending.
  *
- * Copies the current framebuffer (s->framebuf) to a send buffer and
- * signals the send thread. Uses double-buffering to avoid blocking
- * the compositor while the previous frame is being transmitted.
+ * Swaps the current framebuffer pointer (s->framebuf) with a free send
+ * buffer and signals the send thread. This is a zero-copy handoff: the
+ * send thread gets the just-rendered frame and the compositor gets a
+ * recycled buffer for the next frame. Also copies the dirty tile bitmap
+ * from staging (s->dirty_staging) into the per-buffer slot so the send
+ * thread knows which tiles changed without pixel scanning.
  *
  * Buffer selection:
  *   - Finds a buffer that is neither pending nor active
@@ -167,8 +210,9 @@ struct server;
  *
  * Flags copied:
  *   - If s->force_full_frame is set, s->send_full is set
+ *   - If s->dirty_staging_valid is set, dirty_tiles[buf] is populated
  *
- * This function returns immediately after copying; actual transmission
+ * This function returns immediately after the swap; actual transmission
  * happens asynchronously in the send thread.
  *
  * Thread-safe: acquires s->send_lock internally.
@@ -177,7 +221,8 @@ struct server;
  *
  * Preconditions:
  *   - s->framebuf must be valid
- *   - s->width * s->height * 4 bytes will be copied
+ *   - framebuf and send_buf[] must be identically allocated (same size,
+ *     same alignment) since their pointers are swapped
  */
 void send_frame(struct server *s);
 

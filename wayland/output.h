@@ -22,15 +22,33 @@
  *     1. Check for pending resize from wctl thread (s->resize_pending)
  *     2. If resize pending:
  *        a. Reallocate host buffers (framebuf, prev_framebuf, send_buf)
- *        b. Update s->width, s->height, s->tiles_x, s->tiles_y
- *        c. Reallocate Plan 9 images via reallocate_draw_images()
- *        d. Resize wlroots output and reconfigure all toplevels
- *        e. Set force_full_frame flag
+ *        b. Reallocate dirty tile bitmaps (dirty_tiles, dirty_staging)
+ *        c. Update s->width, s->height, s->tiles_x, s->tiles_y
+ *        d. Reallocate Plan 9 images via reallocate_draw_images()
+ *        e. Resize wlroots output and reconfigure all toplevels
+ *        f. Set force_full_frame flag
  *     3. Throttle frames based on FRAME_INTERVAL_MS if defined
  *     4. Build scene output state via wlr_scene_output_build_state()
  *     5. Copy rendered pixels from buffer to s->framebuf
- *     6. Commit output state and send frame done
- *     7. Trigger send_frame() to transmit to Plan 9
+ *     6. Extract compositor damage (ostate.damage) into dirty tile
+ *        staging bitmap (s->dirty_staging) for the send thread
+ *     7. Commit output state and send frame done
+ *     8. Trigger send_frame() to transmit to Plan 9
+ *
+ * Damage-Based Dirty Tile Tracking:
+ *
+ *   wlr_scene_output_build_state() already tracks which pixels changed
+ *   via ostate.damage (a pixman region). Rather than having the send
+ *   thread do an expensive full-frame pixel comparison via tile_changed(),
+ *   the output_frame handler extracts the damage rectangles into a
+ *   per-tile bitmap (s->dirty_staging). send_frame() then copies this
+ *   bitmap into the per-send-buffer slot (s->dirty_tiles[buf]) under
+ *   the send lock, so the send thread can skip clean tiles without
+ *   touching their memory at all.
+ *
+ *   Fallback: if no damage info is available (WLR_OUTPUT_STATE_DAMAGE
+ *   not set in ostate.committed), dirty_staging_valid remains 0 and
+ *   the send thread falls back to pixel comparison.
  *
  * Image Reallocation:
  *

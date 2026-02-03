@@ -398,10 +398,14 @@ void *send_thread_func(void *arg) {
         
         /*
          * Use damage-based dirty map when available.  This lets us skip
-         * tile_changed() entirely for clean tiles — avoiding two
-         * full-frame memory reads per frame.  Falls back to pixel
-         * comparison when scroll happened (prev_framebuf was modified)
-         * or when no damage info is available.
+         * tiles outside the compositor's damage region entirely —
+         * avoiding memory reads for the vast majority of tiles on a
+         * typical frame.  Within the damaged region we still call
+         * tile_changed() because damage is a conservative over-
+         * approximation (a surface repaint may produce identical pixels).
+         * Falls back to scanning all tiles when scroll happened
+         * (prev_framebuf was modified) or when no damage info is
+         * available.
          */
         uint8_t *dirty_map = NULL;
         if (!do_full && scrolled_regions == 0 &&
@@ -419,10 +423,13 @@ void *send_thread_func(void *arg) {
                 
                 int changed;
                 if (dirty_map) {
-                    /* Fast path: use compositor damage bitmap */
-                    changed = dirty_map[ty * s->tiles_x + tx];
+                    /* Fast path: skip undamaged tiles, verify damaged ones */
+                    if (!dirty_map[ty * s->tiles_x + tx])
+                        continue;
+                    changed = tile_changed(send_buf, s->prev_framebuf,
+                                           s->width, x1, y1, w, h);
                 } else {
-                    /* Fallback: pixel-by-pixel comparison */
+                    /* Fallback: check every tile */
                     changed = do_full || tile_changed(send_buf, s->prev_framebuf,
                                                        s->width, x1, y1, w, h);
                 }
