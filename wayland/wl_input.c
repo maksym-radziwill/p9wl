@@ -24,6 +24,7 @@
 
 /* ============== Button Mapping Tables ============== */
 
+/* Mouse button mapping: bitmask -> Linux button code */
 static const struct {
     int mask;
     uint32_t button;
@@ -34,15 +35,16 @@ static const struct {
 };
 #define NUM_BUTTONS (sizeof(button_map) / sizeof(button_map[0]))
 
+/* Scroll axis mapping: bitmask -> axis, direction */
 static const struct {
     int mask;
     enum wl_pointer_axis axis;
     double value;
 } scroll_map[] = {
-    { 8,  WL_POINTER_AXIS_VERTICAL_SCROLL,   -4.0 },
-    { 16, WL_POINTER_AXIS_VERTICAL_SCROLL,    4.0 },
-    { 32, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -4.0 },
-    { 64, WL_POINTER_AXIS_HORIZONTAL_SCROLL,  4.0 },
+    { 8,  WL_POINTER_AXIS_VERTICAL_SCROLL,   -4.0 },  /* Scroll up */
+    { 16, WL_POINTER_AXIS_VERTICAL_SCROLL,    4.0 },  /* Scroll down */
+    { 32, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -4.0 },  /* Scroll left */
+    { 64, WL_POINTER_AXIS_HORIZONTAL_SCROLL,  4.0 },  /* Scroll right */
 };
 #define NUM_SCROLLS (sizeof(scroll_map) / sizeof(scroll_map[0]))
 
@@ -51,11 +53,13 @@ static const struct {
 void handle_key(struct server *s, uint32_t rune, int pressed) {
     struct focus_manager *fm = &s->focus;
     
+    /* Handle Escape for popup dismissal */
     if (rune == 0x1B && pressed) {
         if (focus_popup_dismiss_topmost_grabbed(fm))
             return;
     }
     
+    /* Handle modifier keys - use keymapmod() as single source of truth */
     uint32_t mod = keymapmod(rune);
     if (mod) {
         uint32_t current = focus_keyboard_get_modifiers(fm);
@@ -63,12 +67,14 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
         return;
     }
     
+    /* Check keyboard focus */
     struct wlr_surface *focused = s->seat->keyboard_state.focused_surface;
     if (!focused) {
         wlr_log(WLR_DEBUG, "No keyboard focus for rune=0x%04x", rune);
         return;
     }
     
+    /* Look up key mapping */
     const struct key_map *km = keymap_lookup(rune);
     if (!km) {
         if (rune >= 0x80)
@@ -82,6 +88,7 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
     uint32_t t = now_ms();
     wlr_seat_set_keyboard(s->seat, &s->virtual_kb);
     
+    /* Handle temporary modifiers from keymap */
     uint32_t key_mods = 0;
     if (km->shift) key_mods |= WLR_MODIFIER_SHIFT;
     if (km->ctrl) key_mods |= WLR_MODIFIER_CTRL;
@@ -103,6 +110,10 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
 
 /* ============== Mouse Handling ============== */
 
+/*
+ * Send button events for all changed buttons.
+ * Uses table-driven approach for cleaner code.
+ */
 static void send_button_events(struct server *s, uint32_t t, 
                                int buttons, int changed) {
     struct wlr_surface *surface = s->seat->pointer_state.focused_surface;
@@ -118,6 +129,10 @@ static void send_button_events(struct server *s, uint32_t t,
     }
 }
 
+/*
+ * Send scroll events for all active scroll buttons.
+ * Uses table-driven approach for cleaner code.
+ */
 static void send_scroll_events(struct server *s, uint32_t t,
                                int buttons, int changed) {
     struct focus_manager *fm = &s->focus;
@@ -130,11 +145,14 @@ static void send_scroll_events(struct server *s, uint32_t t,
     struct wlr_surface *surface = focus_surface_at_cursor(fm, &sx, &sy);
     if (!surface || !surface->mapped) return;
     
+    /* Ensure focus is on scroll target */
     struct wlr_surface *current = s->seat->pointer_state.focused_surface;
-    if (surface != current)
-        focus_pointer_set(fm, surface, sx, sy, false);
+    if (surface != current) {
+        focus_pointer_set(fm, surface, sx, sy, FOCUS_REASON_POINTER_MOTION);
+    }
     focus_pointer_motion(fm, sx, sy, t);
     
+    /* Send scroll events */
     for (size_t i = 0; i < NUM_SCROLLS; i++) {
         if ((changed & scroll_map[i].mask) && (buttons & scroll_map[i].mask)) {
             wlr_seat_pointer_notify_axis(s->seat, t, scroll_map[i].axis,
@@ -149,18 +167,22 @@ static void send_scroll_events(struct server *s, uint32_t t,
 void handle_mouse(struct server *s, int mx, int my, int buttons) {
     struct focus_manager *fm = &s->focus;
     
+    /* Translate to window-local coordinates */
     int local_x = mx - s->draw.win_minx;
     int local_y = my - s->draw.win_miny;
     
+    /* Clamp to window bounds */
     if (local_x < 0) local_x = 0;
     if (local_y < 0) local_y = 0;
     if (local_x >= s->width) local_x = s->width - 1;
     if (local_y >= s->height) local_y = s->height - 1;
     
+    /* Update cursor */
     wlr_cursor_warp_absolute(s->cursor, NULL,
                              (double)local_x / s->width,
                              (double)local_y / s->height);
     
+    /* Find surface under cursor */
     double sx, sy;
     struct wlr_surface *surface = focus_surface_at_cursor(fm, &sx, &sy);
     
@@ -169,9 +191,11 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     int changed = buttons ^ last_buttons;
     bool releasing_all = (last_buttons & 7) && !(buttons & 7);
     
+    /* Handle button release for deferred focus */
     if (releasing_all)
         focus_pointer_button_released(fm);
     
+    /* Handle click for focus changes */
     if ((changed & 1) && (buttons & 1) && surface) {
         surface = focus_handle_click(fm, surface, sx, sy, BTN_LEFT);
         if (surface) {
@@ -181,17 +205,19 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
         }
     }
     
+    /* Handle pointer focus and motion */
     if (surface) {
         struct wlr_surface *focused = s->seat->pointer_state.focused_surface;
         if (surface != focused)
-            focus_pointer_set(fm, surface, sx, sy, false);
+            focus_pointer_set(fm, surface, sx, sy, FOCUS_REASON_POINTER_MOTION);
         focus_pointer_motion(fm, sx, sy, t);
     } else {
         if ((changed & 1) && (buttons & 1) && !focus_popup_stack_empty(fm))
             focus_popup_dismiss_all(fm);
-        focus_pointer_set(fm, NULL, 0, 0, true);
+        focus_pointer_set(fm, NULL, 0, 0, FOCUS_REASON_EXPLICIT);
     }
     
+    /* Button and scroll events */
     send_button_events(s, t, buttons, changed);
     send_scroll_events(s, t, buttons, changed);
     
@@ -208,8 +234,10 @@ int handle_input_events(int fd, uint32_t mask, void *data) {
     
     (void)mask;
     
+    /* Drain pipe */
     while (read(fd, buf, sizeof(buf)) > 0);
     
+    /* Process all queued events */
     while (input_queue_pop(&s->input_queue, &ev)) {
         switch (ev.type) {
         case INPUT_MOUSE:
