@@ -45,6 +45,8 @@
  *     align_dimension()     - Round down to tile boundary with minimum
  *     center_in_window()    - Compute centered position
  *     parse_ctl_geometry()  - Parse ctl file and compute all values
+ *     resize_to_aligned()   - Resize rio window via /dev/wctl to match
+ *                             aligned dimensions exactly
  */
 
 #ifndef P9WL_DRAW_H
@@ -62,7 +64,10 @@
  *   4. Opens /dev/winname if available (rio window manager)
  *   5. Looks up window by name using 'n' command
  *   6. Reads actual window geometry from ctl
- *   7. Allocates required images:
+ *   7. Resizes window via /dev/wctl to aligned dimensions
+ *      (eliminates centering offset; falls back to centering
+ *      if resize is not supported)
+ *   8. Allocates required images:
  *      - Framebuffer image (XRGB32)
  *      - Opaque mask (1x1 white, replicated)
  *      - Border color (1x1 gray, replicated)
@@ -86,7 +91,9 @@ int init_draw(struct server *s);
  *   2. Frees old window reference via 'f' command
  *   3. Re-lookups window by name via 'n' command
  *   4. Re-reads ctl for new geometry
- *   5. Updates draw state with new position/dimensions
+ *   5. Resizes window via /dev/wctl to aligned dimensions
+ *   6. Re-reads ctl for post-resize geometry
+ *   7. Updates draw state with new position/dimensions
  *
  * If the window size changed:
  *   - Sets s->resize_pending = 1

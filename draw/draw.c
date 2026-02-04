@@ -26,6 +26,7 @@
 
 #define TILE_ALIGN_DOWN(x) (((x) / TILE_SIZE) * TILE_SIZE)
 #define MIN_ALIGNED_DIM (TILE_SIZE * 4)
+#define RIO_BORDER 4  /* rio window border width in pixels */
 
 /* ============== Dimension Helpers ============== */
 
@@ -100,6 +101,44 @@ static int parse_ctl_geometry(const uint8_t *ctlbuf, int n,
     return 0;
 }
 
+/*
+ * Resize the rio window via /dev/wctl to fit aligned dimensions plus border.
+ * The window rect is expanded by RIO_BORDER on each side so that rio's
+ * border remains visible around the framebuffer content.
+ *
+ * After resize, parse_ctl_geometry's centering logic naturally places
+ * win_minx/win_miny at (rminx + RIO_BORDER, rminy + RIO_BORDER) since
+ * 2*RIO_BORDER < TILE_SIZE, so the excess pixels become the border margin.
+ *
+ * Returns 0 on success, -1 on failure (window may not support resize).
+ */
+static int resize_to_aligned(struct p9conn *p9, int minx, int miny,
+                              int aligned_width, int aligned_height) {
+    uint32_t wctl_fid = p9->next_fid++;
+    const char *wnames[1] = { "wctl" };
+
+    if (p9_walk(p9, p9->root_fid, wctl_fid, 1, wnames) < 0)
+        return -1;
+    if (p9_open(p9, wctl_fid, OWRITE, NULL) < 0)
+        return -1;
+
+    char cmd[128];
+    int maxx = minx + aligned_width + 2 * RIO_BORDER;
+    int maxy = miny + aligned_height + 2 * RIO_BORDER;
+    int len = snprintf(cmd, sizeof(cmd), "resize -r %d %d %d %d",
+                       minx, miny, maxx, maxy);
+
+    wlr_log(WLR_INFO, "Resizing window to aligned rect with border: (%d,%d)-(%d,%d) [content %dx%d + %dpx border]",
+            minx, miny, maxx, maxy, aligned_width, aligned_height, RIO_BORDER);
+
+    if (p9_write(p9, wctl_fid, 0, (uint8_t*)cmd, len) < 0) {
+        wlr_log(WLR_ERROR, "resize_to_aligned: wctl write failed");
+        return -1;
+    }
+
+    return 0;
+}
+
 /* ============== Window Management ============== */
 
 int relookup_window(struct server *s) {
@@ -159,6 +198,31 @@ int relookup_window(struct server *s) {
                            &rminx, &rminy, &rmaxx, &rmaxy) < 0) {
         wlr_log(WLR_ERROR, "relookup_window: invalid geometry");
         return -1;
+    }
+    
+    /* Resize window to aligned dimensions if needed */
+    {
+        int actual_width = rmaxx - rminx;
+        int actual_height = rmaxy - rminy;
+        int expected_with_border = new_width + 2 * RIO_BORDER;
+        int expected_h_border = new_height + 2 * RIO_BORDER;
+        /* Only resize if the window isn't already sized for aligned+border */
+        if (actual_width != expected_with_border || actual_height != expected_h_border) {
+            if (resize_to_aligned(p9, rminx, rminy,
+                                  new_width, new_height) == 0) {
+                wlr_log(WLR_INFO, "relookup: resized window from %dx%d to %dx%d+border",
+                        actual_width, actual_height, new_width, new_height);
+                
+                /* Re-read ctl for post-resize geometry */
+                int off2 = flush_cmd(cmd);
+                p9_write(p9, draw->drawdata_fid, 0, cmd, off2);
+                
+                n = p9_read(p9, draw->drawctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);
+                parse_ctl_geometry(ctlbuf, n, &new_width, &new_height,
+                                   &centered_minx, &centered_miny,
+                                   &rminx, &rminy, &rmaxx, &rmaxy);
+            }
+        }
     }
     
     draw->win_minx = centered_minx;
@@ -331,6 +395,36 @@ int init_draw(struct server *s) {
             if (parse_ctl_geometry(ctlbuf, n, &new_width, &new_height,
                                    &centered_minx, &centered_miny,
                                    &act_minx, &act_miny, &act_maxx, &act_maxy) == 0) {
+                int actual_width = act_maxx - act_minx;
+                int actual_height = act_maxy - act_miny;
+                
+                /* Resize window to aligned dimensions if needed */
+                int expected_with_border = new_width + 2 * RIO_BORDER;
+                int expected_h_border = new_height + 2 * RIO_BORDER;
+                if (actual_width != expected_with_border || actual_height != expected_h_border) {
+                    if (resize_to_aligned(p9, act_minx, act_miny,
+                                          new_width, new_height) == 0) {
+                        wlr_log(WLR_INFO, "Resized window from %dx%d to %dx%d",
+                                actual_width, actual_height, new_width, new_height);
+                        
+                        /* Re-read ctl for post-resize geometry */
+                        off = flush_cmd(cmd);
+                        p9_write(p9, draw->drawdata_fid, 0, cmd, off);
+                        
+                        n = p9_read(p9, draw->drawctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);
+                        if (parse_ctl_geometry(ctlbuf, n, &new_width, &new_height,
+                                               &centered_minx, &centered_miny,
+                                               &act_minx, &act_miny,
+                                               &act_maxx, &act_maxy) == 0) {
+                            wlr_log(WLR_INFO, "Post-resize rect: (%d,%d)-(%d,%d) -> %dx%d",
+                                    act_minx, act_miny, act_maxx, act_maxy,
+                                    new_width, new_height);
+                        }
+                    } else {
+                        wlr_log(WLR_INFO, "Window resize not supported, using centered alignment");
+                    }
+                }
+                
                 draw->width = new_width;
                 draw->height = new_height;
                 draw->win_minx = centered_minx;
