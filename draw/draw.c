@@ -253,7 +253,7 @@ int init_draw(struct server *s) {
     
     draw->width = align_dimension(actual_width);
     draw->height = align_dimension(actual_height);
-    
+
     wlr_log(WLR_INFO, "Screen dimensions: %dx%d (aligned to %dx%d)",
             actual_width, actual_height, draw->width, draw->height);
     
@@ -397,6 +397,6 @@ int init_draw(struct server *s) {
             draw->delta_id, draw->width, draw->height);
     
     draw->xor_enabled = 0;
-    
+
     return 0;
 }

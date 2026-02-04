@@ -584,7 +584,7 @@ void *send_thread_func(void *arg) {
                            0, 0);
             
             /* Draw borders */
-            off += write_borders(batch + off, draw);
+            // off += write_borders(batch + off, draw);
             
             /* Flush */
             off += cmd_flush(batch + off);
