@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <math.h>
 #include <pthread.h>
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_output.h>
@@ -19,6 +20,7 @@
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_compositor.h>
 #include <wlr/util/log.h>
 
 #include "output.h"
@@ -31,6 +33,71 @@ static void output_destroy(struct wl_listener *listener, void *data) {
     (void)data;
     wl_list_remove(&s->output_frame.link);
     wl_list_remove(&s->output_destroy.link);
+}
+
+/* ============== Surface-Level Dirty Tile Tracking ============== */
+
+/*
+ * Mark tiles dirty based on a surface's commit damage.
+ *
+ * Reads surface->current.surface_damage (surface-local logical coords),
+ * transforms to physical pixel coords using s->scale + offset, and sets
+ * the corresponding bits in s->dirty_staging.
+ *
+ * This replaces extraction from wlr_output_state.damage which the
+ * headless backend always fills with full-screen damage.
+ *
+ * NOTE: If your wlroots version uses a different field name for
+ * surface damage (e.g. surface->current.damage.surface), adjust the
+ * pixman_region32_rectangles() call below accordingly.
+ */
+void mark_surface_dirty_tiles(struct server *s, struct wlr_surface *surface,
+                               double offset_x, double offset_y) {
+    if (!s->dirty_staging) {
+        /* Lazy allocation on first use */
+        if (s->tiles_x > 0 && s->tiles_y > 0)
+            s->dirty_staging = calloc(1, s->tiles_x * s->tiles_y);
+        if (!s->dirty_staging)
+            return;
+    }
+    if (s->tiles_x <= 0 || s->tiles_y <= 0)
+        return;
+
+    int nrects = 0;
+    pixman_box32_t *rects = pixman_region32_rectangles(
+        &surface->current.surface_damage, &nrects);
+
+    if (nrects <= 0)
+        return;
+
+    double scale = s->scale;
+    int tiles_x = s->tiles_x;
+    int tiles_y = s->tiles_y;
+
+    for (int r = 0; r < nrects; r++) {
+        /* Transform from surface-local logical to physical pixel coords */
+        int px1 = (int)((rects[r].x1 + offset_x) * scale);
+        int py1 = (int)((rects[r].y1 + offset_y) * scale);
+        int px2 = (int)ceil((rects[r].x2 + offset_x) * scale);
+        int py2 = (int)ceil((rects[r].y2 + offset_y) * scale);
+
+        /* Map to tile grid */
+        int tx0 = px1 / TILE_SIZE;
+        int ty0 = py1 / TILE_SIZE;
+        int tx1 = (px2 + TILE_SIZE - 1) / TILE_SIZE;
+        int ty1 = (py2 + TILE_SIZE - 1) / TILE_SIZE;
+
+        if (tx0 < 0) tx0 = 0;
+        if (ty0 < 0) ty0 = 0;
+        if (tx1 > tiles_x) tx1 = tiles_x;
+        if (ty1 > tiles_y) ty1 = tiles_y;
+
+        for (int ty = ty0; ty < ty1; ty++)
+            for (int tx = tx0; tx < tx1; tx++)
+                s->dirty_staging[ty * tiles_x + tx] = 1;
+    }
+
+    s->dirty_staging_valid = 1;
 }
 
 /*
@@ -233,8 +300,13 @@ static void output_frame(struct wl_listener *listener, void *data) {
         return;
     }
     
-    s->dirty_staging_valid = 0;  /* Reset; set below if damage extracted */
-    int has_dirty = 0;           /* Set if any damage rects found */
+    /*
+     * dirty_staging is populated by commit handlers (toplevel_commit,
+     * subsurface_commit) via mark_surface_dirty_tiles() between frames.
+     * We do NOT extract damage from ostate.damage here because the
+     * headless backend always reports full-screen damage, which defeats
+     * the purpose of per-tile tracking.
+     */
     
     struct wlr_buffer *buffer = ostate.buffer;
     if (buffer) {
@@ -248,45 +320,6 @@ static void output_frame(struct wl_listener *listener, void *data) {
             int h = s->height;
             uint32_t *fb = s->framebuf;
             int valid_fb = (fb && w > 0 && h > 0 && w <= 4096 && h <= 4096);
-            
-            /*
-             * Extract damage BEFORE copying pixels.  This lets us skip
-             * the buffer copy entirely on idle frames (nrects == 0) and
-             * copy only damaged rows on active frames.
-             *
-             * We read ostate.damage unconditionally rather than checking
-             * ostate.committed & WLR_OUTPUT_STATE_DAMAGE.  The committed
-             * flag tracks fields set by the caller, not fields populated
-             * by wlr_scene_output_build_state().  wlr_output_state_init()
-             * initializes damage empty, and the scene builder fills it
-             * with actual changed regions.
-             */
-            int nrects = 0;
-            pixman_box32_t *rects = pixman_region32_rectangles(
-                &ostate.damage, &nrects);
-            
-            /* Build dirty tile bitmap */
-            if (!s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0)
-                s->dirty_staging = calloc(1, s->tiles_x * s->tiles_y);
-            if (s->dirty_staging && s->tiles_x > 0 && s->tiles_y > 0) {
-                int ntiles = s->tiles_x * s->tiles_y;
-                memset(s->dirty_staging, 0, ntiles);
-                for (int r = 0; r < nrects; r++) {
-                    int tx0 = rects[r].x1 / TILE_SIZE;
-                    int ty0 = rects[r].y1 / TILE_SIZE;
-                    int tx1 = (rects[r].x2 + TILE_SIZE - 1) / TILE_SIZE;
-                    int ty1 = (rects[r].y2 + TILE_SIZE - 1) / TILE_SIZE;
-                    if (tx0 < 0) tx0 = 0;
-                    if (ty0 < 0) ty0 = 0;
-                    if (tx1 > s->tiles_x) tx1 = s->tiles_x;
-                    if (ty1 > s->tiles_y) ty1 = s->tiles_y;
-                    for (int ty = ty0; ty < ty1; ty++)
-                        for (int tx = tx0; tx < tx1; tx++)
-                            s->dirty_staging[ty * s->tiles_x + tx] = 1;
-                }
-                s->dirty_staging_valid = 1;
-                has_dirty = (nrects > 0);
-            }
             
             /*
              * Copy rendered pixels from wlroots buffer to framebuf.
@@ -345,14 +378,24 @@ static void output_frame(struct wl_listener *listener, void *data) {
     wlr_scene_output_send_frame_done(so, &ts);
     
     /*
-     * Only wake the send thread when there's actual work:
-     *   - force_full_frame: resize/error recovery needs full resend
-     *   - has_dirty: compositor reported pixel changes
-     *   - !dirty_staging_valid: damage extraction failed (alloc error),
-     *     send thread must fall back to pixel scanning
+     * Always send a frame when we reach here (scene_dirty or
+     * force_full_frame was true).  The dirty_staging bitmap tells the
+     * send thread which tiles to compress; if staging is unavailable,
+     * the send thread falls back to tile_changed() pixel scanning.
      */
-    if (s->force_full_frame || has_dirty || !s->dirty_staging_valid) {
-        send_frame(s);
+    send_frame(s);
+
+    /*
+     * Clear dirty_staging after send_frame consumes it so commit
+     * handlers start fresh for the next cycle.  Only clear when
+     * send_frame actually consumed the data (dirty_staging_valid
+     * transitions to 0).  If send_frame returned early (no free
+     * buffer), dirty_staging_valid is still set and we preserve the
+     * accumulated damage for the next attempt.
+     */
+    if (!s->dirty_staging_valid && s->dirty_staging &&
+        s->tiles_x > 0 && s->tiles_y > 0) {
+        memset(s->dirty_staging, 0, s->tiles_x * s->tiles_y);
     }
 }
 

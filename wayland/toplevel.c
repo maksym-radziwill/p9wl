@@ -23,6 +23,7 @@
 #include "draw/draw_helpers.h"
 #include "draw/draw.h"
 #include "p9/p9.h"
+#include "wayland/output.h"
 
 /* Forward declaration */
 static void check_new_subsurfaces(struct toplevel *tl);
@@ -59,6 +60,11 @@ static void subsurface_commit(struct wl_listener *l, void *d) {
         focus_pointer_recheck(&st->server->focus);
     }
     
+    /* Mark dirty tiles from subsurface damage before scheduling frame */
+    mark_surface_dirty_tiles(st->server, surface,
+                              st->subsurface->current.x,
+                              st->subsurface->current.y);
+
     wlr_output_schedule_frame(st->server->output);
     st->server->scene_dirty = 1;
 }
@@ -162,6 +168,10 @@ static void toplevel_commit(struct wl_listener *l, void *d) {
     
     check_new_subsurfaces(tl);
     focus_pointer_recheck(&s->focus);
+
+    /* Mark dirty tiles from toplevel surface damage (toplevel is at 0,0) */
+    mark_surface_dirty_tiles(s, surface, 0.0, 0.0);
+
     s->scene_dirty = 1;
     wlr_output_schedule_frame(s->output);
 }
