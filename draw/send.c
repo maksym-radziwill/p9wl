@@ -250,43 +250,6 @@ static int scroll_disabled(struct server *s) {
     return (modf(s->scale, &floor_val) != 0.0);
 }
 
-/*
- * Write border fill commands around the content area.
- * Returns bytes written to batch.
- */
-static int write_borders(uint8_t *batch, struct draw_state *draw) {
-    int off = 0;
-    
-    int mx = draw->win_minx, my = draw->win_miny;
-    int Mx = mx + draw->width, My = my + draw->height;
-    int ax = draw->actual_minx, ay = draw->actual_miny;
-    int Ax = draw->actual_maxx, Ay = draw->actual_maxy;
-    
-    /* Fallback if actual bounds not set */
-    if (ax == 0 && ay == 0 && Ax == 0 && Ay == 0) {
-        ax = mx - 16; ay = my - 16;
-        Ax = Mx + 16; Ay = My + 16;
-    }
-    
-    /* Border rectangles: {x1, y1, x2, y2} */
-    struct { int x1, y1, x2, y2; } borders[] = {
-        {ax, ay, Ax, my},   /* Top */
-        {ax, My, Ax, Ay},   /* Bottom */
-        {ax, my, mx, My},   /* Left */
-        {Mx, my, Ax, My},   /* Right */
-    };
-    
-    for (int i = 0; i < 4; i++) {
-        if (borders[i].x2 > borders[i].x1 && borders[i].y2 > borders[i].y1) {
-            off += cmd_fill(batch + off, draw->screen_id, draw->border_id,
-                           draw->opaque_id, borders[i].x1, borders[i].y1,
-                           borders[i].x2, borders[i].y2);
-        }
-    }
-    
-    return off;
-}
-
 void *send_thread_func(void *arg) {
     struct server *s = arg;
     struct draw_state *draw = &s->draw;
@@ -582,9 +545,6 @@ void *send_thread_func(void *arg) {
                            draw->win_minx + draw->width,
                            draw->win_miny + draw->height,
                            0, 0);
-            
-            /* Draw borders */
-            // off += write_borders(batch + off, draw);
             
             /* Flush */
             off += cmd_flush(batch + off);
