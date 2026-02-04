@@ -87,7 +87,8 @@ struct popup_data {
     /* Wayland listeners */
     struct wl_listener commit;
     struct wl_listener destroy;
-    struct wl_listener grab;
+
+    struct wl_list subsurfaces;     /* List of popup subsurface trackers */
 
     /* Link in focus_manager.popup_stack (most recent first) */
     struct wl_list link;
