@@ -10,6 +10,7 @@
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
 
 #include "popup.h"
@@ -72,6 +73,9 @@ static void popup_commit(struct wl_listener *l, void *d) {
         wlr_log(WLR_INFO, "Popup UNMAPPED: surface=%p", pd->surface);
         focus_popup_unmapped(&s->focus, pd);
     }
+    
+    s->scene_dirty = 1;
+    wlr_output_schedule_frame(s->output);
 }
 
 void new_popup(struct wl_listener *l, void *d) {
