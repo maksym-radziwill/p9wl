@@ -29,10 +29,6 @@
 
 /* ============== Subsurface Tracking ============== */
 
-/*
- * Popup-local subsurface tracker.  Parallel to toplevel's
- * subsurface_track but references popup_data instead of toplevel.
- */
 struct popup_sub {
     struct wlr_subsurface *subsurface;
     struct server *server;
@@ -40,7 +36,7 @@ struct popup_sub {
     bool mapped;
     struct wl_listener destroy;
     struct wl_listener commit;
-    struct wl_list link;  /* popup_data.subsurfaces */
+    struct wl_list link;
 };
 
 static void popup_sub_commit(struct wl_listener *l, void *d) {
@@ -55,11 +51,6 @@ static void popup_sub_commit(struct wl_listener *l, void *d) {
         focus_pointer_recheck(&ps->server->focus);
     }
 
-    /*
-     * No mark_surface_dirty_tiles here — the popup's absolute
-     * position isn't cheaply available.  scene_dirty is enough;
-     * the send thread will detect the changed tiles.
-     */
     ps->server->scene_dirty = 1;
     wlr_output_schedule_frame(ps->server->output);
 }

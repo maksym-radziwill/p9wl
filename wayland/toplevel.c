@@ -128,11 +128,6 @@ static void toplevel_commit(struct wl_listener *l, void *d) {
         tl->mapped = true;
         wlr_log(WLR_INFO, "Toplevel mapped");
         focus_on_surface_map(&s->focus, surface, true);
-
-        double sx, sy;
-        struct wlr_surface *under = focus_surface_at_cursor(&s->focus, &sx, &sy);
-        if (under == surface)
-            focus_pointer_set(&s->focus, surface, sx, sy, FOCUS_REASON_SURFACE_MAP);
     } else if (!has_buffer && tl->mapped) {
         tl->mapped = false;
         wlr_log(WLR_INFO, "Toplevel unmapped");
