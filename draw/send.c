@@ -408,10 +408,16 @@ void *send_thread_func(void *arg) {
                 
                 int changed;
                 if (dirty_map) {
-                    /* Fast path: trust damage, skip undamaged tiles */
+                    /* Skip tiles outside damaged region (no memory read) */
                     if (!dirty_map[ty * s->tiles_x + tx])
                         continue;
-                    changed = 1;
+                    /* Verify damaged tiles actually changed — the headless
+                     * backend reports full-screen damage on every frame,
+                     * so many "damaged" tiles are pixel-identical to
+                     * prev_framebuf (e.g. a cursor blink marks the whole
+                     * screen dirty but only ~2 tiles differ). */
+                    changed = tile_changed(send_buf, s->prev_framebuf,
+                                           s->width, x1, y1, w, h);
                 } else {
                     /* Fallback: check every tile */
                     changed = do_full || tile_changed(send_buf, s->prev_framebuf,
