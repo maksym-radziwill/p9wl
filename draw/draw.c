@@ -174,6 +174,7 @@ int relookup_window(struct server *s) {
 	if (g.width != old_w || g.height != old_h) {
 		wlr_log(WLR_INFO, "relookup: resize %dx%d -> %dx%d",
 		        old_w, old_h, g.width, g.height);
+		draw->xor_enabled = 0;
 		s->pending_width = g.width;
 		s->pending_height = g.height;
 		s->pending_minx = g.minx;

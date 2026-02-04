@@ -339,7 +339,12 @@ void *send_thread_func(void *arg) {
              */
             struct input_event wakeup = { .type = INPUT_WAKEUP };
             input_queue_push(&s->input_queue, &wakeup);
-            if (s->resize_pending) continue;
+            if (s->resize_pending) {
+                pthread_mutex_lock(&s->send_lock);
+                s->active_buf = -1;
+                pthread_mutex_unlock(&s->send_lock);
+                continue;
+            }
             do_full = 1;
         }
         
@@ -350,12 +355,22 @@ void *send_thread_func(void *arg) {
             drain_resume();
             struct input_event wakeup = { .type = INPUT_WAKEUP };
             input_queue_push(&s->input_queue, &wakeup);
-            if (s->resize_pending) continue;
+            if (s->resize_pending) {
+                pthread_mutex_lock(&s->send_lock);
+                s->active_buf = -1;
+                pthread_mutex_unlock(&s->send_lock);
+                continue;
+            }
             do_full = 1;
         }
         
         if (!got_frame) continue;
-        if (s->resize_pending) continue;
+        if (s->resize_pending) {
+            pthread_mutex_lock(&s->send_lock);
+            s->active_buf = -1;
+            pthread_mutex_unlock(&s->send_lock);
+            continue;
+        }
         if (s->force_full_frame) {
             do_full = 1;
             s->force_full_frame = 0;
