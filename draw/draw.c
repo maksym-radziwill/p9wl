@@ -40,25 +40,26 @@
 /* Minimum usable dimension (at least a few tiles) */
 #define MIN_ALIGNED_DIM (TILE_SIZE * 4)
 
+/* Minimum border (pixels) to reserve on each side of the content area.
+ * We subtract 2*RIO_BORDER from the window before tile-aligning so that
+ * the content never touches the window edge.  No wctl resize is needed. */
+#define RIO_BORDER 4
+
 /* ============== Window Management ============== */
 
 /*
- * Calculate centered window position within actual window bounds.
- * This ensures equal borders on all sides when dimensions are aligned to TILE_SIZE.
+ * Calculate centered window position within actual window bounds,
+ * guaranteeing at least RIO_BORDER pixels of border on each side.
  *
- * Parameters:
- *   actual_min - Actual window minimum coordinate (e.g., rminx from wctl)
- *   actual_max - Actual window maximum coordinate (e.g., rmaxx from wctl)
- *   aligned_dim - TILE_SIZE-aligned dimension we're using
- *   out_min - Output: adjusted minimum coordinate (content starts here)
- *   out_actual_dim - Output: actual window dimension
+ * The aligned_dim was already computed from (actual - 2*RIO_BORDER),
+ * so the total excess is at least 2*RIO_BORDER.  We split it evenly.
  */
 static void center_in_window(int actual_min, int actual_max, int aligned_dim,
                              int *out_min, int *out_actual_dim) {
     int actual_dim = actual_max - actual_min;
     *out_actual_dim = actual_dim;
     
-    /* Calculate excess pixels that won't be used */
+    /* Total excess = actual - aligned; always >= 2*RIO_BORDER */
     int excess = actual_dim - aligned_dim;
     if (excess < 0) excess = 0;
     
@@ -146,17 +147,18 @@ int relookup_window(struct server *s) {
     int actual_width = rmaxx - rminx;
     int actual_height = rmaxy - rminy;
     
-    /* Align dimensions down to TILE_SIZE to eliminate partial edge tiles */
-    int new_width = TILE_ALIGN_DOWN(actual_width);
-    int new_height = TILE_ALIGN_DOWN(actual_height);
+    /* Reserve RIO_BORDER on each side, then align to TILE_SIZE */
+    int avail_width = actual_width - 2 * RIO_BORDER;
+    int avail_height = actual_height - 2 * RIO_BORDER;
+    if (avail_width < MIN_ALIGNED_DIM) avail_width = MIN_ALIGNED_DIM;
+    if (avail_height < MIN_ALIGNED_DIM) avail_height = MIN_ALIGNED_DIM;
     
-    /* Ensure minimum usable size */
+    int new_width = TILE_ALIGN_DOWN(avail_width);
+    int new_height = TILE_ALIGN_DOWN(avail_height);
+    
+    /* Ensure minimum usable size and cap at actual window size */
     if (new_width < MIN_ALIGNED_DIM) new_width = MIN_ALIGNED_DIM;
     if (new_height < MIN_ALIGNED_DIM) new_height = MIN_ALIGNED_DIM;
-    
-    /* Cap at actual window size */
-    if (new_width > actual_width) new_width = actual_width;
-    if (new_height > actual_height) new_height = actual_height;
     
     if (new_width <= 0 || new_height <= 0 || new_width > 4096 || new_height > 4096) {
         wlr_log(WLR_ERROR, "relookup_window: invalid dimensions %dx%d", new_width, new_height);
@@ -298,9 +300,13 @@ int init_draw(struct server *s) {
         return -1;
     }
     
-    /* Align dimensions to TILE_SIZE (initial values, may be overwritten by window lookup) */
-    draw->width = TILE_ALIGN_DOWN(actual_width);
-    draw->height = TILE_ALIGN_DOWN(actual_height);
+    /* Reserve RIO_BORDER on each side, then align to TILE_SIZE */
+    int avail_w = actual_width - 2 * RIO_BORDER;
+    int avail_h = actual_height - 2 * RIO_BORDER;
+    if (avail_w < MIN_ALIGNED_DIM) avail_w = MIN_ALIGNED_DIM;
+    if (avail_h < MIN_ALIGNED_DIM) avail_h = MIN_ALIGNED_DIM;
+    draw->width = TILE_ALIGN_DOWN(avail_w);
+    draw->height = TILE_ALIGN_DOWN(avail_h);
     if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
     if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
     
@@ -405,9 +411,13 @@ int init_draw(struct server *s) {
                 actual_width = rmaxx - rminx;
                 actual_height = rmaxy - rminy;
                 
-                /* Align dimensions to TILE_SIZE */
-                draw->width = TILE_ALIGN_DOWN(actual_width);
-                draw->height = TILE_ALIGN_DOWN(actual_height);
+                /* Reserve RIO_BORDER on each side, then align to TILE_SIZE */
+                int avail_w2 = actual_width - 2 * RIO_BORDER;
+                int avail_h2 = actual_height - 2 * RIO_BORDER;
+                if (avail_w2 < MIN_ALIGNED_DIM) avail_w2 = MIN_ALIGNED_DIM;
+                if (avail_h2 < MIN_ALIGNED_DIM) avail_h2 = MIN_ALIGNED_DIM;
+                draw->width = TILE_ALIGN_DOWN(avail_w2);
+                draw->height = TILE_ALIGN_DOWN(avail_h2);
                 if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
                 if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
                 
