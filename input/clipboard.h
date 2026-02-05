@@ -1,54 +1,57 @@
 /*
- * clipboard.h - Wayland clipboard <-> Plan 9 /dev/snarf bridge
+ * clipboard.h - Wayland clipboard <-> Plan 9 /dev/snarf integration
  *
- * This module handles:
- *   - Copy: capturing Wayland client selection data and writing to /dev/snarf
- *   - Paste: reading /dev/snarf and providing data to Wayland clients
- *   - Primary selection: pass-through without snarf sync
+ * Provides bidirectional clipboard synchronization:
+ *   - Wayland client copies (Ctrl+C) -> writes to /dev/snarf
+ *   - Wayland client pastes (Ctrl+V) -> reads from /dev/snarf
  *
  * Design:
  *
- *   Snarf is treated as the single source of truth for clipboard
- *   contents. After a Wayland client copies, the compositor reclaims
- *   selection ownership so all future pastes (even Wayland-to-Wayland)
- *   go through /dev/snarf.
+ *   Snarf is treated as the single source of truth for
+ *   clipboard contents.
  *
  *   Supported MIME types for text:
- *     - text/plain, text/plain;charset=utf-8
+ *     - text/plain;charset=utf-8
+ *     - text/plain
  *     - UTF8_STRING, STRING, TEXT (X11 compatibility)
  *
- *   Maximum clipboard size: 1MB (SNARF_MAX)
+ *   Maximum clipboard size: 1MB (SNARF_MAX_SIZE)
  *
- * Copy (Wayland → Snarf):
+ * Wayland -> Snarf (Copy):
  *
- *   When a Wayland client sets the selection:
- *     1. on_copy() lets client become selection owner (protocol requirement)
- *     2. Data is read asynchronously via event loop fd (copy_readable())
- *     3. On EOF, data is written to /dev/snarf via p9_write_file()
- *     4. Compositor reclaims selection ownership via reclaim_selection()
+ *   When a Wayland client sets the selection (copies):
+ *     1. on_wayland_copy() handler is called
+ *     2. Client becomes selection owner (protocol requirement)
+ *     3. Async read via Wayland event loop fd
+ *     4. Data written to /dev/snarf via p9_write_file()
+ *     5. Compositor reclaims selection ownership
+ *     6. Future pastes (even Wayland-to-Wayland) go through snarf
  *
- * Paste (Snarf → Wayland):
+ * Snarf -> Wayland (Paste):
  *
  *   The compositor registers as selection owner, so paste requests
- *   come to snarf_send():
- *     1. A detached thread is spawned (paste_thread())
- *     2. Thread reads from /dev/snarf via p9_read_file() (blocking OK)
- *     3. Thread writes to client fd and closes it
+ *   come to us:
+ *     1. Client requests paste via wlr_data_source_send()
+ *     2. snarf_to_wayland_send() spawns detached thread
+ *     3. Thread reads from /dev/snarf (blocking OK in thread)
+ *     4. Thread writes to client fd and closes it
  *
- *   This prevents blocking the compositor on 9P I/O.
+ *   This async approach prevents blocking the compositor on 9P I/O.
  *
  * Primary Selection:
  *
- *   Primary selection (highlight-to-copy, middle-click paste) is passed
- *   through to Wayland without syncing to snarf. Primary selection
- *   changes on every text highlight, which would overwrite the clipboard
- *   unexpectedly. Only explicit copies go to snarf.
+ *   Primary selection (highlight-to-copy, middle-click paste) is NOT
+ *   synced to snarf. This is intentional - primary selection changes
+ *   on every text highlight, which would overwrite the clipboard
+ *   unexpectedly. Only explicit Ctrl+C copies go to snarf.
  *
  * Usage:
  *
  *   Initialize during server setup (after seat and p9_snarf are ready):
  *
- *     clipboard_init(server);
+ *     if (clipboard_init(server) < 0) {
+ *         // handle error
+ *     }
  *
  *   Clean up during shutdown:
  *
@@ -66,23 +69,27 @@ struct server;
  * Initialize clipboard handling.
  *
  * Sets up listeners for Wayland selection events:
- *   - request_set_selection (copy)
+ *   - request_set_selection (Ctrl+C copy)
  *   - request_set_primary_selection (highlight copy, not synced)
  *
- * Registers as initial selection owner so paste requests read
- * from /dev/snarf.
+ * Registers as initial selection owner so paste requests read from
+ * /dev/snarf. Uses p9_snarf connection for 9P operations.
  *
  * s: server instance (must have seat and p9_snarf initialized)
  *
- * Returns 0 on success.
+ * Returns 0 on success, -1 on failure.
  */
 int clipboard_init(struct server *s);
 
 /*
  * Clean up clipboard resources.
  *
- * Removes Wayland event listeners for copy and primary selection.
- * Any in-flight paste threads will complete independently.
+ * Removes Wayland event listeners:
+ *   - wayland_to_snarf (copy handler)
+ *   - wayland_to_snarf_primary (primary selection handler)
+ *
+ * Should be called during server shutdown. Any in-flight async
+ * operations (paste threads) will complete independently.
  *
  * s: server instance
  */

@@ -11,7 +11,8 @@
  * Key Translation:
  *
  *   Plan 9 sends UTF-8 runes (characters) while Wayland/Linux expects
- *   keycodes (physical keys).
+ *   keycodes (physical keys). This module provides both static and
+ *   dynamic (via /dev/kbmap) translation tables.
  *
  * Usage:
  *
@@ -24,6 +25,13 @@
  *     pthread_create(&server->mouse_thread, NULL, mouse_thread_func, server);
  *     pthread_create(&server->kbd_thread, NULL, kbd_thread_func, server);
  *     pthread_create(&server->wctl_thread, NULL, wctl_thread_func, server);
+ *
+ *   Key lookup with dynamic kbmap fallback:
+ *
+ *     const struct key_map *km = keymap_lookup_dynamic(&server->kbmap, rune);
+ *     if (km) {
+ *         // Use km->keycode, km->shift, km->ctrl
+ *     }
  */
 
 #ifndef P9WL_INPUT_H
@@ -36,6 +44,9 @@
 
 #include "../types.h"       /* For struct server, input_queue, input_event */
 #include "plan9_keys.h"     /* Canonical Plan 9 key definitions */
+
+/* Forward declaration */
+struct kbmap;
 
 /* ============== Key Mapping ============== */
 
@@ -56,7 +67,7 @@ struct key_map {
 };
 
 /*
- * Static keymap table
+ * Static keymap table (US QWERTY layout fallback).
  * Null-terminated array defined in input.c.
  */
 extern const struct key_map keymap[];
@@ -75,6 +86,23 @@ extern const struct key_map keymap[];
  * Logs error for unmapped runes >= 0x80 or special keys.
  */
 const struct key_map *keymap_lookup(uint32_t rune);
+
+/*
+ * Look up a key mapping using dynamic kbmap with static fallback.
+ *
+ * Checks the dynamic kbmap first (loaded from /dev/kbmap), then
+ * falls back to the static keymap table if not found or if kbmap
+ * is not loaded.
+ *
+ * km:   pointer to dynamic kbmap (may be NULL)
+ * rune: Plan 9 rune value to look up
+ *
+ * Returns pointer to key_map entry, or NULL if not found.
+ *
+ * Note: For dynamic lookups, returns pointer to static internal
+ * storage that is overwritten on each call. Copy if needed.
+ */
+const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune);
 
 /*
  * Get wlroots modifier mask for a modifier rune.

@@ -11,7 +11,7 @@
  *
  * Dependency Notes:
  *
- *   - This header includes p9.h, focus_manager.h
+ *   - This header includes p9.h, focus_manager.h, and kbmap.h
  *   - Do not include input.h from here (would create circular dependency)
  *   - Input-related code should include input.h which includes this file
  *
@@ -39,6 +39,9 @@
 
 /* Include focus_manager for unified focus state machine */
 #include "wayland/focus_manager.h"
+
+/* Include kbmap for dynamic keyboard mapping */
+#include "input/kbmap.h"
 
 /* ============== Configuration Constants ============== */
 
@@ -322,6 +325,9 @@ struct server {
     pthread_t mouse_thread;
     pthread_t kbd_thread;
     volatile int running;           /* False to signal threads to exit */
+
+    /* Dynamic keyboard mapping (loaded from /dev/kbmap) */
+    struct kbmap kbmap;
 
     /* ---- Clipboard/snarf integration ---- */
     struct wl_listener wayland_to_snarf;
