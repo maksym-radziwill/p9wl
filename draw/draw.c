@@ -70,6 +70,77 @@ static void center_in_window(int actual_min, int actual_max, int aligned_dim,
     *out_min = actual_min + offset;
 }
 
+/*
+ * Fill entire window with a solid color to hide junk in the border
+ * area between tile-aligned content and the window edge.
+ *
+ * Computes the average color from prev_framebuf (if available) so
+ * the border blends with screen content.  Falls back to black.
+ * Updates border_id's single pixel via 'y' command, then draws
+ * it across the whole window.
+ */
+static void clear_window(struct server *s) {
+    struct draw_state *draw = &s->draw;
+    struct p9conn *p9 = draw->p9;
+    if (!draw->screen_id || !draw->opaque_id || !draw->border_id) return;
+
+    uint32_t avg_color = 0xff000000;
+
+    /* Update border_id pixel with 'y' command: load 4 bytes into (0,0)-(1,1) */
+    uint8_t ycmd[1 + 4 + 16 + 4];
+    int yoff = 0;
+    ycmd[yoff++] = 'y';
+    PUT32(ycmd + yoff, draw->border_id); yoff += 4;
+    PUT32(ycmd + yoff, 0); yoff += 4;  /* r.min.x */
+    PUT32(ycmd + yoff, 0); yoff += 4;  /* r.min.y */
+    PUT32(ycmd + yoff, 1); yoff += 4;  /* r.max.x */
+    PUT32(ycmd + yoff, 1); yoff += 4;  /* r.max.y */
+    PUT32(ycmd + yoff, avg_color); yoff += 4;
+    p9_write(p9, draw->drawdata_fid, 0, ycmd, yoff);
+
+    /* Draw border_id over just the border strips (not the content area) */
+    int cx  = draw->win_minx;
+    int cy  = draw->win_miny;
+    int cw  = draw->width;
+    int ch  = draw->height;
+    int ax  = draw->actual_minx + RIO_BORDER;
+    int ay  = draw->actual_miny + RIO_BORDER;
+    int ax2 = draw->actual_maxx - RIO_BORDER;
+    int ay2 = draw->actual_maxy - RIO_BORDER;
+
+    uint8_t cmd[45];
+    int off;
+
+#define BORDER_DRAW(x1, y1, x2, y2) do {                        \
+    if ((x2) > (x1) && (y2) > (y1)) {                           \
+        off = 0;                                                 \
+        cmd[off++] = 'd';                                        \
+        PUT32(cmd + off, draw->screen_id);  off += 4;            \
+        PUT32(cmd + off, draw->border_id);  off += 4;            \
+        PUT32(cmd + off, draw->opaque_id);  off += 4;            \
+        PUT32(cmd + off, (x1)); off += 4;                        \
+        PUT32(cmd + off, (y1)); off += 4;                        \
+        PUT32(cmd + off, (x2)); off += 4;                        \
+        PUT32(cmd + off, (y2)); off += 4;                        \
+        PUT32(cmd + off, 0); off += 4;                           \
+        PUT32(cmd + off, 0); off += 4;                           \
+        PUT32(cmd + off, 0); off += 4;                           \
+        PUT32(cmd + off, 0); off += 4;                           \
+        p9_write(p9, draw->drawdata_fid, 0, cmd, off);          \
+    }                                                            \
+} while (0)
+
+    BORDER_DRAW(ax,      ay,      ax2,     cy);       /* top    */
+    BORDER_DRAW(ax,      cy + ch, ax2,     ay2);      /* bottom */
+    BORDER_DRAW(ax,      cy,      cx,      cy + ch);  /* left   */
+    BORDER_DRAW(cx + cw, cy,      ax2,     cy + ch);  /* right  */
+
+#undef BORDER_DRAW
+
+    uint8_t vcmd[1] = { 'v' };
+    p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
+}
+
 /* Re-lookup window after "unknown id" error.
  * CRITICAL: When Plan 9 resizes/moves a window, it creates a NEW window
  * with a NEW name (e.g., window.4.14 -> window.4.15). We must re-read
@@ -189,6 +260,8 @@ int relookup_window(struct server *s) {
     draw->actual_miny = rminy;
     draw->actual_maxx = rmaxx;
     draw->actual_maxy = rmaxy;
+    
+    clear_window(s);
     
     /* Check if dimensions changed */
     if (new_width != draw->width || new_height != draw->height) {
@@ -598,6 +671,8 @@ int init_draw(struct server *s) {
             draw->delta_id, draw->width, draw->height);
     
     draw->xor_enabled = 0;  /* Will be enabled after first successful full frame */
+    
+    clear_window(s);
     
     return 0;
 }
