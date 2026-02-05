@@ -112,39 +112,6 @@
  */
 void new_output(struct wl_listener *l, void *d);
 
-/* ============== Damage-Based Dirty Tile Tracking ============== */
-
-/*
- * Mark tiles dirty based on a surface's commit damage.
- *
- * Called from toplevel/subsurface commit handlers to record which tiles
- * were affected by a surface commit.  Reads surface->current.surface_damage
- * (in surface-local logical coordinates), transforms to physical pixel
- * coordinates using s->scale and the given offset, and sets the
- * corresponding bits in s->dirty_staging.
- *
- * This replaces the old approach of extracting damage from
- * wlr_output_state.damage, which the headless backend always reports
- * as full-screen, causing every tile to be recompressed on each frame.
- *
- * The offset_x/offset_y parameters are in surface-local (logical)
- * coordinates:
- *   - For a toplevel at (0,0): pass (0.0, 0.0)
- *   - For a subsurface: pass (subsurface->current.x, subsurface->current.y)
- *
- * Thread safety: must be called from the Wayland event loop thread
- * (same thread as output_frame), which is the only writer of
- * dirty_staging.
- *
- * s:        server state
- * surface:  the wlr_surface that just committed
- * offset_x: surface position offset in logical coords (X)
- * offset_y: surface position offset in logical coords (Y)
- */
-struct wlr_surface;
-void mark_surface_dirty_tiles(struct server *s, struct wlr_surface *surface,
-                               double offset_x, double offset_y);
-
 /* ============== Input Device Handling ============== */
 
 /*
