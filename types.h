@@ -168,6 +168,10 @@ struct draw_state {
     int width, height;          /* Current buffer dimensions */
     int win_minx, win_miny;     /* Window origin for coordinate translation */
 
+    int logical_width;
+    int logical_height; 
+    float scale; 
+
     /*
      * Actual window bounds (for border drawing with equal margins).
      *
