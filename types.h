@@ -32,6 +32,7 @@
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_scene.h>
+#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
 #include <wlr/util/log.h>
 
 /* Include p9.h for struct p9conn definition (with TLS support) */
@@ -226,6 +227,8 @@ struct toplevel {
     struct wlr_surface *surface;    /* Stored for focus cleanup in destroy */
     struct wl_listener commit;      /* Handle surface commits */
     struct wl_listener destroy;     /* Cleanup on destroy */
+    struct wl_listener request_fullscreen;  /* Fullscreen state toggle */
+    struct wl_listener request_maximize;    /* Maximize state toggle */
     struct wl_list subsurfaces;     /* List of subsurface_track */
     struct server *server;
     bool configured;                /* Have we sent initial configure? */
@@ -255,6 +258,10 @@ struct server {
     struct wlr_xdg_shell *xdg_shell;
     struct wlr_xdg_decoration_manager_v1 *decoration_mgr;
     struct wl_listener new_decoration;
+    struct wlr_keyboard_shortcuts_inhibit_manager_v1 *kb_shortcuts_inhibit;
+    struct wl_listener new_kb_shortcut_inhibitor;
+    struct wl_listener kb_inhibitor_destroy;
+    struct wlr_keyboard_shortcuts_inhibitor_v1 *active_kb_inhibitor;
     struct wlr_scene_rect *background;  /* Gray background, resized with window */
     struct wlr_seat *seat;
     struct wlr_cursor *cursor;

@@ -16,7 +16,8 @@
  *      - Positions scene node at (0,0)
  *      - Initializes empty subsurface tracking list
  *      - Adds to server's toplevel list
- *      - Sets up commit and destroy listeners
+ *      - Sets up commit, destroy, request_fullscreen, and
+ *        request_maximize listeners
  *
  *   2. toplevel_commit() - Called on each surface commit
  *      - Initial commit: sends configure with logical dimensions,
@@ -26,6 +27,15 @@
  *      - On unmap: calls focus_on_surface_unmap()
  *      - Scans for new subsurfaces via check_new_subsurfaces()
  *      - Sets scene_dirty flag and schedules output frame
+ *
+ *   2a. toplevel_request_fullscreen() - Called on fullscreen request
+ *       - Acknowledges the fullscreen state so the browser's Fullscreen
+ *         API resolves (e.g. YouTube fullscreen button)
+ *       - No geometry change needed since toplevels already fill the window
+ *
+ *   2b. toplevel_request_maximize() - Called on maximize request
+ *       - Acknowledges the maximized state to keep client in sync
+ *       - No geometry change needed since toplevels already fill the window
  *
  *   3. toplevel_destroy() - Called when toplevel is destroyed
  *      - Calls focus_on_surface_destroy() to clean up focus state

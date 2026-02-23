@@ -14,6 +14,7 @@
 #include <wayland-server-core.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
 #include <wlr/interfaces/wlr_keyboard.h>
 #include <wlr/util/log.h>
 
@@ -109,6 +110,35 @@ void handle_new_decoration(struct wl_listener *listener, void *data) {
     
     dd->request_mode.notify = decoration_handle_request_mode;
     wl_signal_add(&decoration->events.request_mode, &dd->request_mode);
+}
+
+/* ============== Keyboard Shortcuts Inhibit ============== */
+
+static void kb_inhibitor_destroy(struct wl_listener *listener, void *data) {
+    struct server *s = wl_container_of(listener, s, kb_inhibitor_destroy);
+    (void)data;
+    
+    wlr_log(WLR_INFO, "Keyboard shortcuts inhibitor destroyed");
+    s->active_kb_inhibitor = NULL;
+    wl_list_remove(&s->kb_inhibitor_destroy.link);
+}
+
+void handle_new_kb_inhibitor(struct wl_listener *listener, void *data) {
+    struct server *s = wl_container_of(listener, s, new_kb_shortcut_inhibitor);
+    struct wlr_keyboard_shortcuts_inhibitor_v1 *inhibitor = data;
+    
+    /* Only allow one at a time */
+    if (s->active_kb_inhibitor) {
+        wlr_keyboard_shortcuts_inhibitor_v1_deactivate(s->active_kb_inhibitor);
+    }
+    
+    s->active_kb_inhibitor = inhibitor;
+    wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
+    
+    s->kb_inhibitor_destroy.notify = kb_inhibitor_destroy;
+    wl_signal_add(&inhibitor->events.destroy, &s->kb_inhibitor_destroy);
+    
+    wlr_log(WLR_INFO, "Keyboard shortcuts inhibitor activated");
 }
 
 /* ============== Server Cleanup ============== */

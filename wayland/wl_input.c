@@ -71,9 +71,10 @@ static const struct {
 void handle_key(struct server *s, uint32_t rune, int pressed) {
     struct focus_manager *fm = &s->focus;
     
-    /* Handle Escape for popup dismissal */
+    /* Handle Escape for popup dismissal (unless keyboard shortcuts are inhibited,
+     * e.g. during fullscreen video — let the client handle Escape itself) */
     if (rune == 0x1B && pressed) {
-        if (focus_popup_dismiss_topmost_grabbed(fm))
+        if (!s->active_kb_inhibitor && focus_popup_dismiss_topmost_grabbed(fm))
             return;
     }
     

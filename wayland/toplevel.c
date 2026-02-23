@@ -115,6 +115,28 @@ static void check_new_subsurfaces(struct toplevel *tl) {
 
 /* ============== Toplevel Handlers ============== */
 
+static void toplevel_request_fullscreen(struct wl_listener *l, void *d) {
+    struct toplevel *tl = wl_container_of(l, tl, request_fullscreen);
+    (void)d;
+    
+    /* Already filling the whole window — just acknowledge the state change
+     * so the Fullscreen API promise resolves in the browser. */
+    wlr_xdg_toplevel_set_fullscreen(tl->xdg, tl->xdg->requested.fullscreen);
+    wlr_xdg_surface_schedule_configure(tl->xdg->base);
+    wlr_log(WLR_INFO, "Fullscreen %s",
+            tl->xdg->requested.fullscreen ? "granted" : "released");
+}
+
+static void toplevel_request_maximize(struct wl_listener *l, void *d) {
+    struct toplevel *tl = wl_container_of(l, tl, request_maximize);
+    (void)d;
+    
+    /* Already maximized — acknowledge so client state stays in sync. */
+    wlr_xdg_toplevel_set_maximized(tl->xdg, true);
+    wlr_xdg_surface_schedule_configure(tl->xdg->base);
+    wlr_log(WLR_INFO, "Maximize acknowledged");
+}
+
 static void toplevel_commit(struct wl_listener *l, void *d) {
     struct toplevel *tl = wl_container_of(l, tl, commit);
     struct server *s = tl->server;
@@ -180,6 +202,8 @@ static void toplevel_destroy(struct wl_listener *l, void *d) {
     
     wl_list_remove(&tl->commit.link);
     wl_list_remove(&tl->destroy.link);
+    wl_list_remove(&tl->request_fullscreen.link);
+    // wl_list_remove(&tl->request_maximize.link);
     wl_list_remove(&tl->link);
     free(tl);
     
@@ -247,6 +271,12 @@ void new_toplevel(struct wl_listener *l, void *d) {
     
     tl->destroy.notify = toplevel_destroy;
     wl_signal_add(&xdg->base->events.destroy, &tl->destroy);
+    
+    tl->request_fullscreen.notify = toplevel_request_fullscreen;
+    wl_signal_add(&xdg->events.request_fullscreen, &tl->request_fullscreen);
+    
+    //    tl->request_maximize.notify = toplevel_request_maximize;
+    //    wl_signal_add(&xdg->events.request_maximize, &tl->request_maximize);
     
     wlr_log(WLR_INFO, "XDG surface scene tree created at (0,0)");
 }

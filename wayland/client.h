@@ -1,7 +1,7 @@
 /*
- * client.h - Client decoration and server cleanup
+ * client.h - Client decoration, keyboard shortcuts inhibit, and server cleanup
  *
- * This module handles two responsibilities:
+ * This module handles three responsibilities:
  *
  * XDG Decoration:
  *
@@ -17,6 +17,24 @@
  *     - decoration: the wlr_xdg_toplevel_decoration_v1 object
  *     - destroy/request_mode/surface_commit: Wayland listeners
  *     - mode_set: flag to avoid setting mode multiple times
+ *
+ * Keyboard Shortcuts Inhibit:
+ *
+ *   When a client enters fullscreen (e.g. YouTube video), it may request
+ *   that the compositor stop intercepting keyboard shortcuts and forward
+ *   all keys to the client. This allows the client to handle Escape etc.
+ *
+ *   handle_new_kb_inhibitor() activates the inhibitor. While active,
+ *   wl_input.c checks s->active_kb_inhibitor and skips compositor-level
+ *   key interception (popup Escape dismissal).
+ *
+ *   Wire up during server initialization:
+ *
+ *     s->kb_shortcuts_inhibit =
+ *         wlr_keyboard_shortcuts_inhibit_manager_v1_create(s->wl_display);
+ *     s->new_kb_shortcut_inhibitor.notify = handle_new_kb_inhibitor;
+ *     wl_signal_add(&s->kb_shortcuts_inhibit->events.new_inhibitor,
+ *                   &s->new_kb_shortcut_inhibitor);
  *
  * Server Cleanup:
  *
@@ -68,6 +86,24 @@
  * data:     wlr_xdg_toplevel_decoration_v1 pointer
  */
 void handle_new_decoration(struct wl_listener *listener, void *data);
+
+/* ============== Keyboard Shortcuts Inhibit ============== */
+
+/*
+ * Handle new keyboard shortcuts inhibitor request.
+ *
+ * When a fullscreen client (e.g. a browser showing fullscreen video)
+ * requests keyboard shortcuts inhibition, this handler activates it
+ * so that all keys (including Escape) are forwarded to the client
+ * rather than being intercepted by the compositor.
+ *
+ * Only one inhibitor is active at a time; creating a new one
+ * deactivates any existing inhibitor.
+ *
+ * listener: wl_listener from server->new_kb_shortcut_inhibitor
+ * data:     wlr_keyboard_shortcuts_inhibitor_v1 pointer
+ */
+void handle_new_kb_inhibitor(struct wl_listener *listener, void *data);
 
 /* ============== Server Cleanup ============== */
 
