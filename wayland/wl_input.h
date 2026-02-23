@@ -46,7 +46,7 @@
  *
  *     - Escape key can dismiss grabbed popups
  *     - Modifier keys update the focus manager's modifier state
- *     - Regular keys are looked up in the dynamic keymap
+ *     - Regular keys are looked up in the keymap
  *     - Key events sent via wlr_seat_keyboard_notify_key()
  *
  * Usage:
@@ -75,7 +75,7 @@
  * characters) or a Plan 9 special key code (Kxxx constants).
  *
  * For modifier keys, updates the focus manager's modifier state.
- * For regular keys, looks up the keycode in the dynamic keymap
+ * For regular keys, looks up the keycode in the keymap
  * and sends the appropriate Wayland key event.
  *
  * If pressed is true and rune is Escape (0x1B), attempts to dismiss

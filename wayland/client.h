@@ -24,12 +24,12 @@
  *
  *     1. Signal threads to stop (s->running = 0)
  *     2. Wake send thread via condition variable
- *     3. Join all worker threads (mouse, keyboard, wctl, send)
+ *     3. Join all worker threads (mouse, keyboard, send)
  *     4. Clean up virtual keyboard via wlr_keyboard_finish()
  *     5. Clean up focus manager state and log statistics
  *     6. Free framebuffers (framebuf, prev_framebuf, send_buf[0/1])
  *     7. Destroy synchronization primitives (mutex, condvar)
- *     8. Disconnect all 9P connections (draw, mouse, kbd, wctl)
+ *     8. Disconnect all 9P connections (draw, mouse, kbd, wctl, snarf)
  *     9. Close input queue pipe and destroy its mutex
  *     10. Free TLS configuration strings
  *
@@ -80,7 +80,7 @@ void handle_new_decoration(struct wl_listener *listener, void *data);
  * Thread shutdown sequence:
  *   1. Sets s->running = 0
  *   2. Signals send_cond to wake send thread
- *   3. Joins mouse_thread, kbd_thread, wctl_thread, send_thread
+ *   3. Joins mouse_thread, kbd_thread, send_thread
  *
  * This is typically not called explicitly since the compositor exits
  * via exit() when the last toplevel is destroyed in toplevel_destroy().

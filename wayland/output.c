@@ -1,12 +1,11 @@
 /*
- * output.c - Output and input device handlers
+ * output.c - Output creation, frame rendering, and resize handling
  *
- * Handles output frame rendering, resize handling,
- * and input device attachment.
+ * Creates the headless wlroots output sized to match the Plan 9 window,
+ * runs the frame loop that renders the scene graph into a framebuffer
+ * for the send thread, and handles dynamic window resizes.
  *
- * Refactored:
- * - Uses alloc_image_cmd helper for image reallocation (was manual byte building)
- * - Uses free_image_cmd helper for cleanup
+ * See output.h for the frame loop description and damage tracking design.
  */
 
 #include <stdlib.h>
@@ -247,7 +246,7 @@ static void output_frame(struct wl_listener *listener, void *data) {
             int w = s->width;
             int h = s->height;
             uint32_t *fb = s->framebuf;
-            int valid_fb = (fb && w > 0 && h > 0 && w <= 4096 && h <= 4096);
+            int valid_fb = (fb && w > 0 && h > 0 && w <= MAX_SCREEN_DIM && h <= MAX_SCREEN_DIM);
             
             /*
              * Extract damage BEFORE copying pixels.  This lets us skip

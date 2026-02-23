@@ -1,11 +1,11 @@
 /*
- * toplevel.c - Toplevel and subsurface handlers (refactored)
+ * toplevel.c - XDG toplevel and subsurface lifecycle
  *
- * Changes from original:
- * - Uses XDG_VALID/XDG_MAPPED macros
- * - Uses focus_phys_to_logical helper
- * - Simplified validation chains
- * - Uses FOR_EACH_SUBSURFACE macro to reduce duplication
+ * Handles creation, commit, and destruction of toplevel windows and
+ * their subsurfaces. Coordinates with focus_manager for focus transitions
+ * on map/unmap/destroy events.
+ *
+ * See toplevel.h for lifecycle description and subsurface tracking design.
  */
 
 #include <stdlib.h>

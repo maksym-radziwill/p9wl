@@ -141,6 +141,7 @@ void server_cleanup(struct server *s) {
     p9_disconnect(&s->p9_mouse);
     p9_disconnect(&s->p9_kbd);
     p9_disconnect(&s->p9_wctl);
+    p9_disconnect(&s->p9_snarf);
     
     close(s->input_queue.pipe_fd[0]);
     close(s->input_queue.pipe_fd[1]);

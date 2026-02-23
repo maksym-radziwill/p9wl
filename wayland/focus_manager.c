@@ -1,17 +1,12 @@
 /*
- * focus_manager.c - Pointer focus, keyboard focus, popup grab stack.
+ * focus_manager.c - Unified focus state machine
  *
- * Fixed from original:
- * - focus_pointer_recheck: always does fresh hit test on button release
- *   (old code skipped hit test when deferred_pointer_target was NULL)
- * - focus_popup_unregister: uses focus_pointer_set instead of bypassing
- *   it with direct wlr_seat calls (was skipping fm->pointer_focus update)
- * - focus_toplevel_from_surface: walks to root surface once, then scans
- *   (was O(n*m) walking subsurface chain per toplevel)
- * - focus_popup_from_surface: reuses root_surface instead of duplicating
- *   the subsurface walk
- * - focus_on_surface_unmap: calls fallback_surface once instead of twice
- * - Consistent use of tl->surface (was mixing with tl->xdg->base->surface)
+ * Manages pointer focus, keyboard focus, and the popup grab stack.
+ * All focus transitions go through this module so that deferred focus
+ * (during drags), popup grab/ungrab, and surface lifecycle events are
+ * handled consistently.
+ *
+ * See focus_manager.h for API documentation and design overview.
  */
 
 #define _POSIX_C_SOURCE 200809L
