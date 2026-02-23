@@ -43,22 +43,20 @@
  * Snarf Version Polling:
  *
  *   Rio's /dev/snarf exposes a version counter via qid.vers that
- *   increments on each write. We poll this with Tstat every 500ms
- *   to detect Plan 9-side clipboard changes (e.g., user copies text
- *   in a rio window). When a change is detected:
+ *   increments on each write. A dedicated thread polls this with
+ *   Tstat every 500ms to detect Plan 9-side clipboard changes
+ *   (e.g., user copies text in a rio window). When a change is
+ *   detected, the thread signals the main event loop via a pipe:
  *
- *     1. Timer fires, Tstat returns new qid.vers
- *     2. snarf_to_wayland_register() creates new data source
- *     3. wlr_seat_set_selection() emits selection event to clients
- *     4. Clients invalidate cached clipboard data
- *     5. Next paste triggers fresh read from /dev/snarf
+ *     1. Poll thread: Tstat returns new qid.vers
+ *     2. Poll thread writes to pipe
+ *     3. Event loop wakes, calls snarf_to_wayland_register()
+ *     4. wlr_seat_set_selection() emits selection event to clients
+ *     5. Clients invalidate cached clipboard data
+ *     6. Next paste triggers fresh read from /dev/snarf
  *
- *   The Tstat RPC is ~50 bytes each way and runs synchronously on
- *   the Wayland event loop (~1ms on LAN).
- *
- *   After a Wayland-side copy writes to snarf, the tracked version
- *   is updated immediately so the poll doesn't misinterpret the
- *   compositor's own write as a Plan 9-side change.
+ *   The blocking Tstat RPC runs entirely in the poll thread, so the
+ *   Wayland event loop is never stalled by 9P I/O.
  *
  * Primary Selection:
  *
@@ -94,12 +92,13 @@ struct server;
  *   - Listener for Wayland copy events (request_set_selection)
  *   - Listener for primary selection (not synced to snarf)
  *   - Initial registration as selection owner
- *   - Snarf version polling timer (500ms interval)
+ *   - Snarf version polling thread (500ms interval)
  *
  * The snarf poll walks to /dev/snarf once (without opening) and
- * keeps the fid for periodic Tstat calls. If the initial stat
- * fails, polling is disabled but the clipboard still works for
- * Wayland->Plan9 copies and the first Plan9->Wayland paste.
+ * keeps the fid for periodic Tstat calls in a background thread.
+ * If the initial stat fails, polling is disabled but the clipboard
+ * still works for Wayland->Plan9 copies and the first Plan9->Wayland
+ * paste.
  *
  * s: server instance (must have seat and p9_snarf initialized)
  *
@@ -110,9 +109,9 @@ int clipboard_init(struct server *s);
 /*
  * Clean up clipboard resources.
  *
- * Stops snarf version polling, clunks the stat fid, and removes
- * Wayland event listeners. Any in-flight async paste threads will
- * complete independently.
+ * Stops the snarf polling thread, closes the notification pipe,
+ * clunks the stat fid, and removes Wayland event listeners. Any
+ * in-flight async paste threads will complete independently.
  *
  * s: server instance
  */

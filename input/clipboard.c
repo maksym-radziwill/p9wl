@@ -6,10 +6,10 @@
  * - When a Wayland client pastes, read from /dev/snarf (lazily, on demand)
  * - Polls snarf qid.vers to detect Plan 9-side changes
  *
- * IMPORTANT: All 9P I/O for paste operations is done asynchronously
- * to avoid blocking the Wayland event loop. The snarf version poll
- * (Tstat) is done synchronously on the event loop since it is a
- * single small RPC (~1ms on LAN).
+ * IMPORTANT: All 9P I/O is done off the Wayland event loop to avoid
+ * blocking frame delivery and input processing. Paste reads use a
+ * detached thread; snarf version polling runs in a dedicated thread
+ * that signals the event loop via a pipe when a change is detected.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -38,23 +38,26 @@
 
 /* Forward declarations */
 static void snarf_to_wayland_register(struct server *s);
-static int snarf_poll_handler(void *data);
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * Snarf polling state
  *
- * Polls /dev/snarf's qid.vers via Tstat to detect Plan 9-side changes.
- * When the version changes, re-registers as Wayland selection owner,
- * which forces clients to invalidate their clipboard cache and read
- * fresh data on the next paste.
+ * A dedicated thread polls /dev/snarf's qid.vers via Tstat to detect
+ * Plan 9-side changes.  When the version changes, the thread writes to
+ * a pipe whose read end is monitored by the Wayland event loop.  The
+ * event loop handler then calls snarf_to_wayland_register() on the
+ * main thread (required because wlr_seat_set_selection is not
+ * thread-safe).
  * ───────────────────────────────────────────────────────────────────────────── */
 
 static struct {
     struct server *server;
-    struct wl_event_source *timer;
+    pthread_t thread;
     uint32_t snarf_fid;       /* Fid walked to /dev/snarf (not opened) */
-    uint32_t last_version;    /* Last seen qid.vers from Tstat */
-    bool active;
+    volatile uint32_t last_version;  /* Last seen qid.vers from Tstat */
+    volatile bool active;
+    int pipe_fd[2];           /* [0]=read (event loop), [1]=write (thread) */
+    struct wl_event_source *pipe_source;
 } snarf_poll;
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -148,15 +151,11 @@ static int wayland_to_snarf_read_handler(int fd, uint32_t mask, void *data) {
             wlr_log(WLR_INFO, "wayland_to_snarf: copied %zu bytes", state->len);
 
             /*
-             * Update tracked version so the next poll doesn't see our
-             * own write as a Plan 9-side change and re-register again.
+             * The poll thread will see the version bump on its next
+             * cycle and may redundantly re-register us as selection
+             * owner.  That's harmless and avoids a blocking p9_stat
+             * here on the event loop.
              */
-            if (snarf_poll.active) {
-                uint32_t vers;
-                if (p9_stat(&state->server->p9_snarf, snarf_poll.snarf_fid, &vers) == 0) {
-                    snarf_poll.last_version = vers;
-                }
-            }
         }
     }
     
@@ -398,46 +397,53 @@ static void snarf_to_wayland_register(struct server *s) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * Snarf Version Polling
+ * Snarf Version Polling (thread-based)
  *
- * Rio's /dev/snarf exposes a version counter in qid.vers (see dostat()
- * in rio's filsys.c: snarfversion is set on the snarf qid). We poll
- * this via Tstat to detect Plan 9-side clipboard changes without
- * reading the full contents each time.
- *
- * When the version changes, we re-register as Wayland selection owner.
- * This emits a wl_data_device.selection event to all clients, forcing
- * them to invalidate any cached clipboard data. The next paste will
- * trigger snarf_to_wayland_send() which reads fresh contents.
- *
- * The Tstat RPC is a single request/response (~50 bytes each way)
- * and completes in under 1ms on LAN, so running it synchronously on
- * the Wayland event loop is acceptable.
+ * A dedicated thread polls /dev/snarf's qid.vers via Tstat every 500ms.
+ * The blocking 9P RPC runs in the thread so the Wayland event loop is
+ * never stalled.  When the version changes, the thread writes a byte
+ * to a pipe; the read end is monitored by the event loop which calls
+ * snarf_to_wayland_register() on the main thread.
  * ───────────────────────────────────────────────────────────────────────────── */
 
-static int snarf_poll_handler(void *data) {
+static void *snarf_poll_thread_func(void *arg) {
+    (void)arg;
+
+    while (snarf_poll.active) {
+        usleep(SNARF_POLL_MS * 1000);
+        if (!snarf_poll.active)
+            break;
+
+        uint32_t vers;
+        if (p9_stat(&snarf_poll.server->p9_snarf, snarf_poll.snarf_fid, &vers) < 0) {
+            wlr_log(WLR_DEBUG, "snarf_poll: stat failed, skipping");
+            continue;
+        }
+
+        if (vers != snarf_poll.last_version) {
+            wlr_log(WLR_INFO, "snarf_poll: version changed %u -> %u",
+                    snarf_poll.last_version, vers);
+            snarf_poll.last_version = vers;
+            char c = 1;
+            if (write(snarf_poll.pipe_fd[1], &c, 1) < 0) { /* ignore */ }
+        }
+    }
+
+    wlr_log(WLR_INFO, "snarf_poll: thread exiting");
+    return NULL;
+}
+
+/* Called on the main event loop when the poll thread detects a change */
+static int snarf_poll_pipe_handler(int fd, uint32_t mask, void *data) {
+    (void)mask;
     (void)data;
 
-    if (!snarf_poll.active)
-        return 0;
+    /* Drain pipe */
+    char buf[16];
+    while (read(fd, buf, sizeof(buf)) > 0) {}
 
-    uint32_t vers;
-    if (p9_stat(&snarf_poll.server->p9_snarf, snarf_poll.snarf_fid, &vers) < 0) {
-        /* Stat failed - skip this cycle, will retry next tick */
-        wlr_log(WLR_DEBUG, "snarf_poll: stat failed, skipping");
-        wl_event_source_timer_update(snarf_poll.timer, SNARF_POLL_MS);
-        return 0;
-    }
-
-    if (vers != snarf_poll.last_version) {
-        wlr_log(WLR_INFO, "snarf_poll: version changed %u -> %u, re-registering",
-                snarf_poll.last_version, vers);
-        snarf_poll.last_version = vers;
-        snarf_to_wayland_register(snarf_poll.server);
-    }
-
-    /* Re-arm timer */
-    wl_event_source_timer_update(snarf_poll.timer, SNARF_POLL_MS);
+    wlr_log(WLR_INFO, "snarf_poll: re-registering as selection owner");
+    snarf_to_wayland_register(snarf_poll.server);
     return 0;
 }
 
@@ -454,25 +460,50 @@ static int snarf_poll_init(struct server *s) {
     }
 
     /* Get initial version baseline */
-    if (p9_stat(p9, snarf_poll.snarf_fid, &snarf_poll.last_version) < 0) {
+    uint32_t init_vers;
+    if (p9_stat(p9, snarf_poll.snarf_fid, &init_vers) < 0) {
         wlr_log(WLR_ERROR, "snarf_poll_init: initial stat failed");
         p9_clunk(p9, snarf_poll.snarf_fid);
         return -1;
     }
 
+    snarf_poll.last_version = init_vers;
     snarf_poll.server = s;
 
-    /* Add timer to Wayland event loop */
+    /* Create pipe for thread -> event loop notification */
+    if (pipe(snarf_poll.pipe_fd) < 0) {
+        wlr_log(WLR_ERROR, "snarf_poll_init: pipe failed: %s", strerror(errno));
+        p9_clunk(p9, snarf_poll.snarf_fid);
+        return -1;
+    }
+    fcntl(snarf_poll.pipe_fd[0], F_SETFL, O_NONBLOCK);
+
+    /* Monitor pipe read end on the Wayland event loop */
     struct wl_event_loop *loop = wl_display_get_event_loop(s->display);
-    snarf_poll.timer = wl_event_loop_add_timer(loop, snarf_poll_handler, NULL);
-    if (!snarf_poll.timer) {
-        wlr_log(WLR_ERROR, "snarf_poll_init: failed to create timer");
+    snarf_poll.pipe_source = wl_event_loop_add_fd(loop, snarf_poll.pipe_fd[0],
+                                                   WL_EVENT_READABLE,
+                                                   snarf_poll_pipe_handler, NULL);
+    if (!snarf_poll.pipe_source) {
+        wlr_log(WLR_ERROR, "snarf_poll_init: failed to add pipe to event loop");
+        close(snarf_poll.pipe_fd[0]);
+        close(snarf_poll.pipe_fd[1]);
         p9_clunk(p9, snarf_poll.snarf_fid);
         return -1;
     }
 
-    wl_event_source_timer_update(snarf_poll.timer, SNARF_POLL_MS);
     snarf_poll.active = true;
+
+    /* Start poll thread */
+    if (pthread_create(&snarf_poll.thread, NULL, snarf_poll_thread_func, NULL) != 0) {
+        wlr_log(WLR_ERROR, "snarf_poll_init: failed to create thread: %s",
+                strerror(errno));
+        snarf_poll.active = false;
+        wl_event_source_remove(snarf_poll.pipe_source);
+        close(snarf_poll.pipe_fd[0]);
+        close(snarf_poll.pipe_fd[1]);
+        p9_clunk(p9, snarf_poll.snarf_fid);
+        return -1;
+    }
 
     wlr_log(WLR_INFO, "snarf_poll: started (interval=%dms, initial version=%u)",
             SNARF_POLL_MS, snarf_poll.last_version);
@@ -484,11 +515,14 @@ static void snarf_poll_cleanup(struct server *s) {
         return;
 
     snarf_poll.active = false;
+    pthread_join(snarf_poll.thread, NULL);
 
-    if (snarf_poll.timer) {
-        wl_event_source_remove(snarf_poll.timer);
-        snarf_poll.timer = NULL;
+    if (snarf_poll.pipe_source) {
+        wl_event_source_remove(snarf_poll.pipe_source);
+        snarf_poll.pipe_source = NULL;
     }
+    close(snarf_poll.pipe_fd[0]);
+    close(snarf_poll.pipe_fd[1]);
 
     p9_clunk(&s->p9_snarf, snarf_poll.snarf_fid);
 }
