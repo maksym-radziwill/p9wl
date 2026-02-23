@@ -115,7 +115,7 @@ enum input_type {
  * Pushed by mouse_thread and kbd_thread, popped by main loop.
  */
 struct input_event {
-    int type;       /* INPUT_MOUSE or INPUT_KEY */
+    int type;       /* INPUT_MOUSE, INPUT_KEY, or INPUT_WAKEUP */
     union {
         struct {
             int x, y;       /* Absolute position in window coordinates */
@@ -165,9 +165,20 @@ struct draw_state {
     int width, height;          /* Current buffer dimensions */
     int win_minx, win_miny;     /* Window origin for coordinate translation */
 
-    int logical_width;
-    int logical_height; 
-    float scale; 
+    /*
+     * Logical (Wayland) dimensions and scale factor.
+     *
+     * Wayland clients operate in logical coordinates; the framebuffer
+     * uses physical pixels. These track the draw-side view of the
+     * HiDPI state so that coordinate conversion during rendering
+     * doesn't need to reach back into struct server.
+     *
+     * Kept in sync with server.scale by output resize handling.
+     * width/height above are physical; logical = physical / scale.
+     */
+    int logical_width;          /* width / scale (for Wayland configure) */
+    int logical_height;         /* height / scale (for Wayland configure) */
+    float scale;                /* Copy of server.scale for draw operations */
 
     /*
      * Actual window bounds (for border drawing with equal margins).
@@ -382,6 +393,8 @@ static inline uint64_t now_us(void) {
  *
  * These allow existing code to compile during migration to the
  * focus_manager API. Remove after migration is complete.
+ *
+ * TODO: grep for usage — these may be dead code now.
  */
 #define server_popup_stack(s)         ((s)->focus.popup_stack)
 #define server_needs_focus_recheck(s) ((s)->focus.pointer_focus_deferred)

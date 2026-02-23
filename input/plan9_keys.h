@@ -66,7 +66,13 @@
 #define Kalt            (KF|0x15)   /* 0xF015 - Alt */
 #define Kshift          (KF|0x16)   /* 0xF016 - Shift */
 #define Kctl            (KF|0x17)   /* 0xF017 - Control */
+
+/* ============== Navigation Keys (continued) ============== */
+
 #define Kend            (KF|0x18)   /* 0xF018 - End */
+
+/* ============== Lock Keys ============== */
+
 #define Kscroll         (KF|0x19)   /* 0xF019 - Scroll Lock */
 
 /* ============== Scroll Keys ============== */

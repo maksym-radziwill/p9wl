@@ -54,7 +54,7 @@
  *     5. Next paste triggers fresh read from /dev/snarf
  *
  *   The Tstat RPC is ~50 bytes each way and runs synchronously on
- *   the Wayland event loop (sub-millisecond on LAN).
+ *   the Wayland event loop (~1ms on LAN).
  *
  *   After a Wayland-side copy writes to snarf, the tracked version
  *   is updated immediately so the poll doesn't misinterpret the

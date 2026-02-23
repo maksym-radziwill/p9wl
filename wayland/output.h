@@ -27,7 +27,7 @@
  *        d. Reallocate Plan 9 images via reallocate_draw_images()
  *        e. Resize wlroots output and reconfigure all toplevels
  *        f. Set force_full_frame and scene_dirty flags
- *     3. Throttle frames based on FRAME_INTERVAL_MS if defined
+ *     3. Throttle frames if FRAME_INTERVAL_MS is non-zero
  *     4. Check scene_dirty and force_full_frame flags.  If both are
  *        clear, send frame_done and return immediately — skipping
  *        build_state, buffer copy, and send_frame.  This is the

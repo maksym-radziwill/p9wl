@@ -151,9 +151,12 @@ struct focus_manager {
 void focus_manager_init(struct focus_manager *fm, struct server *server);
 
 /*
- * Clean up focus manager resources. Logs statistics.
+ * Finalize the focus manager. Logs focus change statistics.
  *
- * fm: focus manager to clean up
+ * No resources are freed; the focus_manager struct is embedded in
+ * struct server and does not own heap memory.
+ *
+ * fm: focus manager to finalize
  */
 void focus_manager_cleanup(struct focus_manager *fm);
 
@@ -254,10 +257,14 @@ void focus_pointer_motion(
 /*
  * Recheck pointer focus after surface geometry changes.
  *
- * Call this after surfaces map, unmap, or change size. Performs a new
- * hit test and updates focus if the surface under the cursor changed.
+ * Call this after surfaces map, unmap, or change size. If buttons are
+ * held, returns immediately (focus_pointer_set will defer as needed).
+ * Otherwise, clears any deferred focus state and performs a fresh hit
+ * test, updating pointer focus if the surface under the cursor changed.
  *
- * Also processes any deferred focus changes if buttons are no longer held.
+ * Note: this does not "apply" a previously deferred target — it always
+ * rechecks from scratch. Deferred focus is resolved indirectly via
+ * focus_pointer_button_released, which calls this function.
  *
  * fm: focus manager
  */
@@ -290,6 +297,11 @@ void focus_pointer_button_released(struct focus_manager *fm);
  *
  * Sends wl_keyboard.enter with the current keymap and modifier state.
  * Pass NULL to clear keyboard focus.
+ *
+ * After entering the surface, re-sends the real modifier state from
+ * fm->modifier_state. This is necessary because wlr_seat_keyboard_notify_enter
+ * sends the virtual keyboard's modifier state (always zero), which would
+ * silently clear any held Ctrl/Shift/Alt from the client's perspective.
  *
  * fm:      focus manager
  * surface: surface to focus (or NULL to clear)

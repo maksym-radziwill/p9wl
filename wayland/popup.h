@@ -38,6 +38,7 @@
  *     - commit_count: number of commits received (for debugging)
  *     - mapped: true when surface has buffer and is visible
  *     - has_grab: true if popup requested keyboard grab (menus)
+ *     - commit/destroy/grab: Wayland listeners
  *     - link: position in focus_manager's popup_stack
  *
  * Usage:

@@ -26,7 +26,7 @@
  *     2. Wake send thread via condition variable
  *     3. Join all worker threads (mouse, keyboard, send)
  *     4. Clean up virtual keyboard via wlr_keyboard_finish()
- *     5. Clean up focus manager state and log statistics
+ *     5. Log focus manager statistics via focus_manager_cleanup()
  *     6. Free framebuffers (framebuf, prev_framebuf, send_buf[0/1])
  *     7. Destroy synchronization primitives (mutex, condvar)
  *     8. Disconnect all 9P connections (draw, mouse, kbd, wctl, snarf)

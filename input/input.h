@@ -121,8 +121,11 @@ int utf8_decode(const unsigned char *p, const unsigned char *end, int *rune);
 /*
  * Initialize an input queue.
  *
- * Initializes the mutex. Must be called before any push/pop.
- * Initializes pipe read by wl_event_loop_add_fd  
+ * Initializes the mutex and creates a notification pipe (read end
+ * set non-blocking). The caller is responsible for adding the pipe
+ * read fd to the Wayland event loop via wl_event_loop_add_fd().
+ * Must be called before any push/pop.
+ *
  * q: queue to initialize
  */
 void input_queue_init(struct input_queue *q);
@@ -181,10 +184,5 @@ void *mouse_thread_func(void *arg);
  * Returns NULL (runs until server->running becomes false).
  */
 void *kbd_thread_func(void *arg);
-
-/*
- * Note: Time utility functions now_ms() and now_us() are defined
- * as static inline in types.h to avoid multiple definition issues.
- */
 
 #endif /* P9WL_INPUT_H */
