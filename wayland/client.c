@@ -120,9 +120,9 @@ void server_cleanup(struct server *s) {
     pthread_cond_signal(&s->send_cond);
     pthread_mutex_unlock(&s->send_lock);
     
-    pthread_join(s->mouse_thread, NULL);
-    pthread_join(s->kbd_thread, NULL);
-    pthread_join(s->send_thread, NULL);
+    if (s->mouse_thread) pthread_join(s->mouse_thread, NULL);
+    if (s->kbd_thread)   pthread_join(s->kbd_thread, NULL);
+    if (s->send_thread)  pthread_join(s->send_thread, NULL);
     
     wlr_keyboard_finish(&s->virtual_kb);
     

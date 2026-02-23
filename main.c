@@ -2,7 +2,7 @@
  * main.c - p9wl application entry point
  *
  * Argument parsing, 9P connection setup with optional TLS,
- * wlroots initialization, and main event loop.
+ * wlroots initialization, child process spawning, and main event loop.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -85,7 +85,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
                       enum wlr_log_importance *log_level,
                       struct tls_config *tls_cfg,  
                       char ***exec_argv, int *exec_argc) {
-    static char host_buf[256];
+    static char host_buf[256];  /* Static: lifetime matches program, not reentrant */
 
     *host = NULL;
     *port = -1;
@@ -154,6 +154,7 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     return 0;
 }
 
+/* Connect all five 9P sessions, rolling back on failure. */
 static int connect_9p_sessions(struct server *s, struct tls_config *tls_cfg) {
     struct p9conn *conns[] = {
         &s->p9_draw, &s->p9_mouse, &s->p9_kbd, &s->p9_wctl, &s->p9_snarf
@@ -172,6 +173,17 @@ static int connect_9p_sessions(struct server *s, struct tls_config *tls_cfg) {
     return 0;
 }
 
+/*
+ * Initialize all wlroots subsystems.
+ *
+ * Order matters: renderer and allocator must exist before protocols
+ * that need them, scene graph before background rect, and the headless
+ * output is created last so that new_output fires after everything
+ * else is wired up.
+ *
+ * Sets WLR_RENDERER=pixman to force software rendering (required for
+ * headless framebuffer extraction).
+ */
 static int init_wayland(struct server *s) {
     setenv("WLR_RENDERER", "pixman", 1);
     setenv("WLR_SCENE_DISABLE_DIRECT_SCANOUT", "1", 1);
@@ -212,8 +224,8 @@ static int init_wayland(struct server *s) {
     wlr_scene_attach_output_layout(s->scene, s->output_layout);
 
     /* Background */
-    int logical_w = (int)(s->width / s->scale + 0.5f);
-    int logical_h = (int)(s->height / s->scale + 0.5f);
+    int logical_w = focus_phys_to_logical(s->width, s->scale);
+    int logical_h = focus_phys_to_logical(s->height, s->scale);
     float gray[4] = { 0.3f, 0.3f, 0.3f, 1.0f };
     s->background = wlr_scene_rect_create(&s->scene->tree, logical_w, logical_h, gray);
     if (s->background)
@@ -273,6 +285,7 @@ static const char *setup_socket(struct server *s) {
         return NULL;
     setenv("WAYLAND_DISPLAY", sock, 1);
     wlr_log(WLR_INFO, "WAYLAND_DISPLAY=%s (%dx%d)", sock, s->width, s->height);
+    /* Print to stdout for parent process socket discovery */
     fprintf(stdout, "WAYLAND_DISPLAY=%s\n", sock);
     return sock;
 }
@@ -348,7 +361,8 @@ int main(int argc, char *argv[]) {
     if (s.scale > 1.0f) {
         wlr_log(WLR_INFO, "Physical: %dx%d, Scale: %.2f, Logical: %dx%d",
                 s.width, s.height, s.scale,
-                (int)(s.width / s.scale + 0.5f), (int)(s.height / s.scale + 0.5f));
+                focus_phys_to_logical(s.width, s.scale),
+                focus_phys_to_logical(s.height, s.scale));
     }
 
     s.framebuf = calloc(s.width * s.height, 4);
