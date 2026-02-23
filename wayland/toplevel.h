@@ -16,8 +16,8 @@
  *      - Positions scene node at (0,0)
  *      - Initializes empty subsurface tracking list
  *      - Adds to server's toplevel list
- *      - Sets up commit, destroy, request_fullscreen, and
- *        request_maximize listeners
+ *      - Sets up commit, destroy, xdg_destroy, request_fullscreen,
+ *        and request_maximize listeners
  *
  *   2. toplevel_commit() - Called on each surface commit
  *      - Initial commit: sends configure with logical dimensions,
@@ -29,22 +29,32 @@
  *      - Sets scene_dirty flag and schedules output frame
  *
  *   2a. toplevel_request_fullscreen() - Called on fullscreen request
+ *       - Skips if surface not yet initialized (guard against early calls)
  *       - Acknowledges the fullscreen state so the browser's Fullscreen
  *         API resolves (e.g. YouTube fullscreen button)
  *       - No geometry change needed since toplevels already fill the window
  *
  *   2b. toplevel_request_maximize() - Called on maximize request
+ *       - Skips if surface not yet initialized (Firefox sends this early)
  *       - Acknowledges the maximized state to keep client in sync
  *       - No geometry change needed since toplevels already fill the window
  *
- *   3. toplevel_destroy() - Called when toplevel is destroyed
+ *   3. toplevel_xdg_destroy() - Called when xdg_toplevel is destroyed
+ *      - Fires BEFORE xdg_surface destroy (wlroots destruction order)
+ *      - Removes request_fullscreen, request_maximize, and xdg_destroy
+ *        listeners before wlroots asserts their lists are empty
+ *      - Sets tl->xdg = NULL to signal toplevel_destroy and
+ *        toplevel_commit that the xdg_toplevel is gone
+ *
+ *   4. toplevel_destroy() - Called when xdg_surface is destroyed
  *      - Calls focus_on_surface_destroy() to clean up focus state
  *      - Cleans up all tracked subsurfaces
+ *      - If tl->xdg is still set (shouldn't happen normally),
+ *        removes toplevel-specific listeners as a safety fallback
  *      - Removes from server's toplevel list
  *      - Frees toplevel struct
  *      - If last toplevel (s->had_toplevel && list empty):
  *        * Sets s->running = 0 and joins send_thread
- *        * Deletes rio window via delete_rio_window()
  *        * Disconnects p9_draw and calls exit(0)
  *
  * Subsurface Tracking:
@@ -85,7 +95,8 @@
  * Handle new XDG toplevel creation.
  *
  * Creates the scene tree, initializes the toplevel struct, adds it to
- * the server's toplevel list, and sets up commit/destroy listeners.
+ * the server's toplevel list, and sets up commit, destroy, xdg_destroy,
+ * request_fullscreen, and request_maximize listeners.
  *
  * The toplevel is configured to fill the entire output at the current
  * logical dimensions (s->width/s->scale by s->height/s->scale), with
