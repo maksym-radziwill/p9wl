@@ -119,6 +119,8 @@ static void toplevel_request_fullscreen(struct wl_listener *l, void *d) {
     struct toplevel *tl = wl_container_of(l, tl, request_fullscreen);
     (void)d;
     
+    if (!tl->xdg->base->initialized) return;
+    
     /* Already filling the whole window — just acknowledge the state change
      * so the Fullscreen API promise resolves in the browser. */
     wlr_xdg_toplevel_set_fullscreen(tl->xdg, tl->xdg->requested.fullscreen);
@@ -131,9 +133,11 @@ static void toplevel_request_maximize(struct wl_listener *l, void *d) {
     struct toplevel *tl = wl_container_of(l, tl, request_maximize);
     (void)d;
     
+    if (!tl->xdg->base->initialized) return;
+    
     /* Already maximized — acknowledge so client state stays in sync. */
-    //    wlr_xdg_toplevel_set_maximized(tl->xdg, true);
-    //    wlr_xdg_surface_schedule_configure(tl->xdg->base);
+    wlr_xdg_toplevel_set_maximized(tl->xdg, true);
+    wlr_xdg_surface_schedule_configure(tl->xdg->base);
     wlr_log(WLR_INFO, "Maximize acknowledged");
 }
 
@@ -165,7 +169,6 @@ static void toplevel_commit(struct wl_listener *l, void *d) {
     
     struct wlr_xdg_surface *xdg_surface = tl->xdg->base;
     struct wlr_surface *surface = xdg_surface->surface;
-    (void)d;
     
     if (xdg_surface->initial_commit) {
         int logical_w = focus_phys_to_logical(s->width, s->scale);
