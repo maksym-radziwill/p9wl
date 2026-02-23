@@ -73,7 +73,7 @@
  *       - Compute compression cost WITHOUT scroll (vs prev_framebuf)
  *       - Compute compression cost WITH scroll (vs shifted prev_framebuf)
  *
- *     If bytes_with_scroll >= bytes_no_scroll:
+ *     If bytes_with_scroll > bytes_no_scroll:
  *       - Reject the scroll (false positive or not beneficial)
  *
  *   This verification catches cases where:

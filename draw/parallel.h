@@ -7,8 +7,8 @@
  *
  * Architecture Overview:
  *
- *   The pool uses a work-stealing model where workers compete for
- *   indices from a shared counter protected by a mutex:
+ *   The pool uses a dynamic work distribution model where workers
+ *   compete for indices from a shared counter protected by a mutex:
  *
  *     Caller Thread              Worker Threads
  *     ─────────────              ──────────────

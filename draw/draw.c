@@ -74,9 +74,8 @@ static void center_in_window(int actual_min, int actual_max, int aligned_dim,
  * Fill entire window with a solid color to hide junk in the border
  * area between tile-aligned content and the window edge.
  *
- * Computes the average color from prev_framebuf (if available) so
- * the border blends with screen content.  Falls back to black.
- * Updates border_id's single pixel via 'y' command, then draws
+ * Uses black (0xff000000) as the border color, then updates
+ * border_id's single pixel via 'y' command, then draws
  * it across the whole window.
  */
 static void clear_window(struct server *s) {
@@ -624,7 +623,7 @@ int init_draw(struct server *s) {
     PUT32(bcmd + off, draw->border_id); off += 4;
     PUT32(bcmd + off, 0); off += 4;
     bcmd[off++] = 0;
-    PUT32(bcmd + off, 0x48081828); off += 4;  /* chan = XRGB32 */
+    PUT32(bcmd + off, 0x48081828); off += 4;  /* chan = ARGB32 */
     bcmd[off++] = 1;                           /* repl = 1 */
     PUT32(bcmd + off, 0); off += 4;
     PUT32(bcmd + off, 0); off += 4;

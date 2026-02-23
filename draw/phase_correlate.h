@@ -59,7 +59,7 @@
  *     plan_fwd1, plan_fwd2: Forward FFT plans
  *     plan_inv:           Inverse FFT plan
  *
- *   Total per-thread allocation: ~1.3 MB for FFT_SIZE=256
+ *   Total per-thread allocation: ~1.5 MB for FFT_SIZE=256
  *
  * Accuracy vs Speed:
  *
@@ -69,7 +69,7 @@
  *     ------+---------------+----------+-------
  *      64   |    ~80 KB     |   Low    | Fast
  *     128   |   ~320 KB     |  Medium  | Medium
- *     256   |   ~1.3 MB     |   High   | Slower
+ *     256   |   ~1.5 MB     |   High   | Slower
  *     512   |   ~5.2 MB     |  V.High  | Slow
  *
  *   256 is the default, providing good accuracy for detecting scrolls
@@ -97,7 +97,7 @@
  * Must be a power of 2. Larger sizes give more accuracy but are slower
  * and use more memory. 256 is a good balance for scroll detection.
  *
- * Memory usage per thread: ~20 * FFT_SIZE² bytes
+ * Memory usage per thread: ~24 * FFT_SIZE² bytes
  */
 #define FFT_SIZE 256
 

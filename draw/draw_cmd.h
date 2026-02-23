@@ -135,7 +135,7 @@ static inline int draw_cmd_sp(uint8_t *buf, uint32_t dst, uint32_t src, uint32_t
  *
  * Creates a new image with the specified properties.
  *
- * buf:   output buffer (must have 55 bytes available)
+ * buf:   output buffer (must have 51 bytes available)
  * id:    image ID to assign (client-chosen, must be unique)
  * chan:  channel format (CHAN_XRGB32, CHAN_ARGB32, CHAN_GREY1)
  * repl:  if non-zero, image is replicated (tiled) when drawn
@@ -148,7 +148,7 @@ static inline int draw_cmd_sp(uint8_t *buf, uint32_t dst, uint32_t src, uint32_t
  *
  * Wire format: b id[4] screenid[4] refresh[1] chan[4] repl[1] r[16] clipr[16] color[4]
  *
- * Returns bytes written (always 55).
+ * Returns bytes written (always 51).
  */
 static inline int alloc_image_cmd(uint8_t *buf, uint32_t id, uint32_t chan, int repl,
                                   int x1, int y1, int x2, int y2, uint32_t color) {
@@ -177,7 +177,7 @@ static inline int alloc_image_cmd(uint8_t *buf, uint32_t id, uint32_t chan, int 
         PUT32(buf + off, y2); off += 4;
     }
     PUT32(buf + off, color); off += 4;
-    return off;  /* 55 bytes */
+    return off;  /* 51 bytes */
 }
 
 /*
