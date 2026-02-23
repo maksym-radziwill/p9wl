@@ -4,7 +4,7 @@
 # Clean: make clean
 
 CC = gcc
-CFLAGS = -g -Wall -Wextra -DWLR_USE_UNSTABLE -I. -Isrc
+CFLAGS = -O3 -Wall -Wextra -DWLR_USE_UNSTABLE -I. -Isrc
 CFLAGS += $(shell pkg-config --cflags wlroots-0.19 wayland-server xkbcommon pixman-1)
 LDFLAGS = $(shell pkg-config --libs wlroots-0.19 wayland-server xkbcommon pixman-1)
 LDFLAGS += -lpthread -lm -lssl -lcrypto -lfftw3f
