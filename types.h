@@ -226,7 +226,8 @@ struct toplevel {
     struct wlr_scene_tree *scene_tree;
     struct wlr_surface *surface;    /* Stored for focus cleanup in destroy */
     struct wl_listener commit;      /* Handle surface commits */
-    struct wl_listener destroy;     /* Cleanup on destroy */
+    struct wl_listener destroy;     /* Cleanup on xdg_surface destroy */
+    struct wl_listener xdg_destroy; /* Cleanup on xdg_toplevel destroy (fires first) */
     struct wl_listener request_fullscreen;  /* Fullscreen state toggle */
     struct wl_listener request_maximize;    /* Maximize state toggle */
     struct wl_list subsurfaces;     /* List of subsurface_track */

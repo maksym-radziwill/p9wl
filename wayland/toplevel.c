@@ -132,14 +132,37 @@ static void toplevel_request_maximize(struct wl_listener *l, void *d) {
     (void)d;
     
     /* Already maximized — acknowledge so client state stays in sync. */
-    wlr_xdg_toplevel_set_maximized(tl->xdg, true);
-    wlr_xdg_surface_schedule_configure(tl->xdg->base);
+    //    wlr_xdg_toplevel_set_maximized(tl->xdg, true);
+    //    wlr_xdg_surface_schedule_configure(tl->xdg->base);
     wlr_log(WLR_INFO, "Maximize acknowledged");
+}
+
+/*
+ * Handle xdg_toplevel destruction.
+ *
+ * wlroots destroys the xdg_toplevel BEFORE the xdg_surface, and asserts
+ * that all toplevel event listener lists are empty. Our main
+ * toplevel_destroy listens on xdg_surface destroy (too late). This
+ * handler fires on xdg_toplevel destroy to remove toplevel-specific
+ * listeners before the assertion.
+ */
+static void toplevel_xdg_destroy(struct wl_listener *l, void *d) {
+    struct toplevel *tl = wl_container_of(l, tl, xdg_destroy);
+    (void)d;
+    
+    wl_list_remove(&tl->request_fullscreen.link);
+    wl_list_remove(&tl->request_maximize.link);
+    wl_list_remove(&tl->xdg_destroy.link);
+    tl->xdg = NULL;
 }
 
 static void toplevel_commit(struct wl_listener *l, void *d) {
     struct toplevel *tl = wl_container_of(l, tl, commit);
     struct server *s = tl->server;
+    (void)d;
+    
+    if (!tl->xdg) return;
+    
     struct wlr_xdg_surface *xdg_surface = tl->xdg->base;
     struct wlr_surface *surface = xdg_surface->surface;
     (void)d;
@@ -202,8 +225,16 @@ static void toplevel_destroy(struct wl_listener *l, void *d) {
     
     wl_list_remove(&tl->commit.link);
     wl_list_remove(&tl->destroy.link);
-    wl_list_remove(&tl->request_fullscreen.link);
-    // wl_list_remove(&tl->request_maximize.link);
+    
+    /* xdg_destroy handler may have already removed these; if xdg is
+     * still set it means the toplevel outlived its xdg_toplevel destroy
+     * signal (shouldn't happen, but be safe). */
+    if (tl->xdg) {
+        wl_list_remove(&tl->request_fullscreen.link);
+        wl_list_remove(&tl->request_maximize.link);
+        wl_list_remove(&tl->xdg_destroy.link);
+    }
+    
     wl_list_remove(&tl->link);
     free(tl);
     
@@ -272,11 +303,14 @@ void new_toplevel(struct wl_listener *l, void *d) {
     tl->destroy.notify = toplevel_destroy;
     wl_signal_add(&xdg->base->events.destroy, &tl->destroy);
     
+    tl->xdg_destroy.notify = toplevel_xdg_destroy;
+    wl_signal_add(&xdg->events.destroy, &tl->xdg_destroy);
+    
     tl->request_fullscreen.notify = toplevel_request_fullscreen;
     wl_signal_add(&xdg->events.request_fullscreen, &tl->request_fullscreen);
     
-    //    tl->request_maximize.notify = toplevel_request_maximize;
-    //    wl_signal_add(&xdg->events.request_maximize, &tl->request_maximize);
+    tl->request_maximize.notify = toplevel_request_maximize;
+    wl_signal_add(&xdg->events.request_maximize, &tl->request_maximize);
     
     wlr_log(WLR_INFO, "XDG surface scene tree created at (0,0)");
 }
