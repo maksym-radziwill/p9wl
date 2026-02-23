@@ -45,7 +45,7 @@
  *
  * Damage-Based Dirty Tile Tracking:
  *
- *   To avoid expensive full-frame pixel comparisons, the output thread
+ *   To avoid scanning every tile for changes, the output thread
  *   extracts compositor damage into a per-tile bitmap:
  *
  *     s->dirty_staging:       Written by output thread (no lock needed)
@@ -61,8 +61,11 @@
  *        because pointer swap recycles buffers with stale data)
  *     4. send_frame() swaps framebuf pointer with send_buf, copies
  *        dirty_staging into dirty_tiles[buf]
- *     5. Send thread trusts dirty_tiles as ground truth: undamaged tiles
- *        are skipped, damaged tiles are assumed changed (no tile_changed)
+ *     5. Send thread uses dirty_tiles to skip undamaged tiles entirely
+ *        (no memory read). Damaged tiles are verified with tile_changed()
+ *        to confirm they actually differ from prev_framebuf, since the
+ *        headless backend reports full-screen damage on every frame
+ *        and many "damaged" tiles may be pixel-identical.
  *
  *   The headless backend reports full-screen damage on every frame, so
  *   ostate.damage alone cannot detect idle screens.  The scene_dirty flag
@@ -81,7 +84,8 @@
  *     1. Send thread calls p9_write_send() (non-blocking)
  *     2. drain_notify() signals drain thread
  *     3. Drain thread reads Rwrite response asynchronously
- *     4. Drain thread signals done_cond after decrementing pending
+ *     4. Drain thread signals done_cond after each completed response to wake
+ *        drain_throttle() and drain_pause() without polling
  *     5. Send thread continues with next batch
  *
  *   The drain_throttle() function prevents unbounded pipelining
@@ -111,8 +115,8 @@
  *
  *     4. Tile Change Detection:
  *        - If dirty tile bitmap is available and no scroll occurred,
- *          trust damage as ground truth: skip undamaged tiles, mark
- *          damaged tiles as changed without pixel comparison
+ *          skip undamaged tiles without any memory read, then verify
+ *          damaged tiles with tile_changed() to confirm actual changes
  *        - Otherwise fall back to comparing send_buf vs prev_framebuf
  *          for every tile via tile_changed()
  *        - Build list of changed tiles (struct tile_work)
@@ -131,12 +135,31 @@
  *
  *     7. Final Batch:
  *        - 'd' command to copy image_id to screen_id
- *        - Border fill commands (if window has margins)
  *        - 'v' flush command to display
  *
  *     8. State Update:
  *        - Copy sent tiles to prev_framebuf
  *        - Enable alpha-delta mode after first successful frame
+ *
+ * Border Drawing:
+ *
+ *   When the window is larger than the tile-aligned content area,
+ *   borders are drawn by clear_window() in draw.c during init_draw()
+ *   and relookup_window(), not per-frame by the send thread.
+ *   clear_window() fills the margin strips between the content area
+ *   and the window edges using the border_id color image:
+ *
+ *     +---------------------------+
+ *     |      top border           |
+ *     +---+---------------+-------+
+ *     | L |               |   R   |
+ *     | E |   content     |   I   |
+ *     | F |     area      |   G   |
+ *     | T |               |   H   |
+ *     |   |               |   T   |
+ *     +---+---------------+-------+
+ *     |     bottom border         |
+ *     +---------------------------+
  *
  * Alpha-Delta Mode:
  *
@@ -151,23 +174,6 @@
  *   The 0xDEADBEEF marker in prev_framebuf indicates scroll-exposed
  *   regions where delta encoding should be disabled (no valid reference).
  *
- * Border Drawing:
- *
- *   When the window is larger than the tile-aligned content area,
- *   write_borders() fills the margins with border_id color:
- *
- *     +---------------------------+
- *     |      top border           |
- *     +---+---------------+-------+
- *     | L |               |   R   |
- *     | E |   content     |   I   |
- *     | F |     area      |   G   |
- *     | T |               |   H   |
- *     |   |               |   T   |
- *     +---+---------------+-------+
- *     |     bottom border         |
- *     +---------------------------+
- *
  * Scroll Disabling:
  *
  *   Scroll detection is disabled when s->scale has a fractional
@@ -178,11 +184,16 @@
  *
  *   s->send_lock protects:
  *     - s->pending_buf, s->active_buf
- *     - s->send_full, s->force_full_frame
+ *     - s->send_full
  *     - s->resize_pending
  *     - s->framebuf, s->send_buf[] pointer swaps
  *     - s->dirty_tiles[], s->dirty_valid[] (per-buffer bitmaps)
  *     - s->dirty_staging_valid (read and cleared by send_frame)
+ *
+ *   s->force_full_frame is accessed without send_lock by both the
+ *   send thread and draw.c (relookup_window). It is a simple flag
+ *   where a missed update results in at most one redundant full frame,
+ *   so the race is benign.
  *
  *   s->send_cond is signaled by send_frame() (new frame) and by the
  *   mouse thread on resize notification ('r' from /dev/mouse) to wake
@@ -193,14 +204,16 @@
  *   synchronization is needed for the staging buffer itself.
  *
  *   drain.lock protects drain.cond and drain.done_cond:
- *     - drain.cond: signaled by drain_notify/drain_wake to wake the
- *       drain thread when work is available
+ *     - drain.cond: signaled by drain_wake() (called from drain_notify
+ *       and drain_resume) to wake the drain thread when work is available
  *     - drain.done_cond: broadcast by the drain thread after each
  *       completed response; waited on by drain_throttle() and
  *       drain_pause() to sleep until pending count drops
  *
- *   The drain thread uses atomic operations for its counters
- *   (pending, errors, running, paused).
+ *   The drain thread uses atomic operations (via <stdatomic.h>) for
+ *   its counters: pending, errors, running, paused. This allows the
+ *   send thread to read these counters without acquiring drain.lock,
+ *   reducing contention on the hot path.
  */
 
 #ifndef SEND_H

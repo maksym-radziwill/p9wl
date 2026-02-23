@@ -249,15 +249,11 @@ int write_scroll_commands(struct server *s, uint8_t *batch, size_t max_size);
 /*
  * Timing statistics from the last detect_scroll() call.
  *
- * All times are in microseconds. Updated by detect_scroll().
+ * Updated by detect_scroll() at the start and end of each call.
+ * Fields are zeroed at the beginning of each detect_scroll() invocation.
  */
 struct scroll_timing {
     double total_us;         /* Total time for detect_scroll() */
-    double extract_us;       /* Time extracting regions to FFT buffers */
-    double fft_us;           /* Time in FFT forward/inverse transforms */
-    double correlation_us;   /* Time computing cross-correlation */
-    double peak_us;          /* Time finding correlation peak */
-    double verify_us;        /* Time verifying scroll benefit */
     int regions_processed;   /* Number of regions analyzed */
     int regions_detected;    /* Number of regions with detected scroll */
 };
@@ -265,10 +261,11 @@ struct scroll_timing {
 /*
  * Get timing statistics from the last detect_scroll() call.
  *
- * Returns pointer to internal struct. Valid until the next
+ * Returns pointer to internal static struct. Valid until the next
  * detect_scroll() call. Do not free the returned pointer.
  *
- * Returns NULL if detect_scroll() has never been called.
+ * Before detect_scroll() has been called, returns a pointer to a
+ * zeroed struct (all fields are 0).
  */
 const struct scroll_timing *scroll_get_timing(void);
 

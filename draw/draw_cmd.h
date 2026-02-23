@@ -19,7 +19,6 @@
  *     'n' (name):   Look up image by name
  *     'y' (load):   Load uncompressed pixel data
  *     'Y' (loadc):  Load compressed pixel data
- *     's' (scroll): Copy region within same image (internal blit)
  *
  * Image IDs:
  *
@@ -302,47 +301,7 @@ static inline int write_compressed_header(uint8_t *buf, uint32_t id,
     return off;  /* 21 bytes */
 }
 
-/* ============== Scroll Command ============== */
 
-/*
- * Emit 's' (scroll/copy) command for internal blits.
- *
- * Copies a region within an image (or between images).
- * Commonly used for scroll operations where existing pixels
- * can be shifted rather than retransmitted.
- *
- * buf:       output buffer (must have 45 bytes available)
- * dst:       destination image ID
- * src:       source image ID (often same as dst for scroll)
- * mask:      mask image ID
- * x1, y1:    destination rectangle top-left
- * x2, y2:    destination rectangle bottom-right
- * sp_x, sp_y: source point (where to copy from)
- *
- * For scrolling down by N pixels: sp_y = y1 - N
- * For scrolling right by N pixels: sp_x = x1 - N
- *
- * Wire format: s dst[4] src[4] mask[4] r[16] sp[8] mp[8]
- *
- * Returns bytes written (always 45).
- */
-static inline int scroll_cmd(uint8_t *buf, uint32_t dst, uint32_t src, uint32_t mask,
-                             int x1, int y1, int x2, int y2, int sp_x, int sp_y) {
-    int off = 0;
-    buf[off++] = 's';
-    PUT32(buf + off, dst); off += 4;
-    PUT32(buf + off, src); off += 4;
-    PUT32(buf + off, mask); off += 4;
-    PUT32(buf + off, x1); off += 4;
-    PUT32(buf + off, y1); off += 4;
-    PUT32(buf + off, x2); off += 4;
-    PUT32(buf + off, y2); off += 4;
-    PUT32(buf + off, sp_x); off += 4;
-    PUT32(buf + off, sp_y); off += 4;
-    PUT32(buf + off, 0); off += 4;  /* mp.x */
-    PUT32(buf + off, 0); off += 4;  /* mp.y */
-    return off;
-}
 
 /* ============== Channel Format Constants ============== */
 

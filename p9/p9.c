@@ -323,6 +323,41 @@ int p9_clunk(struct p9conn *p9, uint32_t fid) {
     return r >= 0 ? 0 : -1;
 }
 
+/* Tstat - get file metadata, extract qid.vers */
+int p9_stat(struct p9conn *p9, uint32_t fid, uint32_t *qid_vers) {
+    uint8_t *buf = p9->buf;
+
+    pthread_mutex_lock(&p9->lock);
+    buf[4] = Tstat;
+    PUT16(buf + 5, p9->tag++);
+    PUT32(buf + 7, fid);
+
+    int rxlen = p9_rpc_locked(p9, 11, Rstat);
+    if (rxlen < 0) {
+        pthread_mutex_unlock(&p9->lock);
+        return -1;
+    }
+
+    /*
+     * Rstat: size[4] type[1] tag[2] nstat[2] stat[nstat]
+     * stat:  size[2] type[2] dev[4] qid.type[1] qid.vers[4] qid.path[8] ...
+     *
+     * qid.vers is at buf offset 7+2+2+2+4+1 = 18
+     */
+    if (rxlen < 22) {
+        wlr_log(WLR_ERROR, "p9_stat: response too short (%d bytes)", rxlen);
+        pthread_mutex_unlock(&p9->lock);
+        return -1;
+    }
+
+    if (qid_vers) {
+        *qid_vers = GET32(buf + 18);
+    }
+
+    pthread_mutex_unlock(&p9->lock);
+    return 0;
+}
+
 /* ============== Helper: walk + open in one call ============== */
 
 /*

@@ -8,7 +8,7 @@
  * Architecture Overview:
  *
  *   The pool uses a work-stealing model where workers compete for
- *   indices from a shared counter:
+ *   indices from a shared counter protected by a mutex:
  *
  *     Caller Thread              Worker Threads
  *     ─────────────              ──────────────
@@ -17,11 +17,11 @@
  *       set count      ├────┤    ├─── worker 2
  *       broadcast ─────┤    │    └─── worker 3
  *       wait done ◄────┘    │         ...
- *                           └─── workers grab next_idx atomically
+ *                           └─── workers claim next_idx under lock
  *
  *   Each worker:
  *     1. Waits on work_cond for work
- *     2. Atomically increments next_idx to claim an index
+ *     2. Claims next_idx under pool.lock (increment + read)
  *     3. Calls fn(ctx, idx) outside the lock
  *     4. Increments done_count and signals if complete
  *     5. Loops back to wait for more work
@@ -47,7 +47,7 @@
  *
  * Synchronization:
  *
- *   pool.lock protects:
+ *   pool.lock (mutex) protects:
  *     - fn, ctx (work function and context)
  *     - count (total work items)
  *     - next_idx (next unclaimed index)
@@ -86,7 +86,7 @@
  *
  *   - Zero allocation per call (pool persists)
  *   - Minimal lock contention (workers unlock before fn())
- *   - Good load balancing (work-stealing via atomic counter)
+ *   - Good load balancing (work-stealing via shared counter)
  *   - Low latency (workers stay warm, no thread creation)
  *
  *   Optimal for:
@@ -151,9 +151,10 @@ typedef void (*parallel_fn)(void *ctx, int idx);
 /*
  * Execute a function in parallel for indices 0 to count-1.
  *
- * Distributes work across the thread pool using work-stealing.
- * Each index is processed exactly once. The call blocks until
- * all work items complete.
+ * Distributes work across the thread pool. Workers claim indices
+ * from a shared counter under mutex protection. Each index is
+ * processed exactly once. The call blocks until all work items
+ * complete.
  *
  * On first call, initializes the thread pool (lazy initialization).
  * Thread pool persists across calls for efficiency.

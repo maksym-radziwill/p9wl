@@ -2,17 +2,16 @@
  * input.h - Input handling for Plan 9 to Wayland bridge
  *
  * This module handles:
- *   - Keyboard input: Reading from /dev/kbd (/dev/cons as fallback), translating
- *     Plan 9 runes to Linux keycodes, and injecting into Wayland
+ *   - Keyboard input: Reading from /dev/kbd, translating Plan 9 runes
+ *     to Linux keycodes, and injecting into Wayland
  *   - Mouse input: Reading from /dev/mouse and forwarding to Wayland
- *   - Window control: Monitoring /dev/wctl for geometry changes
  *   - Input queue: Thread-safe queue for passing events to main loop
  *
  * Key Translation:
  *
  *   Plan 9 sends UTF-8 runes (characters) while Wayland/Linux expects
- *   keycodes (physical keys). This module provides both static and
- *   dynamic (via /dev/kbmap) translation tables.
+ *   keycodes (physical keys). This module provides a static translation
+ *   table (US QWERTY layout).
  *
  * Usage:
  *
@@ -24,11 +23,10 @@
  *
  *     pthread_create(&server->mouse_thread, NULL, mouse_thread_func, server);
  *     pthread_create(&server->kbd_thread, NULL, kbd_thread_func, server);
- *     pthread_create(&server->wctl_thread, NULL, wctl_thread_func, server);
  *
- *   Key lookup with dynamic kbmap fallback:
+ *   Key lookup:
  *
- *     const struct key_map *km = keymap_lookup_dynamic(&server->kbmap, rune);
+ *     const struct key_map *km = keymap_lookup(rune);
  *     if (km) {
  *         // Use km->keycode, km->shift, km->ctrl
  *     }
@@ -44,9 +42,6 @@
 
 #include "../types.h"       /* For struct server, input_queue, input_event */
 #include "plan9_keys.h"     /* Canonical Plan 9 key definitions */
-
-/* Forward declaration */
-struct kbmap;
 
 /* ============== Key Mapping ============== */
 
@@ -67,7 +62,7 @@ struct key_map {
 };
 
 /*
- * Static keymap table (US QWERTY layout fallback).
+ * Static keymap table (US QWERTY layout).
  * Null-terminated array defined in input.c.
  */
 extern const struct key_map keymap[];
@@ -77,32 +72,25 @@ extern const struct key_map keymap[];
 /*
  * Look up a key mapping by rune using the static table.
  *
- * This is the fallback when dynamic kbmap is unavailable.
- * Prefer keymap_lookup_dynamic().
- *
  * rune: Plan 9 rune value to look up
  *
  * Returns pointer to static key_map entry, or NULL if not found.
- * Logs error for unmapped runes >= 0x80 or special keys.
+ * Logs error for unmapped runes.
  */
 const struct key_map *keymap_lookup(uint32_t rune);
 
 /*
- * Look up a key mapping using dynamic kbmap with static fallback.
+ * Look up a key mapping (compatibility wrapper).
  *
- * Checks the dynamic kbmap first (loaded from /dev/kbmap), then
- * falls back to the static keymap table if not found or if kbmap
- * is not loaded.
+ * The km parameter is ignored; this simply calls keymap_lookup().
+ * Retained so call sites don't need to change.
  *
- * km:   pointer to dynamic kbmap (may be NULL)
+ * km:   ignored (formerly dynamic kbmap, now removed)
  * rune: Plan 9 rune value to look up
  *
  * Returns pointer to key_map entry, or NULL if not found.
- *
- * Note: For dynamic lookups, returns pointer to static internal
- * storage that is overwritten on each call. Copy if needed.
  */
-const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune);
+const struct key_map *keymap_lookup_dynamic(void *km, uint32_t rune);
 
 /*
  * Get wlroots modifier mask for a modifier rune.
@@ -178,8 +166,15 @@ void *mouse_thread_func(void *arg);
 /*
  * Keyboard input thread function.
  *
- * Handle 'k', and 'K' message
- * types, and pushes INPUT_KEY events to the queue. 
+ * Reads from /dev/kbd and processes 'k' and 'K' messages to detect
+ * key press/release events. Compares current and previous key sets
+ * to determine which keys were pressed or released, and pushes
+ * INPUT_KEY events to the queue.
+ *
+ * Note: 'c' (character) messages from /dev/kbd are not processed.
+ * Key events are derived entirely from the 'k'/'K' key-set messages,
+ * which provide the full set of currently held keys. This allows
+ * proper modifier tracking without needing 'c' messages.
  *
  * arg: pointer to struct server
  *

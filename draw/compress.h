@@ -54,12 +54,21 @@
  *
  * Adaptive Selection (compress_tile_adaptive):
  *
- *   Tries both encoding paths and returns the smaller result:
- *     - Returns positive size if alpha-delta is smaller
+ *   Tries both encoding paths and returns the smaller result.
+ *   When comparing, the alpha-delta compressed size has
+ *   ALPHA_DELTA_OVERHEAD (45 bytes) added to account for the
+ *   composite command needed server-side; the returned size does
+ *   NOT include this overhead (it is the raw compressed data size).
+ *
+ *     - Returns positive size if alpha-delta (including overhead) is smaller
  *     - Returns negative size if direct is smaller
  *     - Returns 0 if neither achieves 25% compression
  *
  *   When prev_pixels is NULL, only the direct path is attempted.
+ *
+ *   Note: alpha-delta may also return 0 (and thus be unavailable) if
+ *   more than 75% of pixels changed, since the delta buffer would be
+ *   too dense for effective compression.
  *
  * Parallel Compression:
  *
@@ -104,7 +113,10 @@ struct tile_result {
  * prev_stride: previous frame stride in pixels
  * x1, y1:      top-left corner of tile in pixel coordinates
  * w, h:        tile dimensions (may be < TILE_SIZE at edges)
- * result:      output - compression result written here
+ *
+ * Results are written to the corresponding tile_result in the
+ * results array passed to compress_tiles_parallel(), indexed by
+ * work item position.
  */
 struct tile_work {
     uint32_t *pixels;
@@ -112,7 +124,6 @@ struct tile_work {
     uint32_t *prev_pixels;
     int prev_stride;
     int x1, y1, w, h;
-    struct tile_result *result;
 };
 
 /* ============== Core Compression Functions ============== */
@@ -184,7 +195,10 @@ int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
  * Adaptively compress a tile using the best encoding path.
  *
  * Tries both direct and alpha-delta paths, returns the smaller.
- * Accounts for ALPHA_DELTA_OVERHEAD when comparing sizes.
+ * When comparing sizes, ALPHA_DELTA_OVERHEAD is added to the
+ * alpha-delta compressed size to account for the composite command
+ * required on the server side. The returned value is the raw
+ * compressed data size (without overhead).
  *
  * dst:         output buffer
  * dst_max:     maximum bytes to write
@@ -196,7 +210,8 @@ int compress_tile_alpha_delta(uint8_t *dst, int dst_max,
  * w, h:        tile dimensions
  *
  * Returns:
- *   > 0: alpha-delta size (use alpha composite to draw)
+ *   > 0: alpha-delta size (use alpha composite to draw);
+ *        delta_size + ALPHA_DELTA_OVERHEAD was smaller than direct_size
  *   < 0: negated direct size (use direct draw)
  *   = 0: compression failed or not worthwhile for either path
  */
@@ -230,7 +245,8 @@ void compress_pool_shutdown(void);
  * Compress multiple tiles in parallel.
  *
  * Uses parallel_for() to distribute work across thread pool.
- * Results are written to corresponding tile_result structs.
+ * Results are written to the corresponding tile_result at the
+ * same index as each tile_work item.
  *
  * tiles:   array of tile work items
  * results: array of result structs (same length as tiles)

@@ -4,6 +4,7 @@
  * Provides bidirectional clipboard synchronization:
  *   - Wayland client copies (Ctrl+C) -> writes to /dev/snarf
  *   - Wayland client pastes (Ctrl+V) -> reads from /dev/snarf
+ *   - Plan 9 snarf changes          -> detected via qid.vers polling
  *
  * Design:
  *
@@ -24,8 +25,9 @@
  *     2. Client becomes selection owner (protocol requirement)
  *     3. Async read via Wayland event loop fd
  *     4. Data written to /dev/snarf via p9_write_file()
- *     5. Compositor reclaims selection ownership
- *     6. Future pastes (even Wayland-to-Wayland) go through snarf
+ *     5. Snarf poll version updated to avoid false change detection
+ *     6. Compositor reclaims selection ownership
+ *     7. Future pastes (even Wayland-to-Wayland) go through snarf
  *
  * Snarf -> Wayland (Paste):
  *
@@ -37,6 +39,26 @@
  *     4. Thread writes to client fd and closes it
  *
  *   This async approach prevents blocking the compositor on 9P I/O.
+ *
+ * Snarf Version Polling:
+ *
+ *   Rio's /dev/snarf exposes a version counter via qid.vers that
+ *   increments on each write. We poll this with Tstat every 500ms
+ *   to detect Plan 9-side clipboard changes (e.g., user copies text
+ *   in a rio window). When a change is detected:
+ *
+ *     1. Timer fires, Tstat returns new qid.vers
+ *     2. snarf_to_wayland_register() creates new data source
+ *     3. wlr_seat_set_selection() emits selection event to clients
+ *     4. Clients invalidate cached clipboard data
+ *     5. Next paste triggers fresh read from /dev/snarf
+ *
+ *   The Tstat RPC is ~50 bytes each way and runs synchronously on
+ *   the Wayland event loop (sub-millisecond on LAN).
+ *
+ *   After a Wayland-side copy writes to snarf, the tracked version
+ *   is updated immediately so the poll doesn't misinterpret the
+ *   compositor's own write as a Plan 9-side change.
  *
  * Primary Selection:
  *
@@ -68,12 +90,16 @@ struct server;
 /*
  * Initialize clipboard handling.
  *
- * Sets up listeners for Wayland selection events:
- *   - request_set_selection (Ctrl+C copy)
- *   - request_set_primary_selection (highlight copy, not synced)
+ * Sets up:
+ *   - Listener for Wayland copy events (request_set_selection)
+ *   - Listener for primary selection (not synced to snarf)
+ *   - Initial registration as selection owner
+ *   - Snarf version polling timer (500ms interval)
  *
- * Registers as initial selection owner so paste requests read from
- * /dev/snarf. Uses p9_snarf connection for 9P operations.
+ * The snarf poll walks to /dev/snarf once (without opening) and
+ * keeps the fid for periodic Tstat calls. If the initial stat
+ * fails, polling is disabled but the clipboard still works for
+ * Wayland->Plan9 copies and the first Plan9->Wayland paste.
  *
  * s: server instance (must have seat and p9_snarf initialized)
  *
@@ -84,12 +110,9 @@ int clipboard_init(struct server *s);
 /*
  * Clean up clipboard resources.
  *
- * Removes Wayland event listeners:
- *   - wayland_to_snarf (copy handler)
- *   - wayland_to_snarf_primary (primary selection handler)
- *
- * Should be called during server shutdown. Any in-flight async
- * operations (paste threads) will complete independently.
+ * Stops snarf version polling, clunks the stat fid, and removes
+ * Wayland event listeners. Any in-flight async paste threads will
+ * complete independently.
  *
  * s: server instance
  */

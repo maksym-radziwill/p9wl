@@ -373,6 +373,21 @@ int p9_write(struct p9conn *p9, uint32_t fid, uint64_t offset,
  */
 int p9_clunk(struct p9conn *p9, uint32_t fid);
 
+/*
+ * Get file metadata via Tstat.
+ *
+ * Sends Tstat and extracts qid.vers from the response. Useful for
+ * detecting file changes without reading the full contents (e.g.,
+ * rio's /dev/snarf increments qid.vers on each write).
+ *
+ * p9:       connection
+ * fid:      fid referencing the file (need not be open)
+ * qid_vers: output - qid version number, or NULL to ignore
+ *
+ * Returns 0 on success, -1 on error.
+ */
+int p9_stat(struct p9conn *p9, uint32_t fid, uint32_t *qid_vers);
+
 /* ============== High-Level File Operations ============== */
 
 /*

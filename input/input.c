@@ -20,7 +20,6 @@
 #include <wlr/types/wlr_keyboard.h>
 
 #include "input.h"
-#include "kbmap.h"
 #include "plan9_keys.h"
 #include "../p9/p9.h"
 
@@ -128,19 +127,8 @@ const struct key_map *keymap_lookup(uint32_t rune) {
     return NULL;
 }
 
-static struct key_map dynamic_result;
-
-const struct key_map *keymap_lookup_dynamic(struct kbmap *km, uint32_t rune) {
-    if (km && km->loaded) {
-        const struct kbmap_entry *entry = kbmap_lookup(km, (int)rune);
-        if (entry) {
-            dynamic_result.rune = entry->rune;
-            dynamic_result.keycode = entry->keycode;
-            dynamic_result.shift = entry->shift;
-            dynamic_result.ctrl = entry->ctrl;
-            return &dynamic_result;
-        }
-    }
+const struct key_map *keymap_lookup_dynamic(void *km, uint32_t rune) {
+    (void)km;
     return keymap_lookup(rune);
 }
 

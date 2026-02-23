@@ -4,10 +4,12 @@
  * Syncs the Wayland clipboard with Plan 9's /dev/snarf:
  * - When a Wayland client copies, write to /dev/snarf
  * - When a Wayland client pastes, read from /dev/snarf (lazily, on demand)
+ * - Polls snarf qid.vers to detect Plan 9-side changes
  *
- * IMPORTANT: All 9P I/O is done asynchronously to avoid blocking the
- * Wayland event loop. The snarf read for paste operations is done in
- * a detached thread.
+ * IMPORTANT: All 9P I/O for paste operations is done asynchronously
+ * to avoid blocking the Wayland event loop. The snarf version poll
+ * (Tstat) is done synchronously on the event loop since it is a
+ * single small RPC (~1ms on LAN).
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -32,9 +34,28 @@
 #include "../p9/p9.h"
 
 #define SNARF_MAX_SIZE (1024 * 1024)  /* 1MB max clipboard */
+#define SNARF_POLL_MS  500            /* Poll interval for snarf changes */
 
-/* Forward declaration */
+/* Forward declarations */
 static void snarf_to_wayland_register(struct server *s);
+static int snarf_poll_handler(void *data);
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Snarf polling state
+ *
+ * Polls /dev/snarf's qid.vers via Tstat to detect Plan 9-side changes.
+ * When the version changes, re-registers as Wayland selection owner,
+ * which forces clients to invalidate their clipboard cache and read
+ * fresh data on the next paste.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+static struct {
+    struct server *server;
+    struct wl_event_source *timer;
+    uint32_t snarf_fid;       /* Fid walked to /dev/snarf (not opened) */
+    uint32_t last_version;    /* Last seen qid.vers from Tstat */
+    bool active;
+} snarf_poll;
 
 /* ─────────────────────────────────────────────────────────────────────────────
  * Mime type handling
@@ -125,6 +146,17 @@ static int wayland_to_snarf_read_handler(int fd, uint32_t mask, void *data) {
             wlr_log(WLR_ERROR, "wayland_to_snarf: write failed");
         } else {
             wlr_log(WLR_INFO, "wayland_to_snarf: copied %zu bytes", state->len);
+
+            /*
+             * Update tracked version so the next poll doesn't see our
+             * own write as a Plan 9-side change and re-register again.
+             */
+            if (snarf_poll.active) {
+                uint32_t vers;
+                if (p9_stat(&state->server->p9_snarf, snarf_poll.snarf_fid, &vers) == 0) {
+                    snarf_poll.last_version = vers;
+                }
+            }
         }
     }
     
@@ -362,7 +394,103 @@ static void snarf_to_wayland_register(struct server *s) {
     }
     
     wlr_seat_set_selection(s->seat, &source->base, wl_display_next_serial(s->display));
-    wlr_log(WLR_INFO, "snarf_to_wayland_register: registered as selection owner");
+    wlr_log(WLR_DEBUG, "snarf_to_wayland_register: registered as selection owner");
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Snarf Version Polling
+ *
+ * Rio's /dev/snarf exposes a version counter in qid.vers (see dostat()
+ * in rio's filsys.c: snarfversion is set on the snarf qid). We poll
+ * this via Tstat to detect Plan 9-side clipboard changes without
+ * reading the full contents each time.
+ *
+ * When the version changes, we re-register as Wayland selection owner.
+ * This emits a wl_data_device.selection event to all clients, forcing
+ * them to invalidate any cached clipboard data. The next paste will
+ * trigger snarf_to_wayland_send() which reads fresh contents.
+ *
+ * The Tstat RPC is a single request/response (~50 bytes each way)
+ * and completes in under 1ms on LAN, so running it synchronously on
+ * the Wayland event loop is acceptable.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+static int snarf_poll_handler(void *data) {
+    (void)data;
+
+    if (!snarf_poll.active)
+        return 0;
+
+    uint32_t vers;
+    if (p9_stat(&snarf_poll.server->p9_snarf, snarf_poll.snarf_fid, &vers) < 0) {
+        /* Stat failed - skip this cycle, will retry next tick */
+        wlr_log(WLR_DEBUG, "snarf_poll: stat failed, skipping");
+        wl_event_source_timer_update(snarf_poll.timer, SNARF_POLL_MS);
+        return 0;
+    }
+
+    if (vers != snarf_poll.last_version) {
+        wlr_log(WLR_INFO, "snarf_poll: version changed %u -> %u, re-registering",
+                snarf_poll.last_version, vers);
+        snarf_poll.last_version = vers;
+        snarf_to_wayland_register(snarf_poll.server);
+    }
+
+    /* Re-arm timer */
+    wl_event_source_timer_update(snarf_poll.timer, SNARF_POLL_MS);
+    return 0;
+}
+
+static int snarf_poll_init(struct server *s) {
+    struct p9conn *p9 = &s->p9_snarf;
+
+    /* Walk to /dev/snarf to get a fid for stat (don't open) */
+    snarf_poll.snarf_fid = p9->next_fid++;
+    const char *wnames[] = { "snarf" };
+
+    if (p9_walk(p9, p9->root_fid, snarf_poll.snarf_fid, 1, wnames) < 0) {
+        wlr_log(WLR_ERROR, "snarf_poll_init: walk to snarf failed");
+        return -1;
+    }
+
+    /* Get initial version baseline */
+    if (p9_stat(p9, snarf_poll.snarf_fid, &snarf_poll.last_version) < 0) {
+        wlr_log(WLR_ERROR, "snarf_poll_init: initial stat failed");
+        p9_clunk(p9, snarf_poll.snarf_fid);
+        return -1;
+    }
+
+    snarf_poll.server = s;
+
+    /* Add timer to Wayland event loop */
+    struct wl_event_loop *loop = wl_display_get_event_loop(s->display);
+    snarf_poll.timer = wl_event_loop_add_timer(loop, snarf_poll_handler, NULL);
+    if (!snarf_poll.timer) {
+        wlr_log(WLR_ERROR, "snarf_poll_init: failed to create timer");
+        p9_clunk(p9, snarf_poll.snarf_fid);
+        return -1;
+    }
+
+    wl_event_source_timer_update(snarf_poll.timer, SNARF_POLL_MS);
+    snarf_poll.active = true;
+
+    wlr_log(WLR_INFO, "snarf_poll: started (interval=%dms, initial version=%u)",
+            SNARF_POLL_MS, snarf_poll.last_version);
+    return 0;
+}
+
+static void snarf_poll_cleanup(struct server *s) {
+    if (!snarf_poll.active)
+        return;
+
+    snarf_poll.active = false;
+
+    if (snarf_poll.timer) {
+        wl_event_source_remove(snarf_poll.timer);
+        snarf_poll.timer = NULL;
+    }
+
+    p9_clunk(&s->p9_snarf, snarf_poll.snarf_fid);
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -381,12 +509,20 @@ int clipboard_init(struct server *s) {
     
     /* Snarf → Wayland: register as selection owner (reads lazily on paste) */
     snarf_to_wayland_register(s);
+
+    /* Start polling snarf for Plan 9-side changes */
+    if (snarf_poll_init(s) < 0) {
+        wlr_log(WLR_ERROR, "clipboard: snarf polling disabled (stat failed)");
+        /* Non-fatal: clipboard still works for Wayland->Plan9 direction
+         * and Plan9->Wayland on first paste after init */
+    }
     
-    wlr_log(WLR_INFO, "clipboard: initialized (async paste mode)");
+    wlr_log(WLR_INFO, "clipboard: initialized");
     return 0;
 }
 
 void clipboard_cleanup(struct server *s) {
+    snarf_poll_cleanup(s);
     wl_list_remove(&s->wayland_to_snarf.link);
     wl_list_remove(&s->wayland_to_snarf_primary.link);
 }
