@@ -1,12 +1,19 @@
 /*
- * wl_input.c - Wayland input event handling (streamlined)
+ * wl_input.c - Translate Plan 9 input events to Wayland
  *
- * Refactored:
- * - Table-driven button handling replaces repetitive if chains
- * - Table-driven scroll handling
- * - Removed duplicate KMOD_* definitions (use keymapmod() from input.c)
+ * Consumes events from the input queue (fed by mouse_thread_func and
+ * kbd_thread_func in input.c) and delivers them to Wayland clients
+ * via wlroots seat notifications.
+ *
+ * Keyboard: Plan 9 runes are mapped to Linux keycodes via keymap_lookup().
+ * Modifier state is tracked through the focus manager.
+ *
+ * Mouse: Plan 9 absolute coordinates and button bitmask are translated
+ * to Wayland pointer motion, button, and scroll axis events.
  */
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <linux/input-event-codes.h>
 #include <wayland-server-core.h>
@@ -35,18 +42,29 @@ static const struct {
 };
 #define NUM_BUTTONS (sizeof(button_map) / sizeof(button_map[0]))
 
-/* Scroll axis mapping: bitmask -> axis, direction */
+/* Scroll axis mapping: bitmask -> axis, direction, discrete step */
 static const struct {
     int mask;
     enum wl_pointer_axis axis;
-    double value;
+    int direction;       /* -1 or +1 */
+    int32_t discrete;    /* ±120 per notch (Wayland axis_value120 convention) */
 } scroll_map[] = {
-    { 8,  WL_POINTER_AXIS_VERTICAL_SCROLL,   -4.0 },  /* Scroll up */
-    { 16, WL_POINTER_AXIS_VERTICAL_SCROLL,    4.0 },  /* Scroll down */
-    { 32, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -4.0 },  /* Scroll left */
-    { 64, WL_POINTER_AXIS_HORIZONTAL_SCROLL,  4.0 },  /* Scroll right */
+    { 8,  WL_POINTER_AXIS_VERTICAL_SCROLL,   -1, -120 },  /* Scroll up */
+    { 16, WL_POINTER_AXIS_VERTICAL_SCROLL,    1,  120 },  /* Scroll down */
+    { 32, WL_POINTER_AXIS_HORIZONTAL_SCROLL, -1, -120 },  /* Scroll left */
+    { 64, WL_POINTER_AXIS_HORIZONTAL_SCROLL,  1,  120 },  /* Scroll right */
 };
 #define NUM_SCROLLS (sizeof(scroll_map) / sizeof(scroll_map[0]))
+
+/*
+ * Scroll source.
+ *
+ * Plan 9's /dev/mouse delivers scroll as discrete button bits (8/16/32/64)
+ * regardless of the physical device. Even trackpad swipes arrive as
+ * individual button events. We always report SOURCE_WHEEL with discrete
+ * step counts since that's what the events look like by the time they
+ * reach us.
+ */
 
 /* ============== Keyboard Handling ============== */
 
@@ -75,7 +93,7 @@ void handle_key(struct server *s, uint32_t rune, int pressed) {
     }
     
     /* Look up key mapping */
-    const struct key_map *km = keymap_lookup_dynamic(&s->kbmap, rune);
+    const struct key_map *km = keymap_lookup(rune);
     if (!km) {
         if (rune >= 0x80)
             wlr_log(WLR_ERROR, "No keymap entry for rune=0x%04x", rune);
@@ -131,7 +149,6 @@ static void send_button_events(struct server *s, uint32_t t,
 
 /*
  * Send scroll events for all active scroll buttons.
- * Uses table-driven approach for cleaner code.
  */
 static void send_scroll_events(struct server *s, uint32_t t,
                                int buttons, int changed) {
@@ -156,12 +173,12 @@ static void send_scroll_events(struct server *s, uint32_t t,
     for (size_t i = 0; i < NUM_SCROLLS; i++) {
         if ((changed & scroll_map[i].mask) && (buttons & scroll_map[i].mask)) {
             wlr_seat_pointer_notify_axis(s->seat, t, scroll_map[i].axis,
-                scroll_map[i].value, 0, WL_POINTER_AXIS_SOURCE_FINGER,
+                scroll_map[i].direction * 15.0,
+                scroll_map[i].discrete,
+                WL_POINTER_AXIS_SOURCE_WHEEL,
                 WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
         }
     }
-    
-    wlr_seat_pointer_notify_frame(s->seat);
 }
 
 void handle_mouse(struct server *s, int mx, int my, int buttons) {
@@ -221,7 +238,7 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     send_button_events(s, t, buttons, changed);
     send_scroll_events(s, t, buttons, changed);
     
-    last_buttons = buttons;
+    last_buttons = buttons & ~0x78;  /* Scroll bits are instantaneous, not holdable */
     wlr_seat_pointer_notify_frame(s->seat);
 }
 

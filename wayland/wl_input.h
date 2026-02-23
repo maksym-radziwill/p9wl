@@ -2,7 +2,7 @@
  * wl_input.h - Wayland input event processing
  *
  * This module bridges Plan 9 input events to Wayland clients. Input is
- * read from Plan 9 devices (/dev/mouse, /dev/cons) by background threads,
+ * read from Plan 9 devices (/dev/mouse, /dev/kbd) by background threads,
  * queued via the input_queue, and processed here on the main Wayland
  * event loop thread.
  *
@@ -14,8 +14,8 @@
  *   /dev/mouse, pushes to  --->   pops events from queue,
  *   input_queue                   calls handle_mouse()
  *
- *   kbd_thread reads              handle_key() processes
- *   /dev/cons, pushes to   --->   keyboard events
+ *   kbd_thread reads               handle_key() processes
+ *   /dev/kbd, pushes to    --->   keyboard events
  *   input_queue
  *
  * Mouse Handling:
@@ -33,6 +33,11 @@
  *     Bit 1 (2)  -> BTN_MIDDLE
  *     Bit 2 (4)  -> BTN_RIGHT
  *     Bits 3-6   -> Scroll directions
+ *
+ *   Scroll source:
+ *     Plan 9's /dev/mouse delivers scroll as discrete button bits
+ *     regardless of the physical device. All scroll events are
+ *     reported as SOURCE_WHEEL with value120 discrete steps.
  *
  * Keyboard Handling:
  *
