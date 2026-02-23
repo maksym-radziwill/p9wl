@@ -196,9 +196,10 @@ static void toplevel_destroy(struct wl_listener *l, void *d) {
             pthread_join(s->send_thread, NULL);
             s->send_thread = 0;
         }
-        
-        wlr_log(WLR_INFO, "Deleting rio window...");
-        delete_rio_window(&s->p9_draw);
+
+	/* Don't delete the rio window on exit */ 
+        // wlr_log(WLR_INFO, "Deleting rio window...");
+        // delete_rio_window(&s->p9_draw);
         
         wlr_log(WLR_INFO, "Disconnecting from 9P server...");
         p9_disconnect(&s->p9_draw);
