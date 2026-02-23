@@ -39,7 +39,7 @@
  *
  *   Protocol errors (Rerror responses) set flags in p9conn and return -1:
  *     - unknown_id_error: draw image ID not found
- *     - draw_error: draw protocol error (short write, etc.)
+ *     - draw_error: error containing "short" (e.g., short write)
  *     - window_deleted: rio window was closed
  *
  * Usage:
@@ -178,7 +178,7 @@ struct p9conn {
 
     /* Error flags - set by protocol handlers, checked by caller */
     int unknown_id_error;      /* "unknown id" error (draw image not found) */
-    int draw_error;            /* Draw protocol error ("short" write, etc.) */
+    int draw_error;            /* Error containing "short" (e.g., short write) */
     int window_deleted;        /* "window deleted" error (rio closed window) */
 };
 
@@ -187,12 +187,12 @@ struct p9conn {
 /*
  * Connect to a 9P server with optional TLS.
  *
- * Establishes TCP connection, optionally wraps with TLS, then performs
- * 9P version negotiation and attach. On success, the connection is
- * ready for file operations.
+ * Establishes TCP connection (with TCP_NODELAY for lower latency),
+ * optionally wraps with TLS, then performs 9P version negotiation
+ * and attach. On success, the connection is ready for file operations.
  *
  * p9:      connection structure to initialize
- * host:    server IP address (IPv4 dotted decimal)
+ * host:    server IPv4 address in dotted-decimal form (no DNS resolution)
  * port:    server port (P9_PORT for plaintext, P9_TLS_PORT for TLS)
  * tls_cfg: TLS configuration, or NULL for plaintext
  *
@@ -211,7 +211,7 @@ int p9_connect(struct p9conn *p9, const char *host, int port,
  * Disconnect from 9P server and free resources.
  *
  * Closes TLS connection (if any), closes socket, frees message buffer,
- * and destroys mutex. Safe to call on partially-initialized connection.
+ * and destroys mutex. Safe to call after a failed p9_connect().
  *
  * p9: connection to disconnect
  */
@@ -235,13 +235,14 @@ int p9_should_shutdown(struct p9conn *p9);
  * Write exactly len bytes to the connection.
  *
  * Uses TLS if enabled, otherwise raw socket. Retries on EINTR.
- * FATAL: calls exit(1) on any error or connection close.
+ * FATAL: calls exit(1) on any error or connection close and
+ * does not return.
  *
  * p9:  connection
  * buf: data to write
  * len: number of bytes
  *
- * Returns len on success (never returns on error).
+ * Returns len on success.
  */
 int p9_write_full(struct p9conn *p9, const uint8_t *buf, int len);
 
@@ -249,13 +250,14 @@ int p9_write_full(struct p9conn *p9, const uint8_t *buf, int len);
  * Read exactly n bytes from the connection.
  *
  * Uses TLS if enabled, otherwise raw socket. Retries on EINTR.
- * FATAL: calls exit(1) on any error or connection close.
+ * FATAL: calls exit(1) on any error or connection close and
+ * does not return.
  *
  * p9:  connection
  * buf: buffer to read into
  * n:   number of bytes to read
  *
- * Returns n on success (never returns on error).
+ * Returns n on success.
  */
 int p9_read_full(struct p9conn *p9, uint8_t *buf, int n);
 
@@ -267,6 +269,8 @@ int p9_read_full(struct p9conn *p9, uint8_t *buf, int n);
  * Sends Tversion with requested msize, receives Rversion with
  * server's msize. Updates p9->msize to negotiated value.
  * Called automatically by p9_connect().
+ *
+ * Acquires p9->lock internally (uses p9_rpc_locked).
  *
  * p9: connection (must have socket/TLS ready)
  *
@@ -280,6 +284,8 @@ int p9_version(struct p9conn *p9);
  * Sends Tattach to get a fid referencing the root directory.
  * Uses P9USER environment variable for username (default: "glenda").
  * Called automatically by p9_connect().
+ *
+ * Acquires p9->lock internally (uses p9_rpc_locked).
  *
  * p9:    connection
  * fid:   fid to assign to root (typically 0)
@@ -347,15 +353,17 @@ int p9_read(struct p9conn *p9, uint32_t fid, uint64_t offset,
  * Write data to an open file (synchronous).
  *
  * Writes count bytes starting at offset. Waits for server response.
+ * If count exceeds msize-23, it is clamped to fit in a single 9P
+ * message; the caller is responsible for chunking larger writes.
  * For high-throughput scenarios, use p9_write_send/p9_write_recv.
  *
  * p9:     connection
  * fid:    open fid (from Topen with OWRITE or ORDWR)
  * offset: byte offset in file
  * data:   data to write
- * count:  number of bytes (truncated to msize-23 if too large)
+ * count:  number of bytes (clamped to msize-23 if too large)
  *
- * Returns bytes written, or -1 on error.
+ * Returns bytes written by server, or -1 on error.
  */
 int p9_write(struct p9conn *p9, uint32_t fid, uint64_t offset,
              const uint8_t *data, uint32_t count);
@@ -396,6 +404,10 @@ int p9_stat(struct p9conn *p9, uint32_t fid, uint32_t *qid_vers);
  * Convenience function that walks, opens, reads, and clunks.
  * Null-terminates the output buffer.
  *
+ * Only supports a single path component relative to root (e.g.,
+ * "snarf" works, but "draw/new" does not - use p9_walk for
+ * multi-component paths).
+ *
  * p9:      connection
  * path:    single path component relative to root (e.g., "snarf")
  * data:    output buffer (caller-provided)
@@ -406,10 +418,13 @@ int p9_stat(struct p9conn *p9, uint32_t fid, uint32_t *qid_vers);
 int p9_read_file(struct p9conn *p9, const char *path, char *data, size_t bufsize);
 
 /*
- * Write data to a file.
+ * Write data to an existing file.
  *
- * Convenience function that walks, opens, writes, and clunks.
- * Creates or truncates the file.
+ * Convenience function that walks, opens (OWRITE), writes all data
+ * in chunked RPCs, and clunks. The file must already exist; this
+ * does not create files or truncate on open.
+ *
+ * Only supports a single path component relative to root.
  *
  * p9:   connection
  * path: single path component relative to root
@@ -429,6 +444,9 @@ int p9_write_file(struct p9conn *p9, const char *path, const char *data, size_t 
  * Twrite messages can be sent before collecting responses.
  * Call p9_write_recv() to collect each response.
  *
+ * If count exceeds msize-23, it is clamped to fit in a single
+ * message. The return value reflects the actual bytes sent.
+ *
  * Note: Caller must ensure proper ordering and not exceed
  * server's request queue. Does not acquire connection lock.
  *
@@ -436,9 +454,10 @@ int p9_write_file(struct p9conn *p9, const char *path, const char *data, size_t 
  * fid:    open fid
  * offset: byte offset in file
  * data:   data to write
- * count:  number of bytes
+ * count:  number of bytes (clamped to msize-23 if too large)
  *
- * Returns count on success, -1 on send error.
+ * Returns bytes actually sent (may be less than count), or -1 on
+ * send error.
  */
 int p9_write_send(struct p9conn *p9, uint32_t fid, uint64_t offset,
                   const uint8_t *data, uint32_t count);
@@ -461,13 +480,16 @@ int p9_write_recv(struct p9conn *p9);
  * Send request and receive response (with lock).
  *
  * Acquires p9->lock, sends message, waits for response.
- * Message must be built in p9->buf before calling.
+ * Message must be built in p9->buf before calling, starting at
+ * buf[4] (type) - bytes 0-3 are reserved for the size field and
+ * written automatically.
  *
  * p9:            connection
- * txlen:         length of request message
+ * txlen:         total length of request message (including size field)
  * expected_type: expected R-message type
  *
- * Returns response length on success, -1 on error or wrong type.
+ * Returns response length on success, -1 on Rerror, unexpected
+ * response type, or I/O error.
  */
 int p9_rpc(struct p9conn *p9, int txlen, int expected_type);
 
@@ -477,10 +499,11 @@ int p9_rpc(struct p9conn *p9, int txlen, int expected_type);
  * Like p9_rpc() but assumes caller already holds p9->lock.
  *
  * p9:            connection
- * txlen:         length of request message
+ * txlen:         total length of request message (including size field)
  * expected_type: expected R-message type
  *
- * Returns response length on success, -1 on error or wrong type.
+ * Returns response length on success, -1 on Rerror, unexpected
+ * response type, or I/O error.
  */
 int p9_rpc_locked(struct p9conn *p9, int txlen, int expected_type);
 

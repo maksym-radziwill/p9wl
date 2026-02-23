@@ -200,7 +200,8 @@ void tls_disconnect(SSL *ssl);
  * Verify server certificate against pinned certificate or fingerprint.
  *
  * Called automatically by tls_connect() unless insecure mode.
- * Can also be called manually for re-verification.
+ * Requires an established SSL connection with a valid peer certificate
+ * (i.e., the TLS handshake must have completed).
  *
  * ssl: established SSL connection
  * cfg: configuration with cert_file or cert_fingerprint
