@@ -154,12 +154,12 @@ static int parse_args(int argc, char *argv[], const char **host, int *port,
     return 0;
 }
 
-/* Connect all five 9P sessions, rolling back on failure. */
+/* Connect all six 9P sessions, rolling back on failure. */
 static int connect_9p_sessions(struct server *s, struct tls_config *tls_cfg) {
     struct p9conn *conns[] = {
-        &s->p9_draw, &s->p9_mouse, &s->p9_kbd, &s->p9_wctl, &s->p9_snarf
+        &s->p9_draw, &s->p9_relookup, &s->p9_mouse, &s->p9_kbd, &s->p9_wctl, &s->p9_snarf
     };
-    const char *names[] = { "draw", "mouse", "kbd", "wctl", "snarf" };
+    const char *names[] = { "draw", "relookup", "mouse", "kbd", "wctl", "snarf" };
     int n = sizeof(conns) / sizeof(conns[0]);
 
     for (int i = 0; i < n; i++) {

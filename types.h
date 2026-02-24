@@ -152,11 +152,17 @@ struct input_queue {
  */
 struct draw_state {
     struct p9conn *p9;          /* 9P connection for draw operations */
+    struct p9conn *p9_relookup; /* Separate 9P connection for relookup */
     uint32_t draw_fid;          /* fid for /dev/draw directory */
     uint32_t drawnew_fid;       /* fid for /dev/draw/new */
     uint32_t drawdata_fid;      /* fid for /dev/draw/N/data */
     uint32_t drawctl_fid;       /* fid for /dev/draw/N/ctl */
     uint32_t winname_fid;       /* fid for /dev/winname (kept open for resize) */
+    /* Relookup fids — on p9_relookup connection, isolated from send/drain */
+    uint32_t relookup_draw_fid;    /* fid for /dev/draw on relookup conn */
+    uint32_t relookup_data_fid;    /* fid for /dev/draw/N/data on relookup conn */
+    uint32_t relookup_ctl_fid;     /* fid for /dev/draw/N/ctl on relookup conn */
+    uint32_t relookup_winname_fid; /* fid for /dev/winname on relookup conn */
     int client_id;              /* Draw client ID (from /dev/draw/new) */
     int screen_id;              /* Screen image ID */
     int image_id;               /* Our offscreen buffer (accumulates via XOR) */
@@ -276,6 +282,7 @@ struct server {
 
     /* ---- 9P connections ---- */
     struct p9conn p9_draw;      /* For /dev/draw rendering */
+    struct p9conn p9_relookup;  /* For relookup_window (isolated from send/drain) */
     struct p9conn p9_mouse;     /* For /dev/mouse input */
     struct p9conn p9_kbd;       /* For /dev/cons keyboard input */
     struct p9conn p9_wctl;      /* For /dev/wctl window monitoring */

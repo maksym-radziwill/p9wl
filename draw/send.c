@@ -404,7 +404,11 @@ void *send_thread_func(void *arg) {
         if (atomic_load(&drain.broken)) {
             if (!draw_suspended) {
                 draw_suspended = 1;
-                wlr_log(WLR_ERROR, "send: 9P stream broken, suspending draw");
+                wlr_log(WLR_ERROR, "send: 9P draw stream broken, shutting down");
+                s->running = 0;
+                /* Wake main loop so it can exit */
+                struct input_event wakeup = { .type = INPUT_WAKEUP };
+                input_queue_push(&s->input_queue, &wakeup);
             }
             /* Consume and discard any pending error flags */
             p9->draw_error = 0;
@@ -416,7 +420,7 @@ void *send_thread_func(void *arg) {
                 s->active_buf = -1;
                 pthread_mutex_unlock(&s->send_lock);
             }
-            continue;
+            break;  /* Exit send thread */
         }
         
         if (p9->draw_error) {

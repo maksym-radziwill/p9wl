@@ -56,16 +56,41 @@
  * with a NEW name (e.g., window.4.14 -> window.4.15). We must re-read
  * /dev/winname to get the current name, then re-lookup with that name.
  *
- * During rapid resizes the name can change multiple times in quick
- * succession.  We retry the read-name → free → lookup sequence with
- * increasing backoff so the name has time to stabilise.
+ * All I/O uses the dedicated relookup connection (p9_relookup) which
+ * has its own socket, completely isolated from the send/drain threads
+ * on p9_draw.  This eliminates the stream desync that occurred when
+ * relookup and drain read from the same socket concurrently.
+ *
+ * The lookup uses a temporary image ID so the old screen_id stays
+ * valid throughout.  Only after 'n' succeeds do we free the old ID
+ * and promote the temp.  If all retries fail, screen_id is untouched
+ * and the send thread can keep drawing.
  */
 int relookup_window(struct server *s) {
     struct draw_state *draw = &s->draw;
-    struct p9conn *p9 = draw->p9;
+    
+    /* Use the dedicated relookup connection.  Fall back to main
+     * connection if relookup init failed (legacy behavior). */
+    struct p9conn *p9 = draw->p9_relookup ? draw->p9_relookup : draw->p9;
+    uint32_t data_fid = draw->p9_relookup ? draw->relookup_data_fid : draw->drawdata_fid;
+    uint32_t ctl_fid  = draw->p9_relookup ? draw->relookup_ctl_fid  : draw->drawctl_fid;
+    uint32_t wn_fid   = draw->p9_relookup ? draw->relookup_winname_fid : draw->winname_fid;
+    
     uint8_t vcmd[1] = { 'v' };
     
-    /* Retry loop: re-read winname, free old ref, 'n' lookup.
+    /*
+     * Allocate a TEMPORARY image id for the 'n' lookup.  We must not
+     * free the old screen_id until we know the new name is valid,
+     * because the send thread may still be drawing to it.  If 'n'
+     * fails, the temp id was never allocated and the old screen_id
+     * remains usable.  On success we free the old one and promote.
+     */
+    uint32_t temp_id = draw->screen_id + 1;
+    /* Avoid collisions with other allocated image IDs */
+    if (temp_id == draw->image_id || temp_id == draw->opaque_id || temp_id == draw->delta_id)
+        temp_id = draw->screen_id + 100;
+    
+    /* Retry loop: re-read winname, 'n' lookup with temp id.
      * Back off between attempts to let the rio server settle. */
     static const int backoff_ms[] = { 0, 10, 25, 50, 100 };
     int max_retries = (int)(sizeof(backoff_ms) / sizeof(backoff_ms[0]));
@@ -80,9 +105,9 @@ int relookup_window(struct server *s) {
         }
         
         /* Re-read /dev/winname to get the CURRENT window name */
-        if (draw->winname_fid) {
+        if (wn_fid) {
             char newname[64] = {0};
-            int n = p9_read(p9, draw->winname_fid, 0, sizeof(newname) - 1, (uint8_t*)newname);
+            int n = p9_read(p9, wn_fid, 0, sizeof(newname) - 1, (uint8_t*)newname);
             if (n > 0) {
                 newname[n] = '\0';
                 if (n > 0 && newname[n-1] == '\n') newname[n-1] = '\0';
@@ -104,44 +129,49 @@ int relookup_window(struct server *s) {
             return -1;
         }
         
-        wlr_log(WLR_INFO, "Re-looking up window '%s' (screen_id=%d, attempt %d)",
-                draw->winname, draw->screen_id, attempt + 1);
+        wlr_log(WLR_INFO, "Re-looking up window '%s' (screen_id=%d, temp_id=%d, attempt %d)",
+                draw->winname, draw->screen_id, temp_id, attempt + 1);
         
-        /* Free the old window reference */
-        uint8_t freecmd[5];
-        freecmd[0] = 'f';
-        PUT32(freecmd + 1, draw->screen_id);
-        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-        p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
-        
-        /* Re-lookup with 'n' command using the (possibly new) name */
+        /* Bind the new window name to temp_id.
+         * The old screen_id stays live — don't free it yet. */
         int wnamelen = strlen(draw->winname);
         uint8_t ncmd[128];
         int noff = 0;
         
         ncmd[noff++] = 'n';
-        PUT32(ncmd + noff, draw->screen_id); noff += 4;
+        PUT32(ncmd + noff, temp_id); noff += 4;
         ncmd[noff++] = (uint8_t)wnamelen;
         memcpy(ncmd + noff, draw->winname, wnamelen); noff += wnamelen;
         
-        if (p9_write(p9, draw->drawdata_fid, 0, ncmd, noff) < 0) {
+        if (p9_write(p9, data_fid, 0, ncmd, noff) < 0) {
             wlr_log(WLR_ERROR, "relookup_window: 'n' command failed for '%s' (attempt %d/%d)",
                     draw->winname, attempt + 1, max_retries);
-            continue;  /* retry with backoff */
+            continue;  /* retry — old screen_id still valid */
         }
-        p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
+        p9_write(p9, data_fid, 0, vcmd, 1);
         
-        /* Success — read ctl to get current geometry */
+        /* 'n' succeeded — now safe to free old screen_id and promote */
+        uint8_t freecmd[5];
+        freecmd[0] = 'f';
+        PUT32(freecmd + 1, draw->screen_id);
+        p9_write(p9, data_fid, 0, freecmd, 5);
+        p9_write(p9, data_fid, 0, vcmd, 1);
+        
+        wlr_log(WLR_INFO, "relookup_window: promoted temp_id=%d, freed old screen_id=%d",
+                temp_id, draw->screen_id);
+        draw->screen_id = temp_id;
+        
         goto lookup_ok;
     }
     
-    wlr_log(WLR_ERROR, "relookup_window: all %d attempts failed", max_retries);
+    wlr_log(WLR_ERROR, "relookup_window: all %d attempts failed (screen_id=%d still valid)",
+            max_retries, draw->screen_id);
     return -1;
     
 lookup_ok:;
     /* Re-read ctl to get current geometry */
     uint8_t ctlbuf[256];
-    int n = p9_read(p9, draw->drawctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);
+    int n = p9_read(p9, ctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);
     if (n < 12*12) {
         wlr_log(WLR_ERROR, "relookup_window: failed to read ctl");
         return -1;
@@ -227,6 +257,76 @@ void delete_rio_window(struct p9conn *p9) {
     const char *cmd = "delete";
     wlr_log(WLR_INFO, "Deleting rio window");
     p9_write(p9, wctl_fid, 0, (uint8_t*)cmd, strlen(cmd));
+}
+
+/*
+ * Open fids on the relookup connection for use by relookup_window().
+ *
+ * The relookup connection (p9_relookup) is a separate 9P session that
+ * accesses the same draw client's data and ctl files, plus /dev/winname.
+ * By keeping relookup I/O on its own connection, it never interferes
+ * with the send thread's writes or the drain thread's reads on p9_draw.
+ *
+ * Must be called after init_draw has established the draw client
+ * (we need client_id to walk to /dev/draw/N/data and /dev/draw/N/ctl).
+ */
+static int init_relookup_fids(struct server *s) {
+    struct p9conn *p9r = &s->p9_relookup;
+    struct draw_state *draw = &s->draw;
+    const char *wnames[3];
+    char id_str[32];
+    
+    draw->p9_relookup = p9r;
+    draw->relookup_draw_fid = p9r->next_fid++;
+    draw->relookup_data_fid = p9r->next_fid++;
+    draw->relookup_ctl_fid = p9r->next_fid++;
+    draw->relookup_winname_fid = p9r->next_fid++;
+    
+    /* Walk to /dev/draw */
+    wnames[0] = "draw";
+    if (p9_walk(p9r, p9r->root_fid, draw->relookup_draw_fid, 1, wnames) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to walk to /dev/draw");
+        return -1;
+    }
+    
+    /* Walk to /dev/draw/<clientid>/data and open ORDWR */
+    snprintf(id_str, sizeof(id_str), "%d", draw->client_id);
+    wnames[0] = id_str;
+    wnames[1] = "data";
+    if (p9_walk(p9r, draw->relookup_draw_fid, draw->relookup_data_fid, 2, wnames) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to walk to /dev/draw/%d/data", draw->client_id);
+        return -1;
+    }
+    if (p9_open(p9r, draw->relookup_data_fid, ORDWR, NULL) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to open /dev/draw/%d/data", draw->client_id);
+        return -1;
+    }
+    
+    /* Walk to /dev/draw/<clientid>/ctl and open OREAD */
+    wnames[0] = id_str;
+    wnames[1] = "ctl";
+    if (p9_walk(p9r, draw->relookup_draw_fid, draw->relookup_ctl_fid, 2, wnames) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to walk to /dev/draw/%d/ctl", draw->client_id);
+        return -1;
+    }
+    if (p9_open(p9r, draw->relookup_ctl_fid, OREAD, NULL) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to open /dev/draw/%d/ctl", draw->client_id);
+        return -1;
+    }
+    
+    /* Walk to /dev/winname and open OREAD */
+    wnames[0] = "winname";
+    if (p9_walk(p9r, p9r->root_fid, draw->relookup_winname_fid, 1, wnames) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to walk to /dev/winname");
+        return -1;
+    }
+    if (p9_open(p9r, draw->relookup_winname_fid, OREAD, NULL) < 0) {
+        wlr_log(WLR_ERROR, "relookup: failed to open /dev/winname");
+        return -1;
+    }
+    
+    wlr_log(WLR_INFO, "Relookup fids opened on separate connection (client %d)", draw->client_id);
+    return 0;
 }
 
 /* ============== Draw Initialization ============== */
@@ -552,6 +652,14 @@ int init_draw(struct server *s) {
             draw->delta_id, draw->width, draw->height);
     
     draw->xor_enabled = 0;  /* Will be enabled after first successful full frame */
+    
+    /* Open relookup fids on the separate connection.
+     * Must be after we know client_id (from draw/new). */
+    if (init_relookup_fids(s) < 0) {
+        wlr_log(WLR_ERROR, "Failed to init relookup fids (non-fatal, relookup will use main conn)");
+        /* Fall through — relookup_window will check p9_relookup != NULL */
+        draw->p9_relookup = NULL;
+    }
     
     return 0;
 }
