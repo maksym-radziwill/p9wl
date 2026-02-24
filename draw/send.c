@@ -586,12 +586,12 @@ void *send_thread_func(void *arg) {
                 off = 0;
             }
             
-            /* Copy buffer to window */
+            /* Copy visible area to window — Plan 9 clips the rest */
             off += cmd_copy(batch + off, draw->screen_id, draw->image_id,
                            draw->opaque_id,
                            draw->win_minx, draw->win_miny,
-                           draw->win_minx + draw->width,
-                           draw->win_miny + draw->height,
+                           draw->win_minx + draw->visible_width,
+                           draw->win_miny + draw->visible_height,
                            0, 0);
             
             /* Flush */

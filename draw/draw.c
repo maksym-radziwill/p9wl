@@ -43,6 +43,12 @@
 /* Minimum usable dimension (at least a few tiles) */
 #define MIN_ALIGNED_DIM (TILE_SIZE * 4)
 
+/* Minimum border (pixels) to preserve on each side of the rio window.
+ * We inset by RIO_BORDER from the window edges so our content never
+ * overwrites rio's border decoration.  The copy-to-screen uses
+ * visible dimensions, leaving equal borders on all four sides. */
+#define RIO_BORDER 4
+
 /* ============== Window Management ============== */
 
 /* Re-lookup window after "unknown id" error.
@@ -122,30 +128,28 @@ int relookup_window(struct server *s) {
     int actual_width = rmaxx - rminx;
     int actual_height = rmaxy - rminy;
     
-    /* Pad up to tile-aligned dimensions; the extra pixels are invisible
-     * because the copy-to-screen is clipped to the window rectangle. */
-    int new_width = TILE_ALIGN_UP(actual_width);
-    int new_height = TILE_ALIGN_UP(actual_height);
-    
-    /* Ensure minimum usable size */
-    if (new_width < MIN_ALIGNED_DIM) new_width = MIN_ALIGNED_DIM;
-    if (new_height < MIN_ALIGNED_DIM) new_height = MIN_ALIGNED_DIM;
+    /* Inset by RIO_BORDER to preserve rio's border, then pad up */
+    int vis_w = actual_width - 2 * RIO_BORDER;
+    int vis_h = actual_height - 2 * RIO_BORDER;
+    if (vis_w < MIN_ALIGNED_DIM) vis_w = MIN_ALIGNED_DIM;
+    if (vis_h < MIN_ALIGNED_DIM) vis_h = MIN_ALIGNED_DIM;
+    int new_width = TILE_ALIGN_UP(vis_w);
+    int new_height = TILE_ALIGN_UP(vis_h);
     
     if (new_width <= 0 || new_height <= 0 || new_width > 4096 || new_height > 4096) {
         wlr_log(WLR_ERROR, "relookup_window: invalid dimensions %dx%d", new_width, new_height);
         return -1;
     }
     
-    /* Window origin — no centering needed, Plan 9 clips the overshoot */
-    draw->win_minx = rminx;
-    draw->win_miny = rminy;
-    draw->visible_width = actual_width;
-    draw->visible_height = actual_height;
+    /* Content origin: inset from window edge */
+    draw->win_minx = rminx + RIO_BORDER;
+    draw->win_miny = rminy + RIO_BORDER;
+    draw->visible_width = vis_w;
+    draw->visible_height = vis_h;
     
-    if (new_width != actual_width || new_height != actual_height) {
-        wlr_log(WLR_INFO, "relookup_window: padded %dx%d -> %dx%d (visible %dx%d)",
-                actual_width, actual_height, new_width, new_height,
-                actual_width, actual_height);
+    if (new_width != vis_w || new_height != vis_h) {
+        wlr_log(WLR_INFO, "relookup_window: visible %dx%d, padded %dx%d, border=%d",
+                vis_w, vis_h, new_width, new_height, RIO_BORDER);
     }
     
     /* Check if dimensions changed */
@@ -156,8 +160,8 @@ int relookup_window(struct server *s) {
         /* Store new dimensions for main thread to handle */
         s->pending_width = new_width;
         s->pending_height = new_height;
-        s->pending_visible_width = actual_width;
-        s->pending_visible_height = actual_height;
+        s->pending_visible_width = vis_w;
+        s->pending_visible_height = vis_h;
         s->pending_minx = draw->win_minx;
         s->pending_miny = draw->win_miny;
         snprintf(s->pending_winname, sizeof(s->pending_winname), "%s", draw->winname);
@@ -260,16 +264,20 @@ int init_draw(struct server *s) {
         return -1;
     }
     
-    /* Pad up to tile-aligned dimensions */
-    draw->visible_width = actual_width;
-    draw->visible_height = actual_height;
-    draw->width = TILE_ALIGN_UP(actual_width);
-    draw->height = TILE_ALIGN_UP(actual_height);
-    if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
-    if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
+    /* Inset by RIO_BORDER on each side to preserve rio's window border,
+     * then pad up to tile-aligned dimensions for the internal buffer. */
+    draw->visible_width = actual_width - 2 * RIO_BORDER;
+    draw->visible_height = actual_height - 2 * RIO_BORDER;
+    if (draw->visible_width < MIN_ALIGNED_DIM) draw->visible_width = MIN_ALIGNED_DIM;
+    if (draw->visible_height < MIN_ALIGNED_DIM) draw->visible_height = MIN_ALIGNED_DIM;
+    draw->width = TILE_ALIGN_UP(draw->visible_width);
+    draw->height = TILE_ALIGN_UP(draw->visible_height);
+    draw->win_minx = rminx + RIO_BORDER;
+    draw->win_miny = rminy + RIO_BORDER;
     
-    wlr_log(WLR_INFO, "Screen: (%d,%d)-(%d,%d) = %dx%d -> padded %dx%d",
+    wlr_log(WLR_INFO, "Screen: (%d,%d)-(%d,%d) = %dx%d -> visible %dx%d, padded %dx%d",
             rminx, rminy, rmaxx, rmaxy, actual_width, actual_height,
+            draw->visible_width, draw->visible_height,
             draw->width, draw->height);
     
     /* Walk to /dev/draw/<clientid>/data */
@@ -369,25 +377,25 @@ int init_draw(struct server *s) {
                 actual_width = rmaxx - rminx;
                 actual_height = rmaxy - rminy;
                 
-                /* Pad up to tile-aligned dimensions */
-                draw->visible_width = actual_width;
-                draw->visible_height = actual_height;
-                draw->width = TILE_ALIGN_UP(actual_width);
-                draw->height = TILE_ALIGN_UP(actual_height);
-                if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
-                if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
+                /* Inset by RIO_BORDER to preserve rio's window border */
+                draw->visible_width = actual_width - 2 * RIO_BORDER;
+                draw->visible_height = actual_height - 2 * RIO_BORDER;
+                if (draw->visible_width < MIN_ALIGNED_DIM) draw->visible_width = MIN_ALIGNED_DIM;
+                if (draw->visible_height < MIN_ALIGNED_DIM) draw->visible_height = MIN_ALIGNED_DIM;
+                draw->width = TILE_ALIGN_UP(draw->visible_width);
+                draw->height = TILE_ALIGN_UP(draw->visible_height);
                 
-                /* Window origin — no centering, Plan 9 clips the overshoot */
-                draw->win_minx = rminx;
-                draw->win_miny = rminy;
+                /* Content origin: inset from window edge */
+                draw->win_minx = rminx + RIO_BORDER;
+                draw->win_miny = rminy + RIO_BORDER;
                 
-                int pad_w = draw->width - actual_width;
-                int pad_h = draw->height - actual_height;
+                int pad_w = draw->width - draw->visible_width;
+                int pad_h = draw->height - draw->visible_height;
                 
-                wlr_log(WLR_INFO, "Padded dimensions: %dx%d -> %dx%d (pad R=%d B=%d)",
-                        actual_width, actual_height,
+                wlr_log(WLR_INFO, "Window: visible %dx%d, padded %dx%d (pad R=%d B=%d), border=%d",
+                        draw->visible_width, draw->visible_height,
                         draw->width, draw->height,
-                        pad_w, pad_h);
+                        pad_w, pad_h, RIO_BORDER);
             } else {
                 wlr_log(WLR_ERROR, "ctl read too short: %d bytes (need %d)", n, 12*12);
                 if (n > 0) {
