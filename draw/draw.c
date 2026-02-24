@@ -55,61 +55,90 @@
  * CRITICAL: When Plan 9 resizes/moves a window, it creates a NEW window
  * with a NEW name (e.g., window.4.14 -> window.4.15). We must re-read
  * /dev/winname to get the current name, then re-lookup with that name.
+ *
+ * During rapid resizes the name can change multiple times in quick
+ * succession.  We retry the read-name → free → lookup sequence with
+ * increasing backoff so the name has time to stabilise.
  */
 int relookup_window(struct server *s) {
     struct draw_state *draw = &s->draw;
     struct p9conn *p9 = draw->p9;
     uint8_t vcmd[1] = { 'v' };
     
-    /* Re-read /dev/winname to get the CURRENT window name */
-    if (draw->winname_fid) {
-        char newname[64] = {0};
-        int n = p9_read(p9, draw->winname_fid, 0, sizeof(newname) - 1, (uint8_t*)newname);
-        if (n > 0) {
-            newname[n] = '\0';
-            if (n > 0 && newname[n-1] == '\n') newname[n-1] = '\0';
-            
-            if (strcmp(newname, draw->winname) != 0) {
-                wlr_log(WLR_INFO, "Window name changed: '%s' -> '%s'", draw->winname, newname);
+    /* Retry loop: re-read winname, free old ref, 'n' lookup.
+     * Back off between attempts to let the rio server settle. */
+    static const int backoff_ms[] = { 0, 10, 25, 50, 100 };
+    int max_retries = (int)(sizeof(backoff_ms) / sizeof(backoff_ms[0]));
+    
+    for (int attempt = 0; attempt < max_retries; attempt++) {
+        if (attempt > 0) {
+            struct timespec ts = {
+                .tv_sec  = 0,
+                .tv_nsec = backoff_ms[attempt] * 1000000L
+            };
+            nanosleep(&ts, NULL);
+        }
+        
+        /* Re-read /dev/winname to get the CURRENT window name */
+        if (draw->winname_fid) {
+            char newname[64] = {0};
+            int n = p9_read(p9, draw->winname_fid, 0, sizeof(newname) - 1, (uint8_t*)newname);
+            if (n > 0) {
+                newname[n] = '\0';
+                if (n > 0 && newname[n-1] == '\n') newname[n-1] = '\0';
+                
+                if (strcmp(newname, draw->winname) != 0) {
+                    wlr_log(WLR_INFO, "Window name changed: '%s' -> '%s'", draw->winname, newname);
+                }
+                strncpy(draw->winname, newname, sizeof(draw->winname) - 1);
+                draw->winname[sizeof(draw->winname) - 1] = '\0';
+            } else {
+                wlr_log(WLR_ERROR, "relookup_window: failed to re-read /dev/winname (attempt %d/%d)",
+                        attempt + 1, max_retries);
+                continue;  /* retry */
             }
-            strncpy(draw->winname, newname, sizeof(draw->winname) - 1);
-            draw->winname[sizeof(draw->winname) - 1] = '\0';
-        } else {
-            wlr_log(WLR_ERROR, "relookup_window: failed to re-read /dev/winname");
+        }
+        
+        if (!draw->winname[0]) {
+            wlr_log(WLR_ERROR, "relookup_window: no window name");
             return -1;
         }
+        
+        wlr_log(WLR_INFO, "Re-looking up window '%s' (screen_id=%d, attempt %d)",
+                draw->winname, draw->screen_id, attempt + 1);
+        
+        /* Free the old window reference */
+        uint8_t freecmd[5];
+        freecmd[0] = 'f';
+        PUT32(freecmd + 1, draw->screen_id);
+        p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
+        p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
+        
+        /* Re-lookup with 'n' command using the (possibly new) name */
+        int wnamelen = strlen(draw->winname);
+        uint8_t ncmd[128];
+        int noff = 0;
+        
+        ncmd[noff++] = 'n';
+        PUT32(ncmd + noff, draw->screen_id); noff += 4;
+        ncmd[noff++] = (uint8_t)wnamelen;
+        memcpy(ncmd + noff, draw->winname, wnamelen); noff += wnamelen;
+        
+        if (p9_write(p9, draw->drawdata_fid, 0, ncmd, noff) < 0) {
+            wlr_log(WLR_ERROR, "relookup_window: 'n' command failed for '%s' (attempt %d/%d)",
+                    draw->winname, attempt + 1, max_retries);
+            continue;  /* retry with backoff */
+        }
+        p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
+        
+        /* Success — read ctl to get current geometry */
+        goto lookup_ok;
     }
     
-    if (!draw->winname[0]) {
-        wlr_log(WLR_ERROR, "relookup_window: no window name");
-        return -1;
-    }
+    wlr_log(WLR_ERROR, "relookup_window: all %d attempts failed", max_retries);
+    return -1;
     
-    wlr_log(WLR_INFO, "Re-looking up window '%s' (screen_id=%d)", draw->winname, draw->screen_id);
-    
-    /* Free the old window reference */
-    uint8_t freecmd[5];
-    freecmd[0] = 'f';
-    PUT32(freecmd + 1, draw->screen_id);
-    p9_write(p9, draw->drawdata_fid, 0, freecmd, 5);
-    p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
-    
-    /* Re-lookup with 'n' command using the (possibly new) name */
-    int wnamelen = strlen(draw->winname);
-    uint8_t ncmd[128];
-    int noff = 0;
-    
-    ncmd[noff++] = 'n';
-    PUT32(ncmd + noff, draw->screen_id); noff += 4;
-    ncmd[noff++] = (uint8_t)wnamelen;
-    memcpy(ncmd + noff, draw->winname, wnamelen); noff += wnamelen;
-    
-    if (p9_write(p9, draw->drawdata_fid, 0, ncmd, noff) < 0) {
-        wlr_log(WLR_ERROR, "relookup_window: 'n' command failed");
-        return -1;
-    }
-    p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
-    
+lookup_ok:;
     /* Re-read ctl to get current geometry */
     uint8_t ctlbuf[256];
     int n = p9_read(p9, draw->drawctl_fid, 0, sizeof(ctlbuf) - 1, ctlbuf);

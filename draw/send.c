@@ -44,6 +44,7 @@ struct drain_ctx {
     atomic_int errors;
     atomic_int running;
     atomic_int paused;
+    atomic_int broken;      /* Stream desynced — stop all I/O */
     pthread_t thread;
     pthread_mutex_t lock;
     pthread_cond_t cond;        /* Wakes drain thread when work available */
@@ -60,15 +61,37 @@ static inline void drain_wake(void) {
     pthread_mutex_unlock(&drain.lock);
 }
 
-/* Read one Rwrite response */
+/* Read one Rwrite response.
+ *
+ * If the 9P stream desyncs (invalid message length), we set broken=1
+ * and force pending to 0.  This immediately unblocks drain_pause and
+ * prevents any further reads on the corrupted stream.  Without this,
+ * a partial read leaves message body bytes in the socket buffer;
+ * the next read interprets them as a message header, producing
+ * garbage lengths and an unrecoverable error cascade.
+ */
 static int drain_recv_one(void) {
     uint8_t *buf = drain.recv_buf;
     struct p9conn *p9 = drain.p9;
     
-    if (p9_read_full(p9, buf, 4) != 4) return -1;
+    if (atomic_load(&drain.broken)) return -1;
+    
+    if (p9_read_full(p9, buf, 4) != 4) {
+        wlr_log(WLR_ERROR, "drain: failed to read message header");
+        atomic_store(&drain.broken, 1);
+        return -1;
+    }
     uint32_t rxlen = GET32(buf);
-    if (rxlen < 7 || rxlen > p9->msize) return -1;
-    if (p9_read_full(p9, buf + 4, rxlen - 4) != (int)(rxlen - 4)) return -1;
+    if (rxlen < 7 || rxlen > p9->msize) {
+        wlr_log(WLR_ERROR, "drain: stream desynced (invalid length %u), halting I/O", rxlen);
+        atomic_store(&drain.broken, 1);
+        return -1;
+    }
+    if (p9_read_full(p9, buf + 4, rxlen - 4) != (int)(rxlen - 4)) {
+        wlr_log(WLR_ERROR, "drain: truncated message, halting I/O");
+        atomic_store(&drain.broken, 1);
+        return -1;
+    }
     
     int type = buf[4];
     if (type == Rerror) {
@@ -100,13 +123,34 @@ static void *drain_thread_func(void *arg) {
         if (!atomic_load(&drain.running)) break;
         if (atomic_load(&drain.paused) && atomic_load(&drain.pending) == 0) continue;
         
+        if (atomic_load(&drain.broken)) {
+            /* Stream is dead — flush all pending without reading */
+            int rem = atomic_exchange(&drain.pending, 0);
+            if (rem > 0) {
+                wlr_log(WLR_INFO, "drain: flushed %d pending (stream broken)", rem);
+                pthread_mutex_lock(&drain.lock);
+                pthread_cond_broadcast(&drain.done_cond);
+                pthread_mutex_unlock(&drain.lock);
+            }
+            continue;
+        }
+        
         if (atomic_load(&drain.pending) > 0) {
             if (drain_recv_one() < 0) atomic_fetch_add(&drain.errors, 1);
-            atomic_fetch_sub(&drain.pending, 1);
-            /* Wake drain_throttle / drain_pause */
-            pthread_mutex_lock(&drain.lock);
-            pthread_cond_broadcast(&drain.done_cond);
-            pthread_mutex_unlock(&drain.lock);
+            if (atomic_load(&drain.broken)) {
+                /* Just became broken — flush remaining pending */
+                int rem = atomic_exchange(&drain.pending, 0);
+                wlr_log(WLR_ERROR, "drain: stream broke, flushed %d remaining", rem);
+                pthread_mutex_lock(&drain.lock);
+                pthread_cond_broadcast(&drain.done_cond);
+                pthread_mutex_unlock(&drain.lock);
+            } else {
+                atomic_fetch_sub(&drain.pending, 1);
+                /* Wake drain_throttle / drain_pause */
+                pthread_mutex_lock(&drain.lock);
+                pthread_cond_broadcast(&drain.done_cond);
+                pthread_mutex_unlock(&drain.lock);
+            }
         }
     }
     
@@ -119,6 +163,7 @@ static int drain_start(struct p9conn *p9) {
     atomic_store(&drain.errors, 0);
     atomic_store(&drain.running, 1);
     atomic_store(&drain.paused, 0);
+    atomic_store(&drain.broken, 0);
     drain.p9 = p9;
     pthread_mutex_init(&drain.lock, NULL);
     pthread_cond_init(&drain.cond, NULL);
@@ -139,9 +184,11 @@ static void drain_stop(void) {
     drain_wake();
     pthread_join(drain.thread, NULL);
     
-    while (atomic_load(&drain.pending) > 0) {
-        drain_recv_one();
-        atomic_fetch_sub(&drain.pending, 1);
+    if (!atomic_load(&drain.broken)) {
+        while (atomic_load(&drain.pending) > 0) {
+            drain_recv_one();
+            atomic_fetch_sub(&drain.pending, 1);
+        }
     }
     
     free(drain.recv_buf);
@@ -155,7 +202,7 @@ static void drain_pause(void) {
     atomic_store(&drain.paused, 1);
     drain_wake();
     pthread_mutex_lock(&drain.lock);
-    while (atomic_load(&drain.pending) > 0) {
+    while (atomic_load(&drain.pending) > 0 && !atomic_load(&drain.broken)) {
         pthread_cond_wait(&drain.done_cond, &drain.lock);
     }
     pthread_mutex_unlock(&drain.lock);
@@ -167,13 +214,14 @@ static void drain_resume(void) {
 }
 
 static void drain_notify(void) {
+    if (atomic_load(&drain.broken)) return;
     atomic_fetch_add(&drain.pending, 1);
     drain_wake();
 }
 
 static void drain_throttle(int max_pending) {
     pthread_mutex_lock(&drain.lock);
-    while (atomic_load(&drain.pending) > max_pending) {
+    while (atomic_load(&drain.pending) > max_pending && !atomic_load(&drain.broken)) {
         pthread_cond_wait(&drain.done_cond, &drain.lock);
     }
     pthread_mutex_unlock(&drain.lock);
@@ -283,6 +331,13 @@ void *send_thread_func(void *arg) {
     int max_tiles = (4096 / TILE_SIZE) * (4096 / TILE_SIZE);
     struct tile_work *work = malloc(max_tiles * sizeof(*work));
     struct tile_result *results = malloc(max_tiles * sizeof(*results));
+    
+    /*
+     * After a failed relookup, suppress frame sending to avoid the
+     * error→relookup→error cascade that can desync the 9P stream.
+     * Cleared on next successful relookup or new window_changed event.
+     */
+    int draw_suspended = 0;
     if (!work || !results) nthreads = 0;
     
     const size_t comp_buf_size = TILE_SIZE * TILE_SIZE * 4 + 256;
@@ -338,6 +393,32 @@ void *send_thread_func(void *arg) {
         }
         
         /* Handle errors and window changes */
+        
+        /*
+         * If the 9P stream desynced, all I/O on this connection is dead.
+         * Don't attempt relookup (it would read garbage), don't send
+         * frames (writes would pile up with no drain), just drop the
+         * frame and wait.  Recovery requires reconnecting, which is
+         * outside the send thread's scope.
+         */
+        if (atomic_load(&drain.broken)) {
+            if (!draw_suspended) {
+                draw_suspended = 1;
+                wlr_log(WLR_ERROR, "send: 9P stream broken, suspending draw");
+            }
+            /* Consume and discard any pending error flags */
+            p9->draw_error = 0;
+            p9->unknown_id_error = 0;
+            s->window_changed = 0;
+            atomic_exchange(&drain.errors, 0);
+            if (got_frame) {
+                pthread_mutex_lock(&s->send_lock);
+                s->active_buf = -1;
+                pthread_mutex_unlock(&s->send_lock);
+            }
+            continue;
+        }
+        
         if (p9->draw_error) {
             p9->draw_error = 0;
             draw->xor_enabled = 0;
@@ -354,7 +435,12 @@ void *send_thread_func(void *arg) {
         if (s->window_changed) {
             s->window_changed = 0;
             drain_pause();
-            relookup_window(s);
+            if (relookup_window(s) == 0) {
+                draw_suspended = 0;
+            } else {
+                draw_suspended = 1;
+                wlr_log(WLR_INFO, "send: draw suspended until next window change");
+            }
             drain_resume();
             /*
              * Wake main loop so output_frame fires.  For resize,
@@ -377,9 +463,19 @@ void *send_thread_func(void *arg) {
         
         if (p9->unknown_id_error) {
             p9->unknown_id_error = 0;
-            drain_pause();
-            relookup_window(s);
-            drain_resume();
+            if (draw_suspended) {
+                /* Already suspended — don't hammer relookup, just wait
+                 * for the next window_changed event to try again. */
+            } else {
+                drain_pause();
+                if (relookup_window(s) == 0) {
+                    draw_suspended = 0;
+                } else {
+                    draw_suspended = 1;
+                    wlr_log(WLR_INFO, "send: draw suspended until next window change");
+                }
+                drain_resume();
+            }
             struct input_event wakeup = { .type = INPUT_WAKEUP };
             input_queue_push(&s->input_queue, &wakeup);
             if (s->resize_pending) {
@@ -392,7 +488,7 @@ void *send_thread_func(void *arg) {
         }
         
         if (!got_frame) continue;
-        if (s->resize_pending) {
+        if (s->resize_pending || draw_suspended) {
             pthread_mutex_lock(&s->send_lock);
             s->active_buf = -1;
             pthread_mutex_unlock(&s->send_lock);
