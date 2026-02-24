@@ -85,7 +85,7 @@ int relookup_window(struct server *s) {
      * fails, the temp id was never allocated and the old screen_id
      * remains usable.  On success we free the old one and promote.
      */
-    uint32_t temp_id = draw->screen_id + 1;
+    int temp_id = draw->screen_id + 1;
     /* Avoid collisions with other allocated image IDs */
     if (temp_id == draw->image_id || temp_id == draw->opaque_id || temp_id == draw->delta_id)
         temp_id = draw->screen_id + 100;
