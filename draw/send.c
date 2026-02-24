@@ -6,7 +6,7 @@
  *
  * Changes from original:
  * - Uses cmd_* helpers from draw_helpers.h
- * - Consolidated border drawing into loop
+ * - Consolidated draw command building into loop
  * - Extracted drain_wake() helper
  * - Simplified tile bounds with tile_bounds()
  * - Replaced full-frame memcpy in send_frame() with pointer swap
@@ -310,6 +310,33 @@ void *send_thread_func(void *arg) {
         
         uint32_t *send_buf = got_frame ? s->send_buf[current_buf] : NULL;
         
+        /*
+         * Clear padding strips to ensure deterministic edge tiles.
+         *
+         * The compositor renders visible_width × visible_height into the
+         * top-left of a buffer with stride = width (padded to TILE_SIZE).
+         * The right and bottom padding strips may contain stale data from
+         * a previous frame (buffers are recycled via pointer swap).
+         * Zero them so edge-tile compression sees stable black pixels
+         * instead of random changes.
+         */
+        if (send_buf &&
+            (s->visible_width < s->width || s->visible_height < s->height)) {
+            /* Right-edge padding strip */
+            if (s->visible_width < s->width) {
+                int pad = s->width - s->visible_width;
+                for (int y = 0; y < s->visible_height; y++)
+                    memset(&send_buf[y * s->width + s->visible_width], 0,
+                           pad * sizeof(uint32_t));
+            }
+            /* Bottom padding strip (full row width including right padding) */
+            if (s->visible_height < s->height) {
+                memset(&send_buf[s->visible_height * s->width], 0,
+                       (s->height - s->visible_height) * s->width
+                       * sizeof(uint32_t));
+            }
+        }
+        
         /* Handle errors and window changes */
         if (p9->draw_error) {
             p9->draw_error = 0;
@@ -546,9 +573,9 @@ void *send_thread_func(void *arg) {
             tile_count++;
         }
         
-        /* Final batch with copy + borders + flush */
+        /* Final batch with copy-to-screen + flush */
         if (tile_count > 0 || scrolled_regions > 0) {
-            size_t footer_size = 45 + 45 * 4 + 1;
+            size_t footer_size = 45 + 1;  /* copy-to-screen + flush */
             if (off + footer_size > max_batch && off > 0) {
                 if (p9_write_send(p9, draw->drawdata_fid, 0, batch, off) < 0) {
                     memset(s->prev_framebuf, 0xDE, s->width * s->height * 4);

@@ -162,8 +162,9 @@ struct draw_state {
     int image_id;               /* Our offscreen buffer (accumulates via XOR) */
     int opaque_id;              /* 1x1 white replicated image for mask */
     int delta_id;               /* Temp image for receiving XOR deltas */
-    int border_id;              /* 1x1 border color replicated image */
-    int width, height;          /* Current buffer dimensions */
+    int width, height;          /* Padded buffer dimensions (TILE_ALIGN_UP) */
+    int visible_width;          /* Actual window width (what compositor renders) */
+    int visible_height;         /* Actual window height (what compositor renders) */
     int win_minx, win_miny;     /* Window origin for coordinate translation */
 
     /*
@@ -180,16 +181,6 @@ struct draw_state {
     int logical_width;          /* width / scale (for Wayland configure) */
     int logical_height;         /* height / scale (for Wayland configure) */
     float scale;                /* Copy of server.scale for draw operations */
-
-    /*
-     * Actual window bounds (for border drawing with equal margins).
-     *
-     * When dimensions are aligned to TILE_SIZE, there may be excess
-     * space. These track the real window bounds so we can draw equal
-     * borders on all sides by centering the content.
-     */
-    int actual_minx, actual_miny;
-    int actual_maxx, actual_maxy;
 
     char winname[64];           /* Window name for re-querying geometry */
     int winimage_id;            /* Image ID assigned to the window */
@@ -296,11 +287,13 @@ struct server {
     volatile int window_changed;    /* Set by wctl thread on geometry change */
     volatile int resize_pending;    /* Need to resize wlroots output */
     volatile int pending_width, pending_height;
+    volatile int pending_visible_width, pending_visible_height;
     volatile int pending_minx, pending_miny;
     char pending_winname[64];
 
     /* ---- Framebuffers ---- */
-    int width, height;              /* Current framebuffer dimensions */
+    int width, height;              /* Padded buffer dimensions (TILE_ALIGN_UP) */
+    int visible_width, visible_height;  /* Actual window dimensions */
     uint32_t *framebuf;             /* Current frame */
     uint32_t *prev_framebuf;        /* Previous frame (for delta detection) */
 

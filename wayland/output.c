@@ -70,6 +70,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
     int resize_pending = s->resize_pending;
     int new_w = s->pending_width;
     int new_h = s->pending_height;
+    int new_vis_w = s->pending_visible_width;
+    int new_vis_h = s->pending_visible_height;
     int new_minx = s->pending_minx;
     int new_miny = s->pending_miny;
     if (resize_pending) {
@@ -82,10 +84,15 @@ static void output_frame(struct wl_listener *listener, void *data) {
             struct draw_state *draw = &s->draw;
             draw->win_minx = new_minx;
             draw->win_miny = new_miny;
+            /* Visible dimensions may change even without padding change */
+            s->visible_width = new_vis_w;
+            s->visible_height = new_vis_h;
+            draw->visible_width = new_vis_w;
+            draw->visible_height = new_vis_h;
             wlr_log(WLR_DEBUG, "Position update only: (%d,%d)", new_minx, new_miny);
         } else {
-            wlr_log(WLR_INFO, "Main thread handling resize: %dx%d -> %dx%d", 
-                    s->width, s->height, new_w, new_h);
+            wlr_log(WLR_INFO, "Main thread handling resize: %dx%d -> %dx%d (visible %dx%d)",
+                    s->width, s->height, new_w, new_h, new_vis_w, new_vis_h);
             
             size_t fb_size = new_w * new_h * sizeof(uint32_t);
             uint32_t *new_framebuf = calloc(1, fb_size);
@@ -118,8 +125,11 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 
                 s->width = new_w;
                 s->height = new_h;
-                s->tiles_x = (new_w + TILE_SIZE - 1) / TILE_SIZE;
-                s->tiles_y = (new_h + TILE_SIZE - 1) / TILE_SIZE;
+                s->visible_width = new_vis_w;
+                s->visible_height = new_vis_h;
+                /* Padded dimensions are always exact multiples of TILE_SIZE */
+                s->tiles_x = new_w / TILE_SIZE;
+                s->tiles_y = new_h / TILE_SIZE;
                 
                 /* Reallocate dirty tile bitmaps */
                 uint8_t *old_dirty0 = s->dirty_tiles[0];
@@ -132,6 +142,8 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 
                 draw->width = new_w;
                 draw->height = new_h;
+                draw->visible_width = new_vis_w;
+                draw->visible_height = new_vis_h;
                 draw->win_minx = new_minx;
                 draw->win_miny = new_miny;
                 pthread_mutex_unlock(&s->send_lock);
@@ -151,19 +163,21 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 /* Reallocate Plan 9 images using helper */
                 reallocate_draw_images(draw, new_w, new_h);
                 
-                /* Resize wlroots output */
+                /* Resize wlroots output to VISIBLE dimensions.
+                 * The wlroots buffer will be visible_width × visible_height;
+                 * the padded framebuf is larger (stride = width). */
                 struct wlr_output_state state;
                 wlr_output_state_init(&state);
-                wlr_output_state_set_custom_mode(&state, new_w, new_h, 0);
+                wlr_output_state_set_custom_mode(&state, new_vis_w, new_vis_h, 0);
                 if (s->scale > 1.0f) {
                     wlr_output_state_set_scale(&state, s->scale);
                 }
                 wlr_output_commit_state(s->output, &state);
                 wlr_output_state_finish(&state);
                 
-                /* Compute logical dimensions for Wayland clients */
-                int logical_w = (int)(new_w / s->scale + 0.5f);
-                int logical_h = (int)(new_h / s->scale + 0.5f);
+                /* Compute logical dimensions from VISIBLE size for Wayland clients */
+                int logical_w = (int)(new_vis_w / s->scale + 0.5f);
+                int logical_h = (int)(new_vis_h / s->scale + 0.5f);
                 
                 /* Send configure to all toplevels (using logical dimensions) */
                 struct toplevel *tl;
@@ -182,8 +196,9 @@ static void output_frame(struct wl_listener *listener, void *data) {
                 s->force_full_frame = 1;
                 s->scene_dirty = 1;
                 
-                wlr_log(WLR_INFO, "Resize complete: %dx%d physical, %dx%d logical at (%d,%d)", 
-                        new_w, new_h, logical_w, logical_h, new_minx, new_miny);
+                wlr_log(WLR_INFO, "Resize complete: %dx%d visible (%dx%d padded), %dx%d logical at (%d,%d)",
+                        new_vis_w, new_vis_h, new_w, new_h,
+                        logical_w, logical_h, new_minx, new_miny);
             }
         }
     }
@@ -314,8 +329,11 @@ static void output_frame(struct wl_listener *listener, void *data) {
             if (valid_fb) {
                 int buf_w = buffer->width;
                 int buf_h = buffer->height;
-                int copy_w = (buf_w < w) ? buf_w : w;
-                int copy_h = (buf_h < h) ? buf_h : h;
+                int vis_w = s->visible_width;
+                int vis_h = s->visible_height;
+                /* Copy min of buffer and visible dims; framebuf stride is w (padded) */
+                int copy_w = (buf_w < vis_w) ? buf_w : vis_w;
+                int copy_h = (buf_h < vis_h) ? buf_h : vis_h;
                 
                 pthread_mutex_lock(&s->send_lock);
                 for (int y = 0; y < copy_h; y++) {
@@ -364,7 +382,7 @@ void new_output(struct wl_listener *l, void *d) {
     struct wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_enabled(&state, true);
-    wlr_output_state_set_custom_mode(&state, s->width, s->height, 60000);
+    wlr_output_state_set_custom_mode(&state, s->visible_width, s->visible_height, 60000);
     if (s->scale > 1.0f) {
         wlr_output_state_set_scale(&state, s->scale);
     }
@@ -381,12 +399,14 @@ void new_output(struct wl_listener *l, void *d) {
     wl_signal_add(&out->events.destroy, &s->output_destroy);
     
     if (s->scale > 1.0f) {
-        int logical_w = (int)(s->width / s->scale + 0.5f);
-        int logical_h = (int)(s->height / s->scale + 0.5f);
-        wlr_log(WLR_INFO, "Output ready: %dx%d physical, scale=%.2f, %dx%d logical",
-                s->width, s->height, s->scale, logical_w, logical_h);
+        int logical_w = (int)(s->visible_width / s->scale + 0.5f);
+        int logical_h = (int)(s->visible_height / s->scale + 0.5f);
+        wlr_log(WLR_INFO, "Output ready: %dx%d visible (%dx%d padded), scale=%.2f, %dx%d logical",
+                s->visible_width, s->visible_height, s->width, s->height,
+                s->scale, logical_w, logical_h);
     } else {
-        wlr_log(WLR_INFO, "Output ready: %dx%d", s->width, s->height);
+        wlr_log(WLR_INFO, "Output ready: %dx%d visible (%dx%d padded)",
+                s->visible_width, s->visible_height, s->width, s->height);
     }
 }
 

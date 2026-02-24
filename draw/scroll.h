@@ -43,8 +43,9 @@
  *   Grid parameters:
  *     - cols = width / 256 (at least 1)
  *     - rows = height / 256 (at least 1)
- *     - margin = TILE_SIZE around edges
+ *     - margin = TILE_SIZE around edges (naturally excludes padding)
  *     - Regions are tile-aligned (multiples of TILE_SIZE)
+ *     - width/height are the padded buffer dimensions (TILE_ALIGN_UP)
  *
  *   Each region is analyzed independently, allowing different scroll
  *   vectors in different parts of the screen (e.g., two scrolling

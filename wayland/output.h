@@ -8,9 +8,10 @@
  *
  *   new_output() is called when wlroots creates a new output. For p9wl,
  *   there is typically one headless output sized to match the Plan 9
- *   window. The output is configured with:
+ *   window's visible dimensions (s->visible_width × s->visible_height).
+ *   The output is configured with:
  *
- *     - Custom mode matching the Plan 9 window dimensions
+ *     - Custom mode matching the Plan 9 window's visible dimensions
  *     - 60Hz refresh rate (60000 mHz)
  *     - Optional HiDPI scale factor (if s->scale > 1.0)
  *     - Scene graph output for rendering
@@ -21,12 +22,14 @@
  *
  *     1. Check for pending resize from mouse thread (s->resize_pending)
  *     2. If resize pending:
- *        a. Reallocate host buffers (framebuf, prev_framebuf, send_buf)
- *        b. Reallocate dirty tile bitmaps (dirty_tiles, dirty_staging)
- *        c. Update s->width, s->height, s->tiles_x, s->tiles_y
- *        d. Reallocate Plan 9 images via reallocate_draw_images()
- *        e. Resize wlroots output and reconfigure all toplevels
- *        f. Set force_full_frame and scene_dirty flags
+ *        a. Reallocate host buffers at padded dimensions (TILE_ALIGN_UP)
+ *        b. Reallocate dirty tile bitmaps (tiles_x × tiles_y, exact)
+ *        c. Update s->width, s->height (padded), s->visible_width/height
+ *        d. Update s->tiles_x, s->tiles_y (exact: width/TILE_SIZE)
+ *        e. Reallocate Plan 9 images via reallocate_draw_images()
+ *        f. Resize wlroots output to visible dimensions
+ *        g. Reconfigure all toplevels with logical visible dimensions
+ *        h. Set force_full_frame and scene_dirty flags
  *     3. Throttle frames if FRAME_INTERVAL_MS is non-zero
  *     4. Check scene_dirty and force_full_frame flags.  If both are
  *        clear, send frame_done and return immediately — skipping
@@ -36,11 +39,14 @@
  *        (step 2) and error recovery.
  *     5. Build scene output state via wlr_scene_output_build_state()
  *     6. Extract compositor damage into dirty tile staging bitmap
- *     7. Full-frame copy from rendered buffer to s->framebuf.
- *        (Partial copy was removed: pointer swap between framebuf and
- *        send_buf means the recycled buffer has stale data, so all
- *        rows must be written.  The scene_dirty gate in step 4
- *        ensures this only runs when content actually changed.)
+ *     7. Copy rendered pixels from wlroots buffer to s->framebuf.
+ *        The wlroots buffer is visible_width × visible_height; framebuf
+ *        has stride = s->width (padded to TILE_SIZE).  Only visible rows
+ *        and columns are copied; padding strips are zeroed by the send
+ *        thread.  Full visible-area copy is required because pointer
+ *        swap between framebuf and send_buf recycles buffers with stale
+ *        data.  The scene_dirty gate in step 4 ensures this only runs
+ *        when content actually changed.
  *     8. Commit output state and send frame done
  *     9. Trigger send_frame() when there is actual work
  *
@@ -52,9 +58,12 @@
  *
  *   When rendering does occur, ostate.damage is still extracted into
  *   a per-tile bitmap (s->dirty_staging) and used to tell the send
- *   thread which tiles to compress and transmit.  The framebuf copy
- *   is always full-frame (required because pointer swap between
- *   framebuf and send_buf leaves the recycled buffer with stale data).
+ *   thread which tiles to compress and transmit.  The tile grid uses
+ *   padded dimensions (tiles_x = width/TILE_SIZE, always exact).
+ *   Tiles in the padding region are never marked dirty by the
+ *   compositor since no visible content touches them.  The framebuf
+ *   copy writes only the visible area; padding strips are zeroed
+ *   by the send thread.
  *
  *   The send thread trusts the damage bitmap as ground truth: undamaged
  *   tiles are skipped without pixel comparison, damaged tiles are

@@ -189,16 +189,18 @@ void handle_mouse(struct server *s, int mx, int my, int buttons) {
     int local_x = mx - s->draw.win_minx;
     int local_y = my - s->draw.win_miny;
     
-    /* Clamp to window bounds */
+    /* Clamp to visible window bounds (not padded buffer bounds) */
+    int vis_w = s->visible_width;
+    int vis_h = s->visible_height;
     if (local_x < 0) local_x = 0;
     if (local_y < 0) local_y = 0;
-    if (local_x >= s->width) local_x = s->width - 1;
-    if (local_y >= s->height) local_y = s->height - 1;
+    if (local_x >= vis_w) local_x = vis_w - 1;
+    if (local_y >= vis_h) local_y = vis_h - 1;
     
-    /* Update cursor */
+    /* Update cursor — normalize over visible area */
     wlr_cursor_warp_absolute(s->cursor, NULL,
-                             (double)local_x / s->width,
-                             (double)local_y / s->height);
+                             (double)local_x / vis_w,
+                             (double)local_y / vis_h);
     
     /* Find surface under cursor */
     double sx, sy;

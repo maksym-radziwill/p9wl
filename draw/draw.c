@@ -34,111 +34,16 @@
  */
 #define DRAW_SCALE 1.0f
 
-/* Round down to nearest multiple of TILE_SIZE to avoid partial edge tiles */
-#define TILE_ALIGN_DOWN(x) (((x) / TILE_SIZE) * TILE_SIZE)
+/* Round up to nearest multiple of TILE_SIZE so every tile is a full 16×16.
+ * The buffer is slightly larger than the visible window; the invisible
+ * padding pixels are never displayed because Plan 9's draw device clips
+ * the copy-to-screen to the screen image's rectangle. */
+#define TILE_ALIGN_UP(x) (((x) + TILE_SIZE - 1) / TILE_SIZE * TILE_SIZE)
 
 /* Minimum usable dimension (at least a few tiles) */
 #define MIN_ALIGNED_DIM (TILE_SIZE * 4)
 
-/* Minimum border (pixels) to reserve on each side of the content area.
- * We subtract 2*RIO_BORDER from the window before tile-aligning so that
- * the content never touches the window edge.  No wctl resize is needed. */
-#define RIO_BORDER 4
-
 /* ============== Window Management ============== */
-
-/*
- * Calculate centered window position within actual window bounds,
- * guaranteeing at least RIO_BORDER pixels of border on each side.
- *
- * The aligned_dim was already computed from (actual - 2*RIO_BORDER),
- * so the total excess is at least 2*RIO_BORDER.  We split it evenly.
- */
-static void center_in_window(int actual_min, int actual_max, int aligned_dim,
-                             int *out_min, int *out_actual_dim) {
-    int actual_dim = actual_max - actual_min;
-    *out_actual_dim = actual_dim;
-    
-    /* Total excess = actual - aligned; always >= 2*RIO_BORDER */
-    int excess = actual_dim - aligned_dim;
-    if (excess < 0) excess = 0;
-    
-    /* Split excess evenly between both sides */
-    int offset = excess / 2;
-    
-    /* Adjust min coordinate to center the content */
-    *out_min = actual_min + offset;
-}
-
-/*
- * Fill entire window with a solid color to hide junk in the border
- * area between tile-aligned content and the window edge.
- *
- * Uses black (0xff000000) as the border color, then updates
- * border_id's single pixel via 'y' command, then draws
- * it across the whole window.
- */
-static void clear_window(struct server *s) {
-    struct draw_state *draw = &s->draw;
-    struct p9conn *p9 = draw->p9;
-    if (!draw->screen_id || !draw->opaque_id || !draw->border_id) return;
-
-    uint32_t avg_color = 0xff000000;
-
-    /* Update border_id pixel with 'y' command: load 4 bytes into (0,0)-(1,1) */
-    uint8_t ycmd[1 + 4 + 16 + 4];
-    int yoff = 0;
-    ycmd[yoff++] = 'y';
-    PUT32(ycmd + yoff, draw->border_id); yoff += 4;
-    PUT32(ycmd + yoff, 0); yoff += 4;  /* r.min.x */
-    PUT32(ycmd + yoff, 0); yoff += 4;  /* r.min.y */
-    PUT32(ycmd + yoff, 1); yoff += 4;  /* r.max.x */
-    PUT32(ycmd + yoff, 1); yoff += 4;  /* r.max.y */
-    PUT32(ycmd + yoff, avg_color); yoff += 4;
-    p9_write(p9, draw->drawdata_fid, 0, ycmd, yoff);
-
-    /* Draw border_id over just the border strips (not the content area) */
-    int cx  = draw->win_minx;
-    int cy  = draw->win_miny;
-    int cw  = draw->width;
-    int ch  = draw->height;
-    int ax  = draw->actual_minx + RIO_BORDER;
-    int ay  = draw->actual_miny + RIO_BORDER;
-    int ax2 = draw->actual_maxx - RIO_BORDER;
-    int ay2 = draw->actual_maxy - RIO_BORDER;
-
-    uint8_t cmd[45];
-    int off;
-
-#define BORDER_DRAW(x1, y1, x2, y2) do {                        \
-    if ((x2) > (x1) && (y2) > (y1)) {                           \
-        off = 0;                                                 \
-        cmd[off++] = 'd';                                        \
-        PUT32(cmd + off, draw->screen_id);  off += 4;            \
-        PUT32(cmd + off, draw->border_id);  off += 4;            \
-        PUT32(cmd + off, draw->opaque_id);  off += 4;            \
-        PUT32(cmd + off, (x1)); off += 4;                        \
-        PUT32(cmd + off, (y1)); off += 4;                        \
-        PUT32(cmd + off, (x2)); off += 4;                        \
-        PUT32(cmd + off, (y2)); off += 4;                        \
-        PUT32(cmd + off, 0); off += 4;                           \
-        PUT32(cmd + off, 0); off += 4;                           \
-        PUT32(cmd + off, 0); off += 4;                           \
-        PUT32(cmd + off, 0); off += 4;                           \
-        p9_write(p9, draw->drawdata_fid, 0, cmd, off);          \
-    }                                                            \
-} while (0)
-
-    BORDER_DRAW(ax,      ay,      ax2,     cy);       /* top    */
-    BORDER_DRAW(ax,      cy + ch, ax2,     ay2);      /* bottom */
-    BORDER_DRAW(ax,      cy,      cx,      cy + ch);  /* left   */
-    BORDER_DRAW(cx + cw, cy,      ax2,     cy + ch);  /* right  */
-
-#undef BORDER_DRAW
-
-    uint8_t vcmd[1] = { 'v' };
-    p9_write(p9, draw->drawdata_fid, 0, vcmd, 1);
-}
 
 /* Re-lookup window after "unknown id" error.
  * CRITICAL: When Plan 9 resizes/moves a window, it creates a NEW window
@@ -217,16 +122,12 @@ int relookup_window(struct server *s) {
     int actual_width = rmaxx - rminx;
     int actual_height = rmaxy - rminy;
     
-    /* Reserve RIO_BORDER on each side, then align to TILE_SIZE */
-    int avail_width = actual_width - 2 * RIO_BORDER;
-    int avail_height = actual_height - 2 * RIO_BORDER;
-    if (avail_width < MIN_ALIGNED_DIM) avail_width = MIN_ALIGNED_DIM;
-    if (avail_height < MIN_ALIGNED_DIM) avail_height = MIN_ALIGNED_DIM;
+    /* Pad up to tile-aligned dimensions; the extra pixels are invisible
+     * because the copy-to-screen is clipped to the window rectangle. */
+    int new_width = TILE_ALIGN_UP(actual_width);
+    int new_height = TILE_ALIGN_UP(actual_height);
     
-    int new_width = TILE_ALIGN_DOWN(avail_width);
-    int new_height = TILE_ALIGN_DOWN(avail_height);
-    
-    /* Ensure minimum usable size and cap at actual window size */
+    /* Ensure minimum usable size */
     if (new_width < MIN_ALIGNED_DIM) new_width = MIN_ALIGNED_DIM;
     if (new_height < MIN_ALIGNED_DIM) new_height = MIN_ALIGNED_DIM;
     
@@ -235,32 +136,17 @@ int relookup_window(struct server *s) {
         return -1;
     }
     
-    /* Center content in window for equal borders */
-    int centered_minx, centered_miny;
-    int actual_w, actual_h;
-    center_in_window(rminx, rmaxx, new_width, &centered_minx, &actual_w);
-    center_in_window(rminy, rmaxy, new_height, &centered_miny, &actual_h);
+    /* Window origin — no centering needed, Plan 9 clips the overshoot */
+    draw->win_minx = rminx;
+    draw->win_miny = rminy;
+    draw->visible_width = actual_width;
+    draw->visible_height = actual_height;
     
     if (new_width != actual_width || new_height != actual_height) {
-        int left_border = centered_minx - rminx;
-        int top_border = centered_miny - rminy;
-        int right_border = (rmaxx - (centered_minx + new_width));
-        int bottom_border = (rmaxy - (centered_miny + new_height));
-        wlr_log(WLR_INFO, "relookup_window: aligned %dx%d -> %dx%d, borders: L=%d R=%d T=%d B=%d",
+        wlr_log(WLR_INFO, "relookup_window: padded %dx%d -> %dx%d (visible %dx%d)",
                 actual_width, actual_height, new_width, new_height,
-                left_border, right_border, top_border, bottom_border);
+                actual_width, actual_height);
     }
-    
-    draw->win_minx = centered_minx;
-    draw->win_miny = centered_miny;
-    
-    /* Store actual window bounds for border drawing */
-    draw->actual_minx = rminx;
-    draw->actual_miny = rminy;
-    draw->actual_maxx = rmaxx;
-    draw->actual_maxy = rmaxy;
-    
-    clear_window(s);
     
     /* Check if dimensions changed */
     if (new_width != draw->width || new_height != draw->height) {
@@ -270,8 +156,10 @@ int relookup_window(struct server *s) {
         /* Store new dimensions for main thread to handle */
         s->pending_width = new_width;
         s->pending_height = new_height;
-        s->pending_minx = centered_minx;
-        s->pending_miny = centered_miny;
+        s->pending_visible_width = actual_width;
+        s->pending_visible_height = actual_height;
+        s->pending_minx = draw->win_minx;
+        s->pending_miny = draw->win_miny;
         snprintf(s->pending_winname, sizeof(s->pending_winname), "%s", draw->winname);
         s->resize_pending = 1;
         
@@ -372,17 +260,15 @@ int init_draw(struct server *s) {
         return -1;
     }
     
-    /* Reserve RIO_BORDER on each side, then align to TILE_SIZE */
-    int avail_w = actual_width - 2 * RIO_BORDER;
-    int avail_h = actual_height - 2 * RIO_BORDER;
-    if (avail_w < MIN_ALIGNED_DIM) avail_w = MIN_ALIGNED_DIM;
-    if (avail_h < MIN_ALIGNED_DIM) avail_h = MIN_ALIGNED_DIM;
-    draw->width = TILE_ALIGN_DOWN(avail_w);
-    draw->height = TILE_ALIGN_DOWN(avail_h);
+    /* Pad up to tile-aligned dimensions */
+    draw->visible_width = actual_width;
+    draw->visible_height = actual_height;
+    draw->width = TILE_ALIGN_UP(actual_width);
+    draw->height = TILE_ALIGN_UP(actual_height);
     if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
     if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
     
-    wlr_log(WLR_INFO, "Screen: (%d,%d)-(%d,%d) = %dx%d -> aligned %dx%d",
+    wlr_log(WLR_INFO, "Screen: (%d,%d)-(%d,%d) = %dx%d -> padded %dx%d",
             rminx, rminy, rmaxx, rmaxy, actual_width, actual_height,
             draw->width, draw->height);
     
@@ -483,40 +369,25 @@ int init_draw(struct server *s) {
                 actual_width = rmaxx - rminx;
                 actual_height = rmaxy - rminy;
                 
-                /* Reserve RIO_BORDER on each side, then align to TILE_SIZE */
-                int avail_w2 = actual_width - 2 * RIO_BORDER;
-                int avail_h2 = actual_height - 2 * RIO_BORDER;
-                if (avail_w2 < MIN_ALIGNED_DIM) avail_w2 = MIN_ALIGNED_DIM;
-                if (avail_h2 < MIN_ALIGNED_DIM) avail_h2 = MIN_ALIGNED_DIM;
-                draw->width = TILE_ALIGN_DOWN(avail_w2);
-                draw->height = TILE_ALIGN_DOWN(avail_h2);
+                /* Pad up to tile-aligned dimensions */
+                draw->visible_width = actual_width;
+                draw->visible_height = actual_height;
+                draw->width = TILE_ALIGN_UP(actual_width);
+                draw->height = TILE_ALIGN_UP(actual_height);
                 if (draw->width < MIN_ALIGNED_DIM) draw->width = MIN_ALIGNED_DIM;
                 if (draw->height < MIN_ALIGNED_DIM) draw->height = MIN_ALIGNED_DIM;
                 
-                /* Center content in window for equal borders */
-                int centered_minx, centered_miny;
-                int actual_w, actual_h;
-                center_in_window(rminx, rmaxx, draw->width, &centered_minx, &actual_w);
-                center_in_window(rminy, rmaxy, draw->height, &centered_miny, &actual_h);
+                /* Window origin — no centering, Plan 9 clips the overshoot */
+                draw->win_minx = rminx;
+                draw->win_miny = rminy;
                 
-                draw->win_minx = centered_minx;
-                draw->win_miny = centered_miny;
+                int pad_w = draw->width - actual_width;
+                int pad_h = draw->height - actual_height;
                 
-                /* Store actual window bounds for border drawing */
-                draw->actual_minx = rminx;
-                draw->actual_miny = rminy;
-                draw->actual_maxx = rmaxx;
-                draw->actual_maxy = rmaxy;
-                
-                int left_border = centered_minx - rminx;
-                int top_border = centered_miny - rminy;
-                int right_border = (rmaxx - (centered_minx + draw->width));
-                int bottom_border = (rmaxy - (centered_miny + draw->height));
-                
-                wlr_log(WLR_INFO, "Aligned dimensions: %dx%d -> %dx%d, borders: L=%d R=%d T=%d B=%d",
+                wlr_log(WLR_INFO, "Padded dimensions: %dx%d -> %dx%d (pad R=%d B=%d)",
                         actual_width, actual_height,
                         draw->width, draw->height,
-                        left_border, right_border, top_border, bottom_border);
+                        pad_w, pad_h);
             } else {
                 wlr_log(WLR_ERROR, "ctl read too short: %d bytes (need %d)", n, 12*12);
                 if (n > 0) {
@@ -537,16 +408,16 @@ int init_draw(struct server *s) {
     draw->image_id = 1;
     
     /* Compute logical dimensions for the source image.
-     * Physical dimensions: draw->width x draw->height
-     * Logical dimensions: physical / DRAW_SCALE
+     * Physical dimensions: draw->visible_width x draw->visible_height
+     * Logical dimensions: physical / DRAW_SCALE, then padded to tile alignment
      * The 'a' command will scale from logical to physical.
      */
-    int logical_width = (int)(draw->width / DRAW_SCALE + 0.5f);
-    int logical_height = (int)(draw->height / DRAW_SCALE + 0.5f);
+    int logical_width = (int)(draw->visible_width / DRAW_SCALE + 0.5f);
+    int logical_height = (int)(draw->visible_height / DRAW_SCALE + 0.5f);
     
-    /* Ensure logical dimensions are tile-aligned */
-    logical_width = TILE_ALIGN_DOWN(logical_width);
-    logical_height = TILE_ALIGN_DOWN(logical_height);
+    /* Pad logical dimensions to tile alignment */
+    logical_width = TILE_ALIGN_UP(logical_width);
+    logical_height = TILE_ALIGN_UP(logical_height);
     if (logical_width < MIN_ALIGNED_DIM) logical_width = MIN_ALIGNED_DIM;
     if (logical_height < MIN_ALIGNED_DIM) logical_height = MIN_ALIGNED_DIM;
     
@@ -616,32 +487,6 @@ int init_draw(struct server *s) {
     }
     wlr_log(WLR_INFO, "Allocated opaque mask image %d", draw->opaque_id);
     
-    /* Allocate border color: 1x1 pale bluish gray with repl=1 */
-    draw->border_id = 4;
-    off = 0;
-    bcmd[off++] = 'b';
-    PUT32(bcmd + off, draw->border_id); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    bcmd[off++] = 0;
-    PUT32(bcmd + off, 0x48081828); off += 4;  /* chan = ARGB32 */
-    bcmd[off++] = 1;                           /* repl = 1 */
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 0); off += 4;
-    PUT32(bcmd + off, 1); off += 4;
-    PUT32(bcmd + off, 1); off += 4;
-    PUT32(bcmd + off, (uint32_t)-0x3FFFFFFF); off += 4;
-    PUT32(bcmd + off, (uint32_t)-0x3FFFFFFF); off += 4;
-    PUT32(bcmd + off, 0x3FFFFFFF); off += 4;
-    PUT32(bcmd + off, 0x3FFFFFFF); off += 4;
-    PUT32(bcmd + off, 0x9EEEEE); off += 4;  /* color = pale bluish gray */
-    
-    written = p9_write(p9, draw->drawdata_fid, 0, bcmd, off);
-    if (written < 0) {
-        wlr_log(WLR_ERROR, "Failed to allocate border color image");
-        return -1;
-    }
-    wlr_log(WLR_INFO, "Allocated border color image %d", draw->border_id);
-    
     /* Allocate delta image with ARGB32 for sparse updates */
     draw->delta_id = 5;
     off = 0;
@@ -670,8 +515,6 @@ int init_draw(struct server *s) {
             draw->delta_id, draw->width, draw->height);
     
     draw->xor_enabled = 0;  /* Will be enabled after first successful full frame */
-    
-    clear_window(s);
     
     return 0;
 }

@@ -40,8 +40,8 @@
  *   swaps the framebuffer pointer with the free send buffer (zero-copy),
  *   copies the dirty tile bitmap from staging, and signals the send
  *   thread. All three buffers (framebuf, send_buf[0], send_buf[1])
- *   must be allocated with the same size and alignment since their
- *   pointers are swapped.
+ *   must be allocated at the padded size (TILE_ALIGN_UP of visible
+ *   dimensions) since their pointers are swapped.
  *
  * Damage-Based Dirty Tile Tracking:
  *
@@ -52,6 +52,12 @@
  *     s->dirty_staging_valid: Set when staging has valid damage data
  *     s->dirty_tiles[N]:      Per-send-buffer bitmap (copied under lock)
  *     s->dirty_valid[N]:      Whether bitmap is valid for buffer N
+ *
+ *   The bitmap size is tiles_x × tiles_y where tiles_x = width/TILE_SIZE
+ *   and tiles_y = height/TILE_SIZE, using the padded (TILE_ALIGN_UP)
+ *   dimensions.  Tiles in the padding region are never marked dirty
+ *   by the compositor (no visible content touches them), so they are
+ *   effectively free.
  *
  *   Flow:
  *     1. output_frame() checks scene_dirty flag — if scene hasn't
@@ -141,25 +147,29 @@
  *        - Copy sent tiles to prev_framebuf
  *        - Enable alpha-delta mode after first successful frame
  *
- * Border Drawing:
+ * Padded Buffers:
  *
- *   When the window is larger than the tile-aligned content area,
- *   borders are drawn by clear_window() in draw.c during init_draw()
- *   and relookup_window(), not per-frame by the send thread.
- *   clear_window() fills the margin strips between the content area
- *   and the window edges using the border_id color image:
+ *   The visible window dimensions are rounded UP to the nearest
+ *   TILE_SIZE multiple, so every tile is a full 16×16 — no partial
+ *   edge tiles.  The buffers (framebuf, send_buf[], prev_framebuf)
+ *   are allocated at the padded size.  The compositor renders into
+ *   the top-left visible_width × visible_height region; the right
+ *   and bottom padding strips are zeroed by the send thread to keep
+ *   edge-tile compression deterministic.
  *
- *     +---------------------------+
- *     |      top border           |
- *     +---+---------------+-------+
- *     | L |               |   R   |
- *     | E |   content     |   I   |
- *     | F |     area      |   G   |
- *     | T |               |   H   |
- *     |   |               |   T   |
- *     +---+---------------+-------+
- *     |     bottom border         |
- *     +---------------------------+
+ *     +----------------------+---+
+ *     |                      | P |
+ *     |   visible content    | A |
+ *     |   (actual window)    | D |
+ *     |                      |   |
+ *     +----------------------+---+
+ *     |     bottom padding       |
+ *     +--------------------------+
+ *
+ *   The Plan 9 framebuffer image is also allocated at padded size.
+ *   When copied to the screen image (window), the draw device clips
+ *   the destination rectangle to the window bounds, so the padding
+ *   pixels are never visible.  No border drawing is needed.
  *
  * Alpha-Delta Mode:
  *
@@ -258,8 +268,8 @@ struct server;
  *
  * Preconditions:
  *   - s->framebuf must be valid
- *   - framebuf and send_buf[] must be identically allocated (same size,
- *     same alignment) since their pointers are swapped
+ *   - framebuf and send_buf[] must be allocated at the same padded size
+ *     (width × height × 4 bytes) since their pointers are swapped
  */
 void send_frame(struct server *s);
 

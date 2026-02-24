@@ -99,8 +99,9 @@
  * request_fullscreen, and request_maximize listeners.
  *
  * The toplevel is configured to fill the entire output at the current
- * logical dimensions (s->width/s->scale by s->height/s->scale), with
- * maximized and activated states set on initial commit.
+ * logical visible dimensions (s->visible_width/s->scale by
+ * s->visible_height/s->scale), with maximized and activated states
+ * set on initial commit.
  *
  * Scene tree node is positioned at (0,0) - all toplevels fill the
  * entire window in this compositor.

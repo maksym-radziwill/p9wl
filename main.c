@@ -223,9 +223,9 @@ static int init_wayland(struct server *s) {
         return -1;
     wlr_scene_attach_output_layout(s->scene, s->output_layout);
 
-    /* Background */
-    int logical_w = focus_phys_to_logical(s->width, s->scale);
-    int logical_h = focus_phys_to_logical(s->height, s->scale);
+    /* Background — sized to visible (logical) dimensions */
+    int logical_w = focus_phys_to_logical(s->visible_width, s->scale);
+    int logical_h = focus_phys_to_logical(s->visible_height, s->scale);
     float gray[4] = { 0.3f, 0.3f, 0.3f, 1.0f };
     s->background = wlr_scene_rect_create(&s->scene->tree, logical_w, logical_h, gray);
     if (s->background)
@@ -273,8 +273,8 @@ static int init_wayland(struct server *s) {
     s->new_input.notify = new_input;
     wl_signal_add(&s->backend->events.new_input, &s->new_input);
 
-    /* Create the headless output */
-    wlr_headless_add_output(s->backend, s->width, s->height);
+    /* Create the headless output at visible (not padded) dimensions */
+    wlr_headless_add_output(s->backend, s->visible_width, s->visible_height);
 
     return 0;
 }
@@ -284,7 +284,8 @@ static const char *setup_socket(struct server *s) {
     if (!sock)
         return NULL;
     setenv("WAYLAND_DISPLAY", sock, 1);
-    wlr_log(WLR_INFO, "WAYLAND_DISPLAY=%s (%dx%d)", sock, s->width, s->height);
+    wlr_log(WLR_INFO, "WAYLAND_DISPLAY=%s (%dx%d visible, %dx%d padded)",
+            sock, s->visible_width, s->visible_height, s->width, s->height);
     /* Print to stdout for parent process socket discovery */
     fprintf(stdout, "WAYLAND_DISPLAY=%s\n", sock);
     return sock;
@@ -355,14 +356,16 @@ int main(int argc, char *argv[]) {
 
     s.width = s.draw.width;
     s.height = s.draw.height;
-    s.tiles_x = (s.width + TILE_SIZE - 1) / TILE_SIZE;
-    s.tiles_y = (s.height + TILE_SIZE - 1) / TILE_SIZE;
+    s.visible_width = s.draw.visible_width;
+    s.visible_height = s.draw.visible_height;
+    s.tiles_x = s.width / TILE_SIZE;
+    s.tiles_y = s.height / TILE_SIZE;
 
     if (s.scale > 1.0f) {
-        wlr_log(WLR_INFO, "Physical: %dx%d, Scale: %.2f, Logical: %dx%d",
-                s.width, s.height, s.scale,
-                focus_phys_to_logical(s.width, s.scale),
-                focus_phys_to_logical(s.height, s.scale));
+        wlr_log(WLR_INFO, "Visible: %dx%d, Padded: %dx%d, Scale: %.2f, Logical: %dx%d",
+                s.visible_width, s.visible_height, s.width, s.height, s.scale,
+                focus_phys_to_logical(s.visible_width, s.scale),
+                focus_phys_to_logical(s.visible_height, s.scale));
     }
 
     s.framebuf = calloc(s.width * s.height, 4);

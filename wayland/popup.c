@@ -44,8 +44,8 @@ static void popup_commit(struct wl_listener *l, void *d) {
     struct server *s = pd->server;
     
     if (popup->base->initial_commit) {
-        int logical_w = focus_phys_to_logical(s->width, s->scale);
-        int logical_h = focus_phys_to_logical(s->height, s->scale);
+        int logical_w = focus_phys_to_logical(s->visible_width, s->scale);
+        int logical_h = focus_phys_to_logical(s->visible_height, s->scale);
         struct wlr_box box = {
             .x = 0,
             .y = 0,

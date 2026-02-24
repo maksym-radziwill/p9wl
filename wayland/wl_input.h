@@ -24,6 +24,7 @@
  *   button bitmask) to Wayland pointer events:
  *
  *     - Cursor position updates via wlr_cursor_warp_absolute()
+ *       (coordinates clamped to visible window area, not padded buffer)
  *     - Pointer focus changes via focus_handle_click()
  *     - Button press/release via wlr_seat_pointer_notify_button()
  *     - Scroll wheel via wlr_seat_pointer_notify_axis()

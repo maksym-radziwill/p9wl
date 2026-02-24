@@ -171,8 +171,8 @@ static void toplevel_commit(struct wl_listener *l, void *d) {
     struct wlr_surface *surface = xdg_surface->surface;
     
     if (xdg_surface->initial_commit) {
-        int logical_w = focus_phys_to_logical(s->width, s->scale);
-        int logical_h = focus_phys_to_logical(s->height, s->scale);
+        int logical_w = focus_phys_to_logical(s->visible_width, s->scale);
+        int logical_h = focus_phys_to_logical(s->visible_height, s->scale);
         
         wlr_xdg_toplevel_set_size(tl->xdg, logical_w, logical_h);
         wlr_xdg_toplevel_set_maximized(tl->xdg, true);
