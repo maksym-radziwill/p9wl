@@ -70,6 +70,7 @@
 #define P9_H
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <pthread.h>
 #include <openssl/ssl.h>
 
@@ -176,10 +177,11 @@ struct p9conn {
 
     pthread_mutex_t lock;      /* Lock for RPC operations */
 
-    /* Error flags - set by protocol handlers, checked by caller */
-    int unknown_id_error;      /* "unknown id" error (draw image not found) */
-    int draw_error;            /* Error containing "short" (e.g., short write) */
-    int window_deleted;        /* "window deleted" error (rio closed window) */
+    /* Error flags - set by protocol handlers, checked by caller.
+     * atomic_int for safe cross-thread visibility (drain → send). */
+    atomic_int unknown_id_error;  /* "unknown id" error (draw image not found) */
+    atomic_int draw_error;        /* Error containing "short" (e.g., short write) */
+    atomic_int window_deleted;    /* "window deleted" error (rio closed window) */
 };
 
 /* ============== Connection Management ============== */

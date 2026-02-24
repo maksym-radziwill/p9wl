@@ -83,16 +83,16 @@ static void handle_9p_error(struct p9conn *p9, const char *errmsg) {
     wlr_log(WLR_ERROR, "9P error: %s", errmsg);
 
     if (strstr(errmsg, "unknown id") != NULL) {
-        p9->unknown_id_error = 1;
+        atomic_store(&p9->unknown_id_error, 1);
     }
 
     if (strstr(errmsg, "window deleted") != NULL) {
         wlr_log(WLR_INFO, "Window deleted - signaling shutdown");
-        p9->window_deleted = 1;
+        atomic_store(&p9->window_deleted, 1);
     }
 
     if (strstr(errmsg, "short") != NULL) {
-        p9->draw_error = 1;
+        atomic_store(&p9->draw_error, 1);
         wlr_log(WLR_ERROR, "Draw protocol error - will reset");
     }
 }
@@ -503,7 +503,7 @@ int p9_write_recv(struct p9conn *p9) {
 
 /* Check if connection should be terminated */
 int p9_should_shutdown(struct p9conn *p9) {
-    return p9->window_deleted;
+    return atomic_load(&p9->window_deleted);
 }
 
 /* Connect to 9P server with optional TLS */

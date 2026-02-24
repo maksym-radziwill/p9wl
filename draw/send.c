@@ -101,8 +101,8 @@ static int drain_recv_one(void) {
         memcpy(errmsg, buf + 9, copylen);
         errmsg[copylen] = '\0';
         wlr_log(WLR_ERROR, "9P drain error: %s", errmsg);
-        if (strstr(errmsg, "unknown id")) p9->unknown_id_error = 1;
-        if (strstr(errmsg, "short")) p9->draw_error = 1;
+        if (strstr(errmsg, "unknown id")) atomic_store(&p9->unknown_id_error, 1);
+        if (strstr(errmsg, "short")) atomic_store(&p9->draw_error, 1);
         return -1;
     }
     
@@ -411,8 +411,8 @@ void *send_thread_func(void *arg) {
                 input_queue_push(&s->input_queue, &wakeup);
             }
             /* Consume and discard any pending error flags */
-            p9->draw_error = 0;
-            p9->unknown_id_error = 0;
+            atomic_store(&p9->draw_error, 0);
+            atomic_store(&p9->unknown_id_error, 0);
             s->window_changed = 0;
             atomic_exchange(&drain.errors, 0);
             if (got_frame) {
@@ -423,8 +423,7 @@ void *send_thread_func(void *arg) {
             break;  /* Exit send thread */
         }
         
-        if (p9->draw_error) {
-            p9->draw_error = 0;
+        if (atomic_exchange(&p9->draw_error, 0)) {
             draw->xor_enabled = 0;
             memset(s->prev_framebuf, 0, s->width * s->height * 4);
             do_full = 1;
@@ -465,8 +464,7 @@ void *send_thread_func(void *arg) {
             do_full = 1;
         }
         
-        if (p9->unknown_id_error) {
-            p9->unknown_id_error = 0;
+        if (atomic_exchange(&p9->unknown_id_error, 0)) {
             if (draw_suspended) {
                 /* Already suspended — don't hammer relookup, just wait
                  * for the next window_changed event to try again. */
