@@ -141,6 +141,24 @@ static void toplevel_request_maximize(struct wl_listener *l, void *d) {
     wlr_log(WLR_INFO, "Maximize acknowledged");
 }
 
+static void toplevel_request_minimize(struct wl_listener *l, void *d) {
+    struct toplevel *tl = wl_container_of(l, tl, request_minimize);
+    (void)d;
+    
+    if (!tl->xdg || !tl->xdg->base->initialized) return;
+    
+    /* Headless compositor has no taskbar — minimize is unrecoverable.
+     * Re-assert activated + maximized state and schedule a configure
+     * so the client knows we refused and keeps rendering. Without this,
+     * clients (Firefox, Chromium, etc.) throttle frame commits after
+     * calling set_minimized, causing a visible hang until something
+     * else (e.g., resize) triggers a new configure. */
+    wlr_xdg_toplevel_set_activated(tl->xdg, true);
+    wlr_xdg_toplevel_set_maximized(tl->xdg, true);
+    wlr_xdg_surface_schedule_configure(tl->xdg->base);
+    wlr_log(WLR_INFO, "Minimize request denied — re-asserted active state");
+}
+
 /*
  * Handle xdg_toplevel destruction.
  *
@@ -156,6 +174,7 @@ static void toplevel_xdg_destroy(struct wl_listener *l, void *d) {
     
     wl_list_remove(&tl->request_fullscreen.link);
     wl_list_remove(&tl->request_maximize.link);
+    wl_list_remove(&tl->request_minimize.link);
     wl_list_remove(&tl->xdg_destroy.link);
     tl->xdg = NULL;
 }
@@ -235,6 +254,7 @@ static void toplevel_destroy(struct wl_listener *l, void *d) {
     if (tl->xdg) {
         wl_list_remove(&tl->request_fullscreen.link);
         wl_list_remove(&tl->request_maximize.link);
+        wl_list_remove(&tl->request_minimize.link);
         wl_list_remove(&tl->xdg_destroy.link);
     }
     
@@ -314,6 +334,9 @@ void new_toplevel(struct wl_listener *l, void *d) {
     
     tl->request_maximize.notify = toplevel_request_maximize;
     wl_signal_add(&xdg->events.request_maximize, &tl->request_maximize);
+    
+    tl->request_minimize.notify = toplevel_request_minimize;
+    wl_signal_add(&xdg->events.request_minimize, &tl->request_minimize);
     
     wlr_log(WLR_INFO, "XDG surface scene tree created at (0,0)");
 }

@@ -227,6 +227,7 @@ struct toplevel {
     struct wl_listener xdg_destroy; /* Cleanup on xdg_toplevel destroy (fires first) */
     struct wl_listener request_fullscreen;  /* Fullscreen state toggle */
     struct wl_listener request_maximize;    /* Maximize state toggle */
+    struct wl_listener request_minimize;    /* Minimize blocked (no restore path) */
     struct wl_list subsurfaces;     /* List of subsurface_track */
     struct server *server;
     bool configured;                /* Have we sent initial configure? */

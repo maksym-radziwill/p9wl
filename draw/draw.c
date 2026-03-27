@@ -19,19 +19,6 @@
 #include "../p9/p9.h"
 #include "send.h"  /* For TILE_SIZE */
 
-/*
- * FRACTIONAL SCALING SUPPORT
- *
- * When DRAW_SCALE > 1.0, the compositor runs at logical resolution
- * and 9front scales up to physical resolution using the 'a' command.
- *
- * Example: DRAW_SCALE = 1.5
- *   Physical window: 1552 x 880
- *   Logical source:  1035 x 587 (physical / 1.5)
- *   Bandwidth savings: sends 44% as many pixels (1/1.5²)
- *
- * Set to 1.0 for no scaling (1:1 pixel mapping).
- */
 #define DRAW_SCALE 1.0f
 
 /* Round up to nearest multiple of TILE_SIZE so every tile is a full 16×16.
@@ -547,7 +534,6 @@ int init_draw(struct server *s) {
     /* Compute logical dimensions for the source image.
      * Physical dimensions: draw->visible_width x draw->visible_height
      * Logical dimensions: physical / DRAW_SCALE, then padded to tile alignment
-     * The 'a' command will scale from logical to physical.
      */
     int logical_width = (int)(draw->visible_width / DRAW_SCALE + 0.5f);
     int logical_height = (int)(draw->visible_height / DRAW_SCALE + 0.5f);
@@ -557,11 +543,6 @@ int init_draw(struct server *s) {
     logical_height = TILE_ALIGN_UP(logical_height);
     if (logical_width < MIN_ALIGNED_DIM) logical_width = MIN_ALIGNED_DIM;
     if (logical_height < MIN_ALIGNED_DIM) logical_height = MIN_ALIGNED_DIM;
-    
-    if (DRAW_SCALE != 1.0f) {
-        wlr_log(WLR_INFO, "Fractional scaling: physical %dx%d -> logical %dx%d (scale=%.2f)",
-                draw->width, draw->height, logical_width, logical_height, DRAW_SCALE);
-    }
     
     /* Store logical dimensions for use by send.c */
     draw->logical_width = logical_width;
