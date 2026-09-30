@@ -1,19 +1,8 @@
-/* 
- * main.c - Standalone Wayland-to-RDP Compositor Entry Point
- *
- * Headless wlroots initialization, FreeRDP streaming backend startup,
- * and main event loop without external 9P dependencies.
- */
-
 #define _POSIX_C_SOURCE 200809L
 
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-
-#include <winpr/wlog.h>
-#include <winpr/winpr.h>
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +12,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <pthread.h>
+#include <fcntl.h>
 
 #include <wayland-server-core.h>
 #include <wlr/backend.h>
@@ -51,11 +41,39 @@
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
 #include "types.h"
+#include <winpr/wlog.h>
+#include <winpr/winpr.h>
 
 #define TAG FREERDP_TAG("p9wl.main")
-
 #define DEFAULT_WIDTH 1280
 #define DEFAULT_HEIGHT 800
+
+static void *browser_input_thread(void *arg) {
+    struct server *s = arg;
+    mkfifo("/tmp/p9wl_input.fifo", 0666);
+    while (s->running) {
+        int fd = open("/tmp/p9wl_input.fifo", O_RDONLY);
+        if (fd < 0) {
+            usleep(100000);
+            continue;
+        }
+        char buf[256];
+        int n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (n > 0) {
+            buf[n] = '\0';
+            int x, y, buttons, rune, pressed;
+            if (sscanf(buf, "MOUSE %d %d %d", &x, &y, &buttons) == 3) {
+                struct input_event ev = { .type = INPUT_MOUSE, .mouse = { .x = x, .y = y, .buttons = buttons } };
+                input_queue_push(&s->input_queue, &ev);
+            } else if (sscanf(buf, "KEY %d %d", &rune, &pressed) == 2) {
+                struct input_event ev = { .type = INPUT_KEY, .key = { .rune = rune, .pressed = pressed } };
+                input_queue_push(&s->input_queue, &ev);
+            }
+        }
+    }
+    return NULL;
+}
 
 static int output_poll_timer(void *data) {
     wlr_log(WLR_INFO, "MAIN_DEBUG: output_poll_timer called");
@@ -252,7 +270,6 @@ int main(int argc, char *argv[]) {
     signal(SIGPIPE, SIG_IGN);
     wlr_log_init(log_level, NULL);
     
-    /* Initialize FreeRDP WLog system (WinPR 3 compatible) */
     WLog_SetLogLevel(WLog_Get(TAG), WLOG_INFO);
 
     struct server s = {0};
@@ -287,9 +304,11 @@ int main(int argc, char *argv[]) {
 
     input_queue_init(&s.input_queue);
 
-    /* Start FreeRDP streaming thread */
     wlr_log(WLR_INFO, "MAIN_DEBUG: Starting FreeRDP send thread");
     pthread_create(&s.send_thread, NULL, send_thread_func, &s);
+
+    pthread_t browser_input_th;
+    pthread_create(&browser_input_th, NULL, browser_input_thread, &s);
 
     if (init_wayland(&s) < 0)
         goto cleanup;

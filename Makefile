@@ -1,45 +1,47 @@
-### Build: make
-### Clean: make clean
-
 CC = gcc
-CFLAGS = -O3 -Wall -Wextra -DWLR_USE_UNSTABLE -I. -Isrc -include sys/types.h -include sys/select.h -include unistd.h
+CFLAGS = -O3 -Wall -Wextra -DWLR_USE_UNSTABLE -Isrc -I. -include sys/types.h -include sys/select.h -include unistd.h
 CFLAGS += $(shell pkg-config --cflags wlroots-0.19 wayland-server xkbcommon pixman-1 freerdp3 winpr3)
 CFLAGS += -g -O0
 
 LDFLAGS = $(shell pkg-config --libs wlroots-0.19 wayland-server xkbcommon pixman-1 freerdp3 winpr3)
 LDFLAGS += -lpthread -lm -lssl -lcrypto -lfftw3f
 
-SRCS = main.c \
-       input/input.c \
-       input/keymap.c \
-       draw/draw.c \
-       draw/draw_cmd.c \
-       draw/compress.c \
-       draw/scroll.c \
-       draw/send.c \
-       input/clipboard.c \
-       wayland/focus_manager.c \
-       wayland/popup.c \
-       wayland/toplevel.c \
-       wayland/wl_input.c \
-       wayland/output.c \
-       wayland/client.c \
-       draw/phase_correlate.c \
-       draw/parallel.c
+SRCS = src/main.c \
+       src/input.c \
+       src/keymap.c \
+       src/draw.c \
+       src/draw_cmd.c \
+       src/compress.c \
+       src/scroll.c \
+       src/send.c \
+       src/clipboard.c \
+       src/focus_manager.c \
+       src/popup.c \
+       src/toplevel.c \
+       src/wl_input.c \
+       src/output.c \
+       src/client.c \
+       src/phase_correlate.c \
+       src/parallel.c \
+       src/tls.c
 
 OBJS = $(SRCS:.c=.o)
-HDRS = types.h
+HDRS = src/types.h xdg-shell-protocol.h
 TARGET = p9wl-rdp-alpine
 
 .PHONY: all clean
 
-all: $(TARGET)
+all: xdg-shell-protocol.h $(TARGET)
+
+xdg-shell-protocol.h:
+	WAYLAND_PROTOCOLS_DIR=$$(pkg-config --variable=pkgdatadir wayland-protocols); \
+	wayland-scanner server-header $$WAYLAND_PROTOCOLS_DIR/stable/xdg-shell/xdg-shell.xml xdg-shell-protocol.h
 
 $(TARGET): $(OBJS)
 	$(CC) -o $@ $(OBJS) $(LDFLAGS)
 
-%.o: %.c $(HDRS)
+src/%.o: src/%.c $(HDRS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(TARGET) xdg-shell-protocol.h

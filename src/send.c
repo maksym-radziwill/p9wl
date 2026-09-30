@@ -235,6 +235,22 @@ static void p9wl_peer_context_free(freerdp_peer *peer, rdpContext *context) {
     (void)context;
 }
 
+static BOOL p9wl_peer_mouse_event(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y) {
+    (void)input;
+    if (rdp_ctx.server) {
+        rdp_handle_mouse(rdp_ctx.server, flags, x, y);
+    }
+    return TRUE;
+}
+
+static BOOL p9wl_peer_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code) {
+    (void)input;
+    if (rdp_ctx.server) {
+        rdp_handle_keyboard(rdp_ctx.server, flags, code);
+    }
+    return TRUE;
+}
+
 static BOOL p9wl_peer_post_connect(freerdp_peer *peer) {
     wlr_log(WLR_INFO, "RDP peer post-connect handshake complete");    
     rdpSettings *settings = peer->context->settings;
@@ -248,7 +264,6 @@ static BOOL p9wl_peer_post_connect(freerdp_peer *peer) {
         rdp_ctx.server->frame_dirty = 1;
         pthread_mutex_unlock(&rdp_ctx.server->send_lock);
 
-        // Queue a frame so the send thread immediately wakes up and processes it
         send_frame(rdp_ctx.server);
 
         if (rdp_ctx.server->output) {
@@ -303,6 +318,10 @@ static BOOL rdp_peer_accepted_callback(freerdp_listener *listener, freerdp_peer 
     }
 
     peer->PostConnect = p9wl_peer_post_connect;
+    if (peer->context && peer->context->input) {
+        peer->context->input->MouseEvent = p9wl_peer_mouse_event;
+        peer->context->input->KeyboardEvent = p9wl_peer_keyboard_event;
+    }
 
     rdp_ctx.instance = peer->context->instance;
     rdp_ctx.context = peer->context;
@@ -467,15 +486,6 @@ void *send_thread_func(void *arg) {
         
         if (send_buf && !initial_dump_done) {
             dump_framebuffer_ppm("/app/compositor_frame.ppm", send_buf, s->width, s->height);
-            wlr_log(WLR_INFO, "SCREENSHOT_DEBUG: Framebuffer successfully captured and written to /app/compositor_frame.ppm");
-            
-            uint32_t log_t = now_ms();
-            FILE *log_f = fopen("/app/send_events.log", "a");
-            if (log_f) {
-                fprintf(log_f, "[%u] FRAME_CAPTURE: width=%d height=%d\n", log_t, s->width, s->height);
-                fclose(log_f);
-            }
-
             initial_dump_done = 1;
         }
 
@@ -497,7 +507,6 @@ void *send_thread_func(void *arg) {
         if (atomic_load(&rdp_ctx.broken)) {
             if (!draw_suspended) {
                 draw_suspended = 1;
-                wlr_log(WLR_ERROR, "send: RDP channel stream broken, shutting down");
                 s->running = 0;
                 struct input_event wakeup = { .type = INPUT_WAKEUP };
                 input_queue_push(&s->input_queue, &wakeup);

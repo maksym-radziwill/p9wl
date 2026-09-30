@@ -1,21 +1,2 @@
 1. `docker build -t p9wl-rdp .`
-2. `docker run -itd --security-opt seccomp=unconfined -p 3389:3389 p9wl-rdp`
-3. docker exec: `firefox --no-sandbox`
-4. TODO: rdp client connection issues
-
---- 
-```zsh
-brew install doxygen graphviz && doxygen -g 
-
-sed -i.bak \
-  -e 's/^[# ]*HAVE_DOT[ ]*=.*/HAVE_DOT = YES/' \
-  -e 's/^[# ]*CALL_GRAPH[ ]*=.*/CALL_GRAPH = YES/' \
-  -e 's/^[# ]*CALLER_GRAPH[ ]*=.*/CALLER_GRAPH = YES/' \
-  -e 's|^[# ]*DOT_PATH[ ]*=.*|DOT_PATH = /opt/homebrew/bin|' \
-  -e 's/^[# ]*INPUT[ ]*=.*/INPUT = ./' \
-  -e 's/^[# ]*RECURSIVE[ ]*=.*/RECURSIVE = YES/' \
-Doxyfile
-
-doxygen Doxyfile
-```
-![](graphviz.png)
+2. `docker run -itd --security-opt seccomp=unconfined -p 3389:3389 -p 8080:8080 p9wl-rdp`
